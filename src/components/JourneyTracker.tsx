@@ -64,8 +64,18 @@ function computeIntakeSteps(state: IntakeState, assumeCompleteFallback: boolean)
     state.extraction?.accountNumber ||
     state.confirmed
   );
-  const hasDocument = !!(state.noticeFileName || state.extraction);
-  const hasReview = !!state.extractionConfirmed;
+  // aiReviewReached also satisfies "Upload Documents" — upload is explicitly
+  // optional (see case 3's message below), and a user who chose "Continue to
+  // AI Review" instead has, by definition, moved past this step, even though
+  // they never actually uploaded anything for hasDocument's own signals to
+  // pick up.
+  const hasDocument = !!(state.noticeFileName || state.extraction || state.aiReviewReached);
+  // extractionConfirmed only gets set by document-review.tsx's confirm step,
+  // which a no-upload path never visits — aiReviewReached is what actually
+  // fires for that path, once the user is really on /ai-report (see its own
+  // comment in intake-store.ts). Without this, "AI Review" stayed stuck
+  // incomplete forever for anyone who skipped the optional upload.
+  const hasReview = !!(state.extractionConfirmed || state.aiReviewReached);
   return [hasStarted, hasCounty, hasProperty, hasDocument, hasReview].map(
     (done) => done || assumeCompleteFallback,
   );

@@ -262,11 +262,16 @@ function Report() {
 
   useEffect(() => {
     const s = readIntake();
-    setState(s);
     if (!s.confirmed) {
+      setState(s);
       nav({ to: "/intake" });
       return;
     }
+    // Real "reached AI Review" signal for JourneyTracker (see aiReviewReached's
+    // own comment in intake-store.ts) — set once, here, rather than every
+    // render, since updateIntake's write is otherwise harmless but pointless
+    // to repeat.
+    setState(s.aiReviewReached ? s : updateIntake({ aiReviewReached: true }));
     const t = setTimeout(() => setAnalyzing(false), 1800);
     return () => clearTimeout(t);
   }, [nav]);
