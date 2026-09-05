@@ -14,7 +14,6 @@ import {
   getEntitledPropertyIds,
   bracketPropertyCount,
   planUsesPerPropertyEntitlement,
-  openBillingPortal,
   type BillingInfo,
 } from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
@@ -51,7 +50,6 @@ function Properties() {
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
   const [billing, setBilling] = useState<BillingInfo | null>(null);
-  const [openingPortalFor, setOpeningPortalFor] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -114,28 +112,6 @@ function Properties() {
   function openAiReport(p: PropertyRecord) {
     updateIntake(buildAiReportIntakePatch(p));
     navigate({ to: "/ai-report" });
-  }
-
-  // Real payment action for a "Not Paid" property — an active subscription's
-  // paid property count is a bracket QUANTITY on that one Stripe
-  // subscription, not a per-property charge, so there's no per-property
-  // checkout to start. Stripe's own Customer Portal (the same one
-  // pricing.tsx's "Manage Subscription" already opens) is the real place a
-  // subscriber increases that quantity and pays the resulting prorated
-  // amount — this just gets them there in one click from the property
-  // itself instead of routing through /pricing first.
-  async function handlePayForProperty(propertyId: string) {
-    setOpeningPortalFor(propertyId);
-    try {
-      await openBillingPortal();
-      // openBillingPortal() redirects the page on success — nothing left to
-      // reset here; only the catch path needs to release the loading state.
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Could not open the billing portal. Please try again.",
-      );
-      setOpeningPortalFor(null);
-    }
   }
 
   return (
@@ -281,39 +257,20 @@ function Properties() {
                           View Case
                         </Link>
                         {canReFile && (
-                          <button
-                            onClick={() =>
-                              isPaid ? setAuthorizingProperty(p) : handlePayForProperty(p.id)
-                            }
-                            className={`btn-primary btn-primary-hover ${!isPaid ? "opacity-50" : ""}`}
-                            title={
-                              !isPaid
-                                ? "This property isn't covered by your plan yet — click to pay and add it."
-                                : undefined
-                            }
-                          >
-                            {!isPaid && openingPortalFor === p.id
-                              ? "Redirecting to payment…"
-                              : `Re-file for ${CURRENT_YEAR}`}
-                          </button>
+                          <ProtestActionButton
+                            isPaid={isPaid}
+                            label={`Re-file for ${CURRENT_YEAR}`}
+                            primary
+                            onAuthorize={() => setAuthorizingProperty(p)}
+                          />
                         )}
                       </>
                     ) : (
-                      <button
-                        onClick={() =>
-                          isPaid ? setAuthorizingProperty(p) : handlePayForProperty(p.id)
-                        }
-                        className={`btn-outline ${!isPaid ? "opacity-50" : ""}`}
-                        title={
-                          !isPaid
-                            ? "This property isn't covered by your plan yet — click to pay and add it."
-                            : undefined
-                        }
-                      >
-                        {!isPaid && openingPortalFor === p.id
-                          ? "Redirecting to payment…"
-                          : "Request Protest Filing"}
-                      </button>
+                      <ProtestActionButton
+                        isPaid={isPaid}
+                        label="Request Protest Filing"
+                        onAuthorize={() => setAuthorizingProperty(p)}
+                      />
                     )}
                     <button
                       disabled={deletingId === p.id}
@@ -420,6 +377,47 @@ function ActionStatusBadge({
 function PaymentStatusBadge({ paid }: { paid: boolean }) {
   return (
     <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
+  );
+}
+
+// Request Protest Filing / Re-file, gated on isPaid. Renders grayed out (not
+// a true `disabled` button — still a real, clickable link) when the
+// property isn't paid for: a bracket-priced subscription's paid property
+// count is a QUANTITY, not tied to any specific price/bracket, so there's no
+// way to know from here which of the 6 real prices (2 tiers × 3 value
+// brackets) this specific property should be added under, or to send anyone
+// straight into Stripe with that already decided — Pricing is where the
+// customer actually sees and picks their tier/bracket themselves. Opens in
+// a new tab so the property list stays put underneath.
+function ProtestActionButton({
+  isPaid,
+  label,
+  onAuthorize,
+  primary,
+}: {
+  isPaid: boolean;
+  label: string;
+  onAuthorize: () => void;
+  primary?: boolean;
+}) {
+  const className = `${primary ? "btn-primary btn-primary-hover" : "btn-outline"} ${isPaid ? "" : "opacity-50"}`;
+  if (!isPaid) {
+    return (
+      <Link
+        to="/pricing"
+        target="_blank"
+        rel="noopener noreferrer"
+        className={className}
+        title="This property isn't covered by your plan yet — opens Pricing in a new tab so you can add it."
+      >
+        {label}
+      </Link>
+    );
+  }
+  return (
+    <button onClick={onAuthorize} className={className}>
+      {label}
+    </button>
   );
 }
 
