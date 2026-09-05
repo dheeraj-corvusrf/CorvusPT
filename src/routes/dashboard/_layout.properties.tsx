@@ -34,6 +34,14 @@ import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
 import { ExternalLink } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
+  // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
+  // page know it just landed back from a real Stripe checkout, so it can
+  // poll for the subscription actually going active (see the effect below)
+  // instead of only showing whatever it fetched at the exact instant the
+  // page loaded.
+  validateSearch: (search: Record<string, unknown>): { checkout?: "success" } => ({
+    checkout: search.checkout === "success" ? "success" : undefined,
+  }),
   component: Properties,
 });
 
@@ -45,6 +53,7 @@ const TIER_LABEL: Record<Tier, string> = {
 
 function Properties() {
   const navigate = useNavigate();
+  const { checkout } = Route.useSearch();
   const { user } = useAuth();
   const [properties, setProperties] = useState<PropertyRecord[]>([]);
   const [propertiesLoading, setPropertiesLoading] = useState(true);
@@ -78,6 +87,39 @@ function Properties() {
       .then(setBilling)
       .catch((err) => console.error("Could not load billing info:", err));
   }, [user]);
+
+  // Real race, not a bug: Stripe redirects the browser to successPath the
+  // instant checkout completes, but the webhook that actually flips a
+  // property's subscriptionStatus to "active" (stripe-webhook/index.ts) is a
+  // separate, slightly-delayed server-to-server call — so the very first
+  // fetch above can land just before it, showing "Not Paid" for a property
+  // that really was just paid for. Landing here with ?checkout=success (set
+  // by startPropertyCheckout's successPath) re-fetches a few times over the
+  // next several seconds to catch up, rather than requiring a manual
+  // refresh. Clears the query param once done so a later plain page
+  // reload/revisit never re-triggers this.
+  useEffect(() => {
+    if (!user || checkout !== "success") return;
+    let cancelled = false;
+    const delaysMs = [1500, 3000, 5000, 8000];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const delay of delaysMs) {
+      timers.push(
+        setTimeout(() => {
+          if (cancelled) return;
+          listProperties(user.id)
+            .then(setProperties)
+            .catch((err) => console.error("Could not refresh properties:", err));
+        }, delay),
+      );
+    }
+    navigate({ to: ".", search: (prev) => ({ ...prev, checkout: undefined }), replace: true });
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, checkout]);
 
   // Beta is a free, unlimited grant (see handle_new_user() in schema.sql) —
   // never gated by a per-property subscription. Every other plan reads each
