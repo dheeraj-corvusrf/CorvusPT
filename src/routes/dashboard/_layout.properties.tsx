@@ -14,6 +14,7 @@ import {
   getEntitledPropertyIds,
   bracketPropertyCount,
   planUsesPerPropertyEntitlement,
+  openBillingPortal,
   type BillingInfo,
 } from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
@@ -50,6 +51,7 @@ function Properties() {
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
   const [billing, setBilling] = useState<BillingInfo | null>(null);
+  const [openingPortalFor, setOpeningPortalFor] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -75,11 +77,10 @@ function Properties() {
   // `paidPropertyCount` properties, by createdAt). Only meaningful for the
   // two real bracket-priced tiers (planUsesPerPropertyEntitlement) — beta
   // and the free/legacy plans have no such per-property purchase to check
-  // against, so `entitledIds` stays null and no Paid/Not Paid badge shows
-  // for those, rather than a misleading answer either way. Shown regardless
-  // of whether the admin-toggleable enforcement setting is actually on
-  // (see app-settings.ts) — this is honest information about what the
-  // subscription covers, not a statement about what's currently blocked.
+  // against, so `entitledIds` stays null: no Paid/Not Paid badge, and
+  // Request Protest Filing/Re-file stay unrestricted for those. Unconditional
+  // otherwise (no admin toggle) — drives both the badge below and the real
+  // gate on Request Protest Filing/Re-file (see isPaid in the property map).
   const showsPaymentStatus = !!billing && planUsesPerPropertyEntitlement(billing.plan);
   const entitledIds = showsPaymentStatus
     ? getEntitledPropertyIds(properties, bracketPropertyCount(billing!.subscriptionBrackets))
@@ -113,6 +114,28 @@ function Properties() {
   function openAiReport(p: PropertyRecord) {
     updateIntake(buildAiReportIntakePatch(p));
     navigate({ to: "/ai-report" });
+  }
+
+  // Real payment action for a "Not Paid" property — an active subscription's
+  // paid property count is a bracket QUANTITY on that one Stripe
+  // subscription, not a per-property charge, so there's no per-property
+  // checkout to start. Stripe's own Customer Portal (the same one
+  // pricing.tsx's "Manage Subscription" already opens) is the real place a
+  // subscriber increases that quantity and pays the resulting prorated
+  // amount — this just gets them there in one click from the property
+  // itself instead of routing through /pricing first.
+  async function handlePayForProperty(propertyId: string) {
+    setOpeningPortalFor(propertyId);
+    try {
+      await openBillingPortal();
+      // openBillingPortal() redirects the page on success — nothing left to
+      // reset here; only the catch path needs to release the loading state.
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not open the billing portal. Please try again.",
+      );
+      setOpeningPortalFor(null);
+    }
   }
 
   return (
@@ -188,6 +211,10 @@ function Properties() {
               const recordUrl = cad
                 ? getCadRecordUrl({ cad, accountNumber: p.accountNumber })
                 : null;
+              // No entitlement cap applies at all (beta/free/legacy plans —
+              // see showsPaymentStatus above) counts as paid: there's
+              // nothing to gate. Otherwise, real per-property coverage.
+              const isPaid = !entitledIds || entitledIds.has(p.id);
               return (
                 <div
                   key={p.id}
@@ -255,16 +282,37 @@ function Properties() {
                         </Link>
                         {canReFile && (
                           <button
-                            onClick={() => setAuthorizingProperty(p)}
-                            className="btn-primary btn-primary-hover"
+                            onClick={() =>
+                              isPaid ? setAuthorizingProperty(p) : handlePayForProperty(p.id)
+                            }
+                            className={`btn-primary btn-primary-hover ${!isPaid ? "opacity-50" : ""}`}
+                            title={
+                              !isPaid
+                                ? "This property isn't covered by your plan yet — click to pay and add it."
+                                : undefined
+                            }
                           >
-                            Re-file for {CURRENT_YEAR}
+                            {!isPaid && openingPortalFor === p.id
+                              ? "Redirecting to payment…"
+                              : `Re-file for ${CURRENT_YEAR}`}
                           </button>
                         )}
                       </>
                     ) : (
-                      <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
-                        Request Protest Filing
+                      <button
+                        onClick={() =>
+                          isPaid ? setAuthorizingProperty(p) : handlePayForProperty(p.id)
+                        }
+                        className={`btn-outline ${!isPaid ? "opacity-50" : ""}`}
+                        title={
+                          !isPaid
+                            ? "This property isn't covered by your plan yet — click to pay and add it."
+                            : undefined
+                        }
+                      >
+                        {!isPaid && openingPortalFor === p.id
+                          ? "Redirecting to payment…"
+                          : "Request Protest Filing"}
                       </button>
                     )}
                     <button
