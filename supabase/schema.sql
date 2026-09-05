@@ -189,6 +189,32 @@ create policy "Users can update their own properties"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- One real, independent Stripe subscription per PROPERTY (not one shared
+-- subscription per customer with bracket quantities — see the now-legacy
+-- profiles.qty_*/subscription_* columns further down, no longer written).
+-- Never client-writable — see the column-level UPDATE grant below, which
+-- deliberately omits all 6 of these; only stripe-webhook (service role,
+-- bypasses RLS/grants entirely) ever sets them.
+alter table public.properties add column if not exists stripe_subscription_id text;
+alter table public.properties add column if not exists subscription_status text;
+alter table public.properties add column if not exists plan_tier text;
+alter table public.properties add column if not exists value_bracket text;
+alter table public.properties add column if not exists cancel_at_period_end boolean not null default false;
+alter table public.properties add column if not exists cancel_at timestamptz;
+
+-- RLS above is row-level only — without this, the plain "Users can update
+-- their own properties" policy would let a client set subscription_status
+-- to 'active' directly from the browser console and grant themselves paid
+-- access without ever paying. Column-level UPDATE grants are Postgres's own
+-- mechanism for this (same pattern profiles.plan/referral_code already use
+-- below) — every column a client legitimately writes via properties.ts is
+-- listed here; the 6 subscription columns above are deliberately absent.
+revoke update on public.properties from authenticated;
+grant update (
+  cad, address, account_number, owner_name, tax_year, protest_deadline,
+  payment_due_date, tax_amount_due, paid_at, estimated_savings, savings_basis
+) on public.properties to authenticated;
+
 -- Admin panel support: a manual is_admin flag and a manual plan field (no real
 -- billing — matches the 3 tiers in src/routes/pricing.tsx).
 alter table public.profiles add column if not exists is_admin boolean not null default false;
@@ -203,8 +229,10 @@ alter table public.profiles drop constraint if exists profiles_plan_check;
 alter table public.profiles add constraint profiles_plan_check
   check (plan in ('free_ai_review', 'ai_report', 'managed_protest', 'owner_managed', 'corvusrf_managed', 'beta'));
 
--- How many properties the active subscription covers (Stripe line-item quantity) —
--- pricing is per-property, so this drives what "N properties on your plan" means.
+-- LEGACY — described the one shared subscription's line-item quantity from
+-- before every property got its own independent subscription (see
+-- properties.stripe_subscription_id/subscription_status further up).
+-- No longer written by stripe-webhook; left in place, unused.
 alter table public.profiles add column if not exists subscription_quantity integer not null default 1;
 
 -- security definer bypasses RLS internally, so it can safely be referenced from RLS
@@ -323,18 +351,21 @@ create policy "Admins can delete invited users"
 -- Stripe billing: the webhook (supabase/functions/stripe-webhook) writes plan and
 -- these two ids; the admin panel's manual plan dropdown still works unchanged since
 -- it edits the same `plan` column.
+--
+-- stripe_customer_id is still real and actively written — one Stripe
+-- Customer per user, same as before, just now with potentially many
+-- subscriptions under it (one per property) instead of one shared
+-- subscription. stripe_subscription_id/subscription_status/
+-- cancel_at_period_end/cancel_at below it are LEGACY: they described that
+-- one shared subscription and are no longer written by stripe-webhook —
+-- the equivalent, real, per-property versions now live on public.properties
+-- itself (see its own stripe_subscription_id/subscription_status/
+-- cancel_at_period_end/cancel_at further up). Left in place rather than
+-- dropped since no migration was needed (no real customers predate this),
+-- but nothing reads or writes them going forward.
 alter table public.profiles add column if not exists stripe_customer_id text;
 alter table public.profiles add column if not exists stripe_subscription_id text;
-
--- Mirrors Stripe's own subscription status verbatim (active/past_due/unpaid/canceled/
--- etc.) — separate from `plan` so the UI can show a payment-problem banner without
--- prematurely revoking access; Stripe's own dunning schedule governs actual expiry.
 alter table public.profiles add column if not exists subscription_status text;
-
--- Stripe's Customer Portal "cancel" flow defaults to canceling at the end of the
--- current billing period rather than immediately — the subscription's `status` stays
--- "active" the whole time, so without tracking this separately a scheduled
--- cancellation is invisible in the app until it actually takes effect.
 alter table public.profiles add column if not exists cancel_at_period_end boolean not null default false;
 alter table public.profiles add column if not exists cancel_at timestamptz;
 
@@ -1036,17 +1067,12 @@ create policy "Admins can view all tax bills"
   on public.tax_bills for select
   using (public.is_admin());
 
--- Property-value-tiered pricing: each paid tier now has 3 price points
--- (per src/lib/billing.ts's PropertyValueBracket) instead of one flat rate,
--- so a subscription's property count is tracked per bracket rather than as
--- a single number. subscription_quantity (above) is kept as the sum of the
--- three, unchanged, so existing "N properties" displays don't need to know
--- about brackets at all — only the checkout/pricing UI does.
+-- LEGACY, same reason as subscription_quantity above — each property's own
+-- real value_bracket (public.properties) replaced this per-account
+-- breakdown once every property got its own subscription. Left in place,
+-- unused, no longer written by stripe-webhook.
 alter table public.profiles add column if not exists qty_under_2m integer not null default 0;
 alter table public.profiles add column if not exists qty_2m_10m integer not null default 0;
--- Despite the name, this is now the capped $10M-$25M bracket, not open-ended —
--- anything above $25M moved to billing.ts's CUSTOM_TIER, which has no quantity
--- or checkout at all (contact-us only), so it needs no column here.
 alter table public.profiles add column if not exists qty_over_10m integer not null default 0;
 
 -- "Add Ownerships" — an LLC/ownership name the user has searched and added

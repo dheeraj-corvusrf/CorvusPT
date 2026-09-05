@@ -1,8 +1,13 @@
-// Deploy via CLI: `supabase functions deploy resume-subscription`.
-// Undoes a scheduled "cancel at period end" on one property's own
-// subscription — lets a user who canceled change their mind with one click,
-// instead of having to go into the full Stripe Customer Portal to find the
-// "renew subscription" option buried in there.
+// Deploy via CLI: `supabase functions deploy cancel-property-subscription`.
+// Requires STRIPE_SECRET_KEY.
+//
+// Replaces the old bracket-quantity-decrementing remove-property-from-plan —
+// trivial now that every property has its own independent Stripe
+// subscription (see create-checkout-session): cancels exactly this
+// property's subscription, unambiguously, with no guessing about which
+// property actually loses coverage. The real profiles.plan/properties.
+// subscription_status sync happens via the existing customer.subscription.
+// deleted webhook (stripe-webhook/index.ts), not duplicated here.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
 
@@ -47,6 +52,9 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+
+    // Ownership check via .eq("user_id", user.id) — never trust propertyId
+    // alone; a caller can only ever cancel their own property's subscription.
     const { data: property } = await adminClient
       .from("properties")
       .select("id, stripe_subscription_id")
@@ -54,24 +62,14 @@ Deno.serve(async (req: Request) => {
       .eq("user_id", user.id)
       .maybeSingle();
     if (!property?.stripe_subscription_id) {
-      return new Response(JSON.stringify({ error: "No subscription found for this property" }), {
-        status: 400,
-        headers: corsHeaders,
-      });
+      return new Response(
+        JSON.stringify({ error: "This property has no active subscription to cancel." }),
+        { status: 400, headers: corsHeaders },
+      );
     }
 
     const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
-    await stripe.subscriptions.update(property.stripe_subscription_id, {
-      cancel_at_period_end: false,
-    });
-
-    // Update immediately rather than waiting on the customer.subscription.updated
-    // webhook round trip, so the UI reflects this right away; the webhook will also
-    // confirm the same values when it arrives (idempotent, not a conflict).
-    await adminClient
-      .from("properties")
-      .update({ cancel_at_period_end: false, cancel_at: null })
-      .eq("id", propertyId);
+    await stripe.subscriptions.cancel(property.stripe_subscription_id);
 
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: corsHeaders });
   } catch (err) {

@@ -53,13 +53,7 @@ import {
 import { MODULES, type Module } from "@/lib/modules";
 import type { IconColor } from "@/lib/icon-colors";
 import { useAuth } from "@/lib/auth";
-import {
-  getMyBilling,
-  getEntitledPropertyIds,
-  planUsesPerPropertyEntitlement,
-  bracketPropertyCount,
-  type PlanValue,
-} from "@/lib/billing";
+import { getMyBilling, type PlanValue } from "@/lib/billing";
 import {
   getHealthScore,
   type HealthScoreResult,
@@ -97,12 +91,7 @@ import {
   applyValueTrendAdjustment,
 } from "@/lib/texas-tax-rates";
 import { CompsMap, useLeaflet } from "@/components/CompsMap";
-import {
-  findExistingProperty,
-  addProperty,
-  listProperties,
-  type PropertyRecord,
-} from "@/lib/properties";
+import { findExistingProperty, addProperty, type PropertyRecord } from "@/lib/properties";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -901,47 +890,27 @@ function Report() {
     getMyBilling(user.id)
       .then(({ plan }) => {
         setMyPlan(plan);
-        setHasFullAccess(
-          plan === "owner_managed" ||
-            plan === "corvusrf_managed" ||
-            plan === "ai_report" ||
-            plan === "managed_protest" ||
-            plan === "beta",
-        );
+        // beta and the legacy flat-rate plans (from before the per-property
+        // model existed) grant unconditional access from the account plan
+        // alone. owner_managed/corvusrf_managed no longer do — each
+        // property now has its own independent Stripe subscription (see
+        // src/lib/properties.ts), so access for those two plans is decided
+        // by the effect below instead, keyed on resolvedProperty's own
+        // subscriptionStatus.
+        setHasFullAccess(plan === "ai_report" || plan === "managed_protest" || plan === "beta");
       })
       .catch(() => setHasFullAccess(false))
       .finally(() => setBillingChecked(true));
   }, [user]);
 
-  // Per-property entitlement — narrows hasFullAccess back down for a
-  // bracket-priced plan (owner_managed/corvusrf_managed) whose paid
-  // property count doesn't actually cover THIS property, instead of the
-  // effect above's plan-only check letting one paid property's worth of
-  // subscription unlock every property the customer ever adds. Unconditional
-  // (the admin-toggleable kill switch this used to be gated on was removed
-  // per explicit product direction — "it should be completely enabled").
-  // Only ever narrows access (never widens it back past what the effect
-  // above already granted), and only once resolvedProperty is actually
-  // known — a property that hasn't been saved yet isn't consuming a paid
-  // slot either, so there's nothing real to check against yet.
+  // Per-property access — real and direct now that every property carries
+  // its own subscriptionStatus (no more account-level "oldest N properties"
+  // simulation to approximate it). Only ever widens access (never narrows
+  // what the effect above already granted for beta/legacy plans), and only
+  // once resolvedProperty is actually known.
   useEffect(() => {
-    if (!user || !myPlan || !resolvedProperty) return;
-    if (!planUsesPerPropertyEntitlement(myPlan)) return;
-    let cancelled = false;
-    Promise.all([getMyBilling(user.id), listProperties(user.id)])
-      .then(([{ subscriptionBrackets }, properties]) => {
-        if (cancelled) return;
-        const entitled = getEntitledPropertyIds(
-          properties,
-          bracketPropertyCount(subscriptionBrackets),
-        );
-        if (!entitled.has(resolvedProperty.id)) setHasFullAccess(false);
-      })
-      .catch((err) => console.error("Could not check per-property entitlement:", err));
-    return () => {
-      cancelled = true;
-    };
-  }, [user, myPlan, resolvedProperty]);
+    if (resolvedProperty?.subscriptionStatus === "active") setHasFullAccess(true);
+  }, [resolvedProperty]);
 
   // Auto-opens a module for a deep link (CaseDetailModal's "Upload Evidence —
   // Go to Module 8" button, ?openModule=evidence) — waits for billingChecked

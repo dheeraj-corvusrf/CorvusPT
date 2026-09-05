@@ -11,11 +11,13 @@ import {
 } from "@/lib/properties";
 import {
   getMyBilling,
-  getEntitledPropertyIds,
-  bracketPropertyCount,
-  planUsesPerPropertyEntitlement,
-  removePropertyFromPlan,
+  startPropertyCheckout,
+  cancelPropertySubscription,
+  bracketForValue,
+  formatMoney,
+  TIER_BRACKET_PRICES,
   type BillingInfo,
+  type Tier,
 } from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
@@ -36,6 +38,10 @@ export const Route = createFileRoute("/dashboard/_layout/properties")({
 });
 
 const CURRENT_YEAR = new Date().getFullYear();
+const TIER_LABEL: Record<Tier, string> = {
+  owner_managed: "Owner-Managed",
+  corvusrf_managed: "CorvusPT-Managed",
+};
 
 function Properties() {
   const navigate = useNavigate();
@@ -51,7 +57,8 @@ function Properties() {
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
   const [billing, setBilling] = useState<BillingInfo | null>(null);
-  const [removingFromPlanId, setRemovingFromPlanId] = useState<string | null>(null);
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -72,60 +79,51 @@ function Properties() {
       .catch((err) => console.error("Could not load billing info:", err));
   }, [user]);
 
-  // Which properties this subscription's paid bracket quantities actually
-  // cover — see getEntitledPropertyIds's own comment in billing.ts (oldest
-  // `paidPropertyCount` properties, by createdAt). Only meaningful for the
-  // two real bracket-priced tiers (planUsesPerPropertyEntitlement) — beta
-  // and the free/legacy plans have no such per-property purchase to check
-  // against, so `entitledIds` stays null: no Paid/Not Paid badge, and
-  // Request Protest Filing/Re-file stay unrestricted for those. Unconditional
-  // otherwise (no admin toggle) — drives both the badge below and the real
-  // gate on Request Protest Filing/Re-file (see isPaid in the property map).
-  const showsPaymentStatus = !!billing && planUsesPerPropertyEntitlement(billing.plan);
-  // The REAL Stripe-paid count — not entitledIds.size, which is capped at
-  // properties.length and so understates this whenever the subscription
-  // pays for more properties than the customer has actually added yet.
-  const paidCount = billing ? bracketPropertyCount(billing.subscriptionBrackets) : 0;
-  const entitledIds = showsPaymentStatus ? getEntitledPropertyIds(properties, paidCount) : null;
+  // Beta is a free, unlimited grant (see handle_new_user() in schema.sql) —
+  // never gated by a per-property subscription. Every other plan reads each
+  // property's OWN real subscriptionStatus directly (see isPaid in the
+  // property map below) — there's no account-level entitlement math anymore
+  // now that every property has its own independent Stripe subscription.
+  const isBeta = billing?.plan === "beta";
 
   useSavingsBackfill(properties, setProperties);
 
-  // Real "stop paying for this one" action (see remove-property-from-plan/
-  // index.ts) — reduces the paid count by one directly on the live Stripe
-  // subscription. Coverage is oldest-properties-first across the WHOLE
-  // account, not a specific slot tied to this property (see
-  // getEntitledPropertyIds's own comment in billing.ts), so reducing the
-  // count by one doesn't always mean THIS exact property loses coverage —
-  // simulated here (one fewer paid slot) so the confirmation is honest about
-  // which outcome will actually happen before the customer confirms.
-  async function handleRemoveFromPlan(p: PropertyRecord) {
-    const stillCoveredAfter = getEntitledPropertyIds(properties, Math.max(0, paidCount - 1)).has(
-      p.id,
-    );
-    const confirmed = window.confirm(
-      stillCoveredAfter
-        ? "This reduces your paid property count by one. Coverage applies to your oldest properties first, so a different (newer) property will lose coverage instead of this one. Continue?"
-        : `This removes paid coverage for ${p.address} — you'll no longer be charged for it, and it'll show as Not Paid. Continue?`,
-    );
-    if (!confirmed || !user) return;
-    setRemovingFromPlanId(p.id);
+  // Starts a real, one-click checkout for exactly this property — see
+  // startPropertyCheckout in billing.ts. Redirects the page to Stripe on
+  // success; only the failure path needs to release the loading state.
+  async function handleSubscribe(p: PropertyRecord, tier: Tier) {
+    setSubscribing({ propertyId: p.id, tier });
     try {
-      await removePropertyFromPlan(p.id);
-      toast.success("Your plan has been updated.");
-      // Real remaining count comes back from Stripe immediately; the DB's
-      // own profiles.qty_* sync lands a moment later via the existing
-      // customer.subscription.updated webhook, same lag any Stripe-driven
-      // change already has. Re-fetching billing here (rather than trusting
-      // the function's own return value to patch state by hand) keeps this
-      // page reading from the one real source, same as on initial load.
-      const fresh = await getMyBilling(user.id);
-      setBilling(fresh);
+      await startPropertyCheckout(p.id, tier);
     } catch (err) {
       toast.error(
-        err instanceof Error ? err.message : "Could not update your plan. Please try again.",
+        err instanceof Error ? err.message : "Could not start checkout. Please try again.",
       );
+      setSubscribing(null);
+    }
+  }
+
+  // Cancels exactly this property's own subscription — unambiguous now that
+  // each property has its own (see cancel-property-subscription/index.ts).
+  async function handleCancelSubscription(p: PropertyRecord) {
+    const confirmed = window.confirm(
+      `Cancel the subscription for ${p.address}? You'll lose paid AI Report access and the ability to request a new protest filing for this property.`,
+    );
+    if (!confirmed) return;
+    setCancelingId(p.id);
+    try {
+      await cancelPropertySubscription(p.id);
+      toast.success("Subscription canceled.");
+      // Reflects immediately rather than waiting on the customer.
+      // subscription.deleted webhook round trip; the webhook confirms the
+      // same value a moment later (idempotent, not a conflict).
+      setProperties((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, subscriptionStatus: "canceled" } : x)),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not cancel this subscription.");
     } finally {
-      setRemovingFromPlanId(null);
+      setCancelingId(null);
     }
   }
 
@@ -230,10 +228,10 @@ function Properties() {
               const recordUrl = cad
                 ? getCadRecordUrl({ cad, accountNumber: p.accountNumber })
                 : null;
-              // No entitlement cap applies at all (beta/free/legacy plans —
-              // see showsPaymentStatus above) counts as paid: there's
-              // nothing to gate. Otherwise, real per-property coverage.
-              const isPaid = !entitledIds || entitledIds.has(p.id);
+              // Beta bypasses per-property billing entirely; every other
+              // plan reads this exact property's own real subscription.
+              const isPaid = isBeta || p.subscriptionStatus === "active";
+              const bracket = bracketForValue(p.totalValue);
               return (
                 <div
                   key={p.id}
@@ -245,7 +243,7 @@ function Properties() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
-                        {entitledIds && <PaymentStatusBadge paid={entitledIds.has(p.id)} />}
+                        {!isBeta && <PaymentStatusBadge paid={isPaid} />}
                       </div>
                       <h3 className="font-serif text-xl font-semibold">{p.address}</h3>
                       <p className="text-sm text-muted-foreground inline-flex items-center flex-wrap gap-1">
@@ -272,9 +270,6 @@ function Properties() {
                     <button onClick={() => openAiReport(p)} className="btn-outline">
                       Open AI Report
                     </button>
-                    <Link to="/pricing" className="btn-outline">
-                      Upgrade
-                    </Link>
                     {recordUrl && cad && (
                       <a
                         href={recordUrl}
@@ -288,40 +283,57 @@ function Properties() {
                           : `Search on ${cad}`}
                       </a>
                     )}
-                    {existingProtest ? (
-                      <>
-                        <Link
-                          to="/dashboard/case"
-                          search={{ propertyId: p.id }}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn-outline"
-                        >
-                          View Case
-                        </Link>
-                        {canReFile && (
-                          <ProtestActionButton
-                            isPaid={isPaid}
-                            label={`Re-file for ${CURRENT_YEAR}`}
-                            primary
-                            onAuthorize={() => setAuthorizingProperty(p)}
-                          />
-                        )}
-                      </>
-                    ) : (
-                      <ProtestActionButton
-                        isPaid={isPaid}
-                        label="Request Protest Filing"
-                        onAuthorize={() => setAuthorizingProperty(p)}
-                      />
+                    {existingProtest && (
+                      <Link
+                        to="/dashboard/case"
+                        search={{ propertyId: p.id }}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-outline"
+                      >
+                        View Case
+                      </Link>
                     )}
-                    {isPaid && entitledIds && (
+                    {isPaid ? (
+                      !existingProtest ? (
+                        <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
+                          Request Protest Filing
+                        </button>
+                      ) : (
+                        canReFile && (
+                          <button
+                            onClick={() => setAuthorizingProperty(p)}
+                            className="btn-primary btn-primary-hover"
+                          >
+                            Re-file for {CURRENT_YEAR}
+                          </button>
+                        )
+                      )
+                    ) : (
+                      (["owner_managed", "corvusrf_managed"] as const).map((tier) => {
+                        const isSubscribingThis =
+                          subscribing?.propertyId === p.id && subscribing.tier === tier;
+                        return (
+                          <button
+                            key={tier}
+                            disabled={!!subscribing}
+                            onClick={() => handleSubscribe(p, tier)}
+                            className="btn-outline disabled:opacity-60"
+                          >
+                            {isSubscribingThis
+                              ? "Redirecting…"
+                              : `Subscribe — ${TIER_LABEL[tier]} $${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}/mo`}
+                          </button>
+                        );
+                      })
+                    )}
+                    {isPaid && !isBeta && (
                       <button
-                        disabled={removingFromPlanId === p.id}
-                        onClick={() => handleRemoveFromPlan(p)}
+                        disabled={cancelingId === p.id}
+                        onClick={() => handleCancelSubscription(p)}
                         className="btn-outline text-warning-foreground disabled:opacity-60"
                       >
-                        {removingFromPlanId === p.id ? "Updating…" : "Remove from Plan"}
+                        {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
                       </button>
                     )}
                     <button
@@ -421,55 +433,12 @@ function ActionStatusBadge({
   return <span className={`badge-soft ${STATUS_TONE[status]}`}>{label}</span>;
 }
 
-// Only rendered at all on a bracket-priced plan (owner_managed/
-// corvusrf_managed) — see showsPaymentStatus/entitledIds above. `paid` means
-// this property is one of the ones the subscription's paid property count
-// actually covers (oldest properties first — see getEntitledPropertyIds in
-// billing.ts), not that a payment was literally attached to this one row.
+// `paid` means this property's OWN real Stripe subscription is active — see
+// isPaid in the property map above. Never shown for beta accounts, which
+// have no per-property subscription to report on at all.
 function PaymentStatusBadge({ paid }: { paid: boolean }) {
   return (
     <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
-  );
-}
-
-// Request Protest Filing / Re-file, gated on isPaid. Renders grayed out (not
-// a true `disabled` button — still a real, clickable link) when the
-// property isn't paid for: a bracket-priced subscription's paid property
-// count is a QUANTITY, not tied to any specific price/bracket, so there's no
-// way to know from here which of the 6 real prices (2 tiers × 3 value
-// brackets) this specific property should be added under, or to send anyone
-// straight into Stripe with that already decided — Pricing is where the
-// customer actually sees and picks their tier/bracket themselves. Opens in
-// a new tab so the property list stays put underneath.
-function ProtestActionButton({
-  isPaid,
-  label,
-  onAuthorize,
-  primary,
-}: {
-  isPaid: boolean;
-  label: string;
-  onAuthorize: () => void;
-  primary?: boolean;
-}) {
-  const className = `${primary ? "btn-primary btn-primary-hover" : "btn-outline"} ${isPaid ? "" : "opacity-50"}`;
-  if (!isPaid) {
-    return (
-      <Link
-        to="/pricing"
-        target="_blank"
-        rel="noopener noreferrer"
-        className={className}
-        title="This property isn't covered by your plan yet — opens Pricing in a new tab so you can add it."
-      >
-        {label}
-      </Link>
-    );
-  }
-  return (
-    <button onClick={onAuthorize} className={className}>
-      {label}
-    </button>
   );
 }
 
