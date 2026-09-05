@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Page Not Found | CorvusRE</title>
+  <meta name="robots" content="noindex" />
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/hub.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap" />
+</head>
+<body>
+  <header>
+    <div class="container-page bar">
+      <a href="/" class="brand">
+        <span class="logo-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 20c3-6 5-9 8-9s5 3 8 9" stroke-linecap="round" />
+            <circle cx="16" cy="7" r="2" fill="currentColor" />
+          </svg>
+        </span>
+        <span class="wordmark">CorvusRE</span>
+      </a>
+    </div>
+  </header>
+
+  <main class="placeholder">
+    <div class="container-page">
+      <span class="badge-soft-muted">404</span>
+      <h1>Page not found</h1>
+      <p>This page doesn't exist or has been moved.</p>
+      <a href="/" class="btn-outline">&larr; Back to CorvusRE</a>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container-page">
+      &copy; <span id="year"></span> CorvusRE.
+    </div>
+  </footer>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script>
+    // This is a fully static site (GitHub Pages, no server), and GitHub only
+    // ever serves one 404 page for the whole site — this file, at the site
+    // root. Every unmatched URL for every app under this hub lands here,
+    // which is why the page above is intentionally generic.
+    //
+    // The one shape it's worth recognizing specially: CorvusPT's referral
+    // links (see buildReferralLink in CorvusPT's src/lib/referrals.ts) are
+    // shared as a clean path — e.g. /corvuspt/join/B03CF0D2, no "?" — since a
+    // raw query string reads as a tracking link to a friend deciding whether
+    // to click it. That path can never be a real prerendered file (a
+    // referral code isn't known at build time), so it always lands here.
+    // Forward it straight into the real, already-built page that actually
+    // reads the code (CorvusPT's own /join?ref=... route) instead of leaving
+    // a friend looking at a dead link.
+    (function () {
+      var m = location.pathname.match(/^(.*\/)join\/([A-Za-z0-9]{4,32})\/?$/);
+      if (m) location.replace(m[1] + "join?ref=" + encodeURIComponent(m[2]));
+    })();
+  </script>
+</body>
+</html>

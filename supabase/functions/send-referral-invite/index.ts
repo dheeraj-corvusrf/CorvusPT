@@ -141,15 +141,23 @@ Deno.serve(async (req: Request) => {
         headers: corsHeaders,
       });
     }
-    // origin is only ever used as a URL prefix (window.location.origin from
-    // the client, same convention create-checkout-session's own
-    // successPath/cancelPath already use) — the real security boundary is
-    // the referral CODE below, which is always resolved server-side from
-    // the caller's own row, never taken from the client.
-    const safeOrigin =
-      typeof origin === "string" && /^https?:\/\/[^/\s]+$/.test(origin)
-        ? origin
-        : "https://app.corvuspt.ai";
+    // origin is the caller's full origin+base prefix — e.g.
+    // "https://corvusre.com/corvuspt/" (window.location.origin +
+    // import.meta.env.BASE_URL from the client; see sendReferralInvite in
+    // src/lib/referrals.ts) — same convention create-checkout-session's own
+    // successPath/cancelPath already use. Only ever used as a URL prefix
+    // below; the real security boundary is the referral CODE, always
+    // resolved server-side from the caller's own row, never taken from the
+    // client. Falls back to the real production URL, not a placeholder —
+    // this app has no server, so a wrong fallback here would silently ship
+    // a dead link in any request that omits it.
+    const safeOrigin = (() => {
+      const fallback = "https://corvusre.com/corvuspt/";
+      if (typeof origin !== "string" || !/^https?:\/\/[^/\s]+(\/[^\s]*)?$/.test(origin)) {
+        return fallback;
+      }
+      return origin.endsWith("/") ? origin : `${origin}/`;
+    })();
 
     const callerClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
@@ -180,7 +188,11 @@ Deno.serve(async (req: Request) => {
       throw new Error("Could not find your referral code — please try again shortly.");
     }
 
-    const referralUrl = `${safeOrigin}/sign-in?mode=signup&ref=${encodeURIComponent(profile.referral_code)}`;
+    // A clean path, not a "?" query string — see buildReferralLink's own
+    // comment in src/lib/referrals.ts for why, and for how hub/404.html
+    // forwards this exact shape into the real /join?ref=... page since this
+    // is a static site with no server to make /join/CODE a real route.
+    const referralUrl = `${safeOrigin}join/${encodeURIComponent(profile.referral_code)}`;
     const referrerName = (profile.first_name as string | null)?.trim() || "";
 
     const resendKey = Deno.env.get("RESEND_API_KEY");

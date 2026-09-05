@@ -23,14 +23,15 @@ const { getMyReferralCode, getMyReferrals, buildReferralLink, sendReferralInvite
   await import("./referrals");
 
 describe("buildReferralLink", () => {
-  it("builds a real sign-up URL carrying the code", () => {
+  it("builds a real sign-up URL carrying the code as a clean path, not a query string", () => {
     const link = buildReferralLink("ABCD1234");
-    expect(link).toBe(`${window.location.origin}/sign-in?mode=signup&ref=ABCD1234`);
+    expect(link).toBe(`${window.location.origin}${import.meta.env.BASE_URL}join/ABCD1234`);
+    expect(link).not.toContain("?");
   });
 
   it("URL-encodes the code", () => {
     const link = buildReferralLink("has space");
-    expect(link).toContain("ref=has%20space");
+    expect(link).toContain("join/has%20space");
   });
 });
 
@@ -106,12 +107,12 @@ describe("getMyReferrals", () => {
 });
 
 describe("sendReferralInvite", () => {
-  it("invokes send-referral-invite with the target email and the real page origin", async () => {
+  it("invokes send-referral-invite with the target email and the real origin+base prefix", async () => {
     mockInvoke.mockResolvedValue({ ok: true });
     await sendReferralInvite("friend@example.com");
     expect(mockInvoke).toHaveBeenCalledWith("send-referral-invite", {
       toEmail: "friend@example.com",
-      origin: window.location.origin,
+      origin: `${window.location.origin}${import.meta.env.BASE_URL}`,
     });
   });
 
