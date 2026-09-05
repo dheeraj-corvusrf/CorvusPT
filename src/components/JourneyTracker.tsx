@@ -56,7 +56,15 @@ type StepMessage = { title: string; actions?: Action[] };
 // fallback must stay false — otherwise a property just added via a plain
 // address search would still show "Upload Documents" checked off, which is
 // exactly wrong: it didn't happen for this property, session or not.
-function computeIntakeSteps(state: IntakeState, assumeCompleteFallback: boolean): boolean[] {
+// `skipped[i]` flags a step that's counted as done for progression purposes
+// (it doesn't block moving on to later steps) but wasn't actually performed
+// — currently only ever "Upload Documents," when the user chose "Continue to
+// AI Review" instead. Kept separate from `done` so JourneyBlock can render
+// it as bypassed (gray) rather than implying a document was really uploaded.
+function computeIntakeSteps(
+  state: IntakeState,
+  assumeCompleteFallback: boolean,
+): { done: boolean[]; skipped: boolean[] } {
   const hasStarted = !!(state.address || state.extraction || state.noticeFileName);
   const hasCounty = !!(state.cad || state.extraction?.county || state.extraction?.cadName);
   const hasProperty = !!(
@@ -64,11 +72,27 @@ function computeIntakeSteps(state: IntakeState, assumeCompleteFallback: boolean)
     state.extraction?.accountNumber ||
     state.confirmed
   );
-  const hasDocument = !!(state.noticeFileName || state.extraction);
-  const hasReview = !!state.extractionConfirmed;
-  return [hasStarted, hasCounty, hasProperty, hasDocument, hasReview].map(
-    (done) => done || assumeCompleteFallback,
+  const documentUploaded = !!(state.noticeFileName || state.extraction);
+  // aiReviewReached also satisfies "Upload Documents" — upload is explicitly
+  // optional (see case 3's message below), and a user who chose "Continue to
+  // AI Review" instead has, by definition, moved past this step, even though
+  // they never actually uploaded anything for documentUploaded to pick up.
+  const hasDocument = documentUploaded || !!state.aiReviewReached;
+  // Not flagged skipped under assumeCompleteFallback — that path means "a
+  // different property, no real signal either way," not "we know this one
+  // was bypassed," so it stays a plain done/green like every other step
+  // assumeCompleteFallback covers.
+  const documentSkipped = !documentUploaded && !!state.aiReviewReached && !assumeCompleteFallback;
+  // extractionConfirmed only gets set by document-review.tsx's confirm step,
+  // which a no-upload path never visits — aiReviewReached is what actually
+  // fires for that path, once the user is really on /ai-report (see its own
+  // comment in intake-store.ts). Without this, "AI Review" stayed stuck
+  // incomplete forever for anyone who skipped the optional upload.
+  const hasReview = !!(state.extractionConfirmed || state.aiReviewReached);
+  const done = [hasStarted, hasCounty, hasProperty, hasDocument, hasReview].map(
+    (d) => d || assumeCompleteFallback,
   );
+  return { done, skipped: [false, false, false, documentSkipped, false] };
 }
 
 // True when the current browser session's in-progress intake state is
@@ -228,11 +252,13 @@ export function JourneyTracker() {
   // whatever the current browser session's in-progress intake flow has done so
   // far, since there's no per-property case to show progress for.
   if (!hasSavedProperty) {
+    const intake = computeIntakeSteps(state, false);
     return (
       <section className="card-elev p-6">
         <span className="badge-soft">Your Journey</span>
         <JourneyBlock
-          steps={[...computeIntakeSteps(state, false), false, false, false, false, false, false]}
+          steps={[...intake.done, false, false, false, false, false, false]}
+          skippedSteps={[...intake.skipped, false, false, false, false, false, false]}
           uploading={uploading}
           onFile={onFile}
           isDragging={isDragging}
@@ -264,7 +290,8 @@ export function JourneyTracker() {
       <JourneyBlock
         key={activeProperty.id}
         title={activeProperty.address}
-        steps={[...intakeSteps, ...computeFilingSteps(activeRank)]}
+        steps={[...intakeSteps.done, ...computeFilingSteps(activeRank)]}
+        skippedSteps={[...intakeSteps.skipped, false, false, false, false, false, false]}
         uploading={uploading}
         onFile={onFile}
         isDragging={isDragging}
@@ -315,6 +342,7 @@ export function JourneyTracker() {
 export function JourneyBlock({
   title,
   steps,
+  skippedSteps,
   uploading,
   onFile,
   isDragging,
@@ -324,6 +352,12 @@ export function JourneyBlock({
 }: {
   title?: string;
   steps: boolean[];
+  // Same length as `steps` — true for a step that counts as done for
+  // progression (it doesn't block later steps) but wasn't actually performed
+  // (see computeIntakeSteps' own comment on documentSkipped). Rendered as a
+  // bypassed gray circle instead of a green one, so "I skipped this" doesn't
+  // read as "I did this."
+  skippedSteps?: boolean[];
   uploading: boolean;
   onFile: (file: File) => void;
   isDragging: boolean;
@@ -369,6 +403,7 @@ export function JourneyBlock({
       <ol className="mt-5 flex items-start overflow-x-auto pb-1">
         {STEP_LABELS.flatMap((label, i) => {
           const done = steps[i];
+          const skipped = !!skippedSteps?.[i];
           const active = i === currentStep && !allDone;
           const circle = (
             <li key={label} className="flex items-center shrink-0">
@@ -386,11 +421,13 @@ export function JourneyBlock({
                 )}
                 <span
                   className={`h-8 w-8 rounded-full grid place-items-center text-xs font-semibold ${
-                    done
-                      ? "bg-success text-success-foreground"
-                      : active
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-muted-foreground"
+                    skipped
+                      ? "bg-secondary text-muted-foreground"
+                      : done
+                        ? "bg-success text-success-foreground"
+                        : active
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-secondary text-muted-foreground"
                   }`}
                 >
                   {i + 1}
@@ -401,6 +438,7 @@ export function JourneyBlock({
                   }`}
                 >
                   {label}
+                  {skipped && " (skipped)"}
                 </span>
               </div>
             </li>
@@ -416,14 +454,17 @@ export function JourneyBlock({
           // narrow/mobile card instead — it scrolls there, same as before.
           // Colored (not flat gray) for any stretch the user has actually
           // completed — the track itself now reads as a filling progress
-          // bar rather than a plain divider between circles.
+          // bar rather than a plain divider between circles. Not colored
+          // for a skipped step, same reasoning as its own circle above.
           const connector = (
             <li
               key={`${label}-connector`}
               aria-hidden="true"
               className="flex flex-1 min-w-[8px] items-center"
             >
-              <span className={`mt-4 h-px w-full ${done ? "bg-success" : "bg-border"}`} />
+              <span
+                className={`mt-4 h-px w-full ${done && !skipped ? "bg-success" : "bg-border"}`}
+              />
             </li>
           );
           return [circle, connector];

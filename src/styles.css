@@ -84,17 +84,35 @@
   --secondary-foreground: oklch(0.25 0.05 255);
   --muted: oklch(0.96 0.008 250);
   --muted-foreground: oklch(0.48 0.02 255);
-  --accent: oklch(0.596 0.145 163.225); /* emerald, matching the PT door green */
+  /* Bumped from 0.145 chroma (2026-09) per explicit "more colorful/bolder"
+     feedback — same hue (163) and lightness, just richer, so every existing
+     accent/badge/ring usage sitewide reads more vivid without a redesign. */
+  --accent: oklch(0.596 0.185 163.225); /* emerald, matching the PT door green */
   --accent-foreground: oklch(0.99 0.01 163);
   --destructive: oklch(0.58 0.22 27);
   --destructive-foreground: oklch(0.985 0 0);
-  --success: oklch(0.62 0.13 155);
+  --success: oklch(0.62 0.17 155);
   --success-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.78 0.15 75);
+  --warning: oklch(0.78 0.19 75);
   --warning-foreground: oklch(0.22 0.05 60);
   --border: oklch(0.9 0.012 250);
   --input: oklch(0.92 0.012 250);
-  --ring: oklch(0.55 0.12 163);
+  --ring: oklch(0.55 0.15 163);
+  /* Brand diagonal (navy → emerald) — one shared gradient for hero/banner/
+     featured-card treatments, so "make it bolder" reads as one consistent
+     signature move across pages rather than a different gradient per
+     section. A soft (low-alpha) variant works as a section wash; the solid
+     one is for a real focal band (a banner, a highlighted plan's header). */
+  --gradient-brand: linear-gradient(
+    135deg,
+    oklch(0.29 0.08 255),
+    oklch(0.5 0.16 163)
+  );
+  --gradient-brand-soft: linear-gradient(
+    135deg,
+    oklch(0.29 0.08 255 / 0.08),
+    oklch(0.5 0.16 163 / 0.1)
+  );
   /* Fixed navy/white brand colors for things that must look the same regardless
      of theme (homepage hero overlay, the CorvusRF logo mark) — kept as their
      own tokens rather than reusing --primary/--primary-foreground (which
@@ -415,6 +433,19 @@ header .container-page {
   padding: 1.5rem;
 }
 
+/* One shared "featured" treatment (see --gradient-brand above) — a soft
+   diagonal wash for a section background, and a solid version for a real
+   focal band (a banner strip, a highlighted plan card's header). Named
+   "brand-gradient*" rather than "bg-gradient-*" to stay clear of Tailwind's
+   own gradient utilities. */
+@utility brand-gradient-soft {
+  background: var(--gradient-brand-soft);
+}
+@utility brand-gradient {
+  background: var(--gradient-brand);
+  color: var(--accent-foreground);
+}
+
 @utility badge-soft {
   display: inline-flex;
   align-items: center;
@@ -705,7 +736,11 @@ header .container-page {
   display: inline-flex;
   align-items: center;
   gap: 0.75rem;
-  background: var(--card);
+  /* Brand gradient instead of a plain card background — this is the app's
+     one active promo (free beta review), it should read as the boldest
+     thing towing across the hero, not blend in with the page. */
+  background: var(--gradient-brand);
+  color: var(--accent-foreground);
   /* A fixed-depth notch (not a %-based one) — at this box's length, a
      percentage cut reached deep enough to slice through the trailing link
      text itself instead of staying a small decorative tail. */

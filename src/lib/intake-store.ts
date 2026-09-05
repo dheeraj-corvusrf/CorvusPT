@@ -83,6 +83,15 @@ export type IntakeState = {
   mismatchFlag?: boolean;
   routedWorkflows?: WorkflowSuggestion[];
   auditLog?: AuditEntry[];
+  // Set once ai-report.tsx actually loads for this session's confirmed
+  // property (see its own first useEffect) — the real "reached AI Review"
+  // signal for JourneyTracker's Upload Documents/AI Review steps when no
+  // notice was uploaded at all (upload is optional; extractionConfirmed
+  // only ever gets set by document-review.tsx's confirm step, which a
+  // no-upload path never visits, so it can't be the only signal or those
+  // two steps stay stuck "incomplete" forever even after the user is
+  // actively on the AI Review page).
+  aiReviewReached?: boolean;
 };
 
 const KEY = "crf_intake";

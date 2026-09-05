@@ -112,7 +112,7 @@ function Home() {
             <span className="text-sm font-bold">Free to start. No card required.</span>
             <Link
               to="/sign-in"
-              className="text-sm font-semibold text-accent underline underline-offset-2"
+              className="text-sm font-semibold text-warning underline underline-offset-2"
             >
               Join the beta →
             </Link>
@@ -287,8 +287,11 @@ function Home() {
       </section>
 
       {/* How CorvusPT Helps You Save — real, existing services only (no stats,
-        no testimonials — see plan notes on why those are out of scope). */}
-      <section className="bg-secondary/30 py-14 md:py-20">
+        no testimonials — see plan notes on why those are out of scope). A
+        soft brand-gradient wash instead of flat --secondary, per "more
+        colorful/bolder" feedback — the section still reads as a quiet
+        backdrop for the cards, just this app's own colors instead of gray. */}
+      <section className="brand-gradient-soft py-14 md:py-20">
         <div className="container-page">
           <div className="mx-auto max-w-2xl text-center">
             <span className="badge-soft">What You Get</span>

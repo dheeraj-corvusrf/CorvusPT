@@ -396,8 +396,15 @@ function Page() {
                   <ScrollReveal
                     key={p.tier}
                     delay={i * 120}
-                    className={`card-elev p-6 flex flex-col h-full transition-all hover:-translate-y-0.5 hover:shadow-elev ${p.highlight ? "ring-2 ring-accent" : isWhiteGlove ? "ring-2 ring-warning/60" : ""}`}
+                    className={`card-elev relative overflow-hidden p-6 flex flex-col h-full transition-all hover:-translate-y-0.5 hover:shadow-elev ${p.highlight ? "ring-2 ring-accent" : isWhiteGlove ? "ring-2 ring-warning/60" : ""}`}
                   >
+                    {/* A real focal band on the recommended tier, not just a
+                    thin ring — "more colorful/bolder" feedback called out
+                    this exact spot as the one place a visitor picks between
+                    plans. */}
+                    {p.highlight && (
+                      <span className="brand-gradient absolute inset-x-0 top-0 h-1.5" />
+                    )}
                     <div
                       className={
                         isWhiteGlove ? "badge-soft-warning self-start" : "badge-soft self-start"

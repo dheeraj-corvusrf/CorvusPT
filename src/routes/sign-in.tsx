@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { Clock, Info } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import type { CadRecord } from "@/lib/cad-lookup";
@@ -52,6 +53,30 @@ export const Route = createFileRoute("/sign-in")({
   }),
   component: SignIn,
 });
+
+// The idle-timeout sign-out (see AuthProvider in src/lib/auth.tsx) reads as
+// a security event, not a generic notice — its own warmer amber card with a
+// clock icon says "this was routine and expected," instead of the flatter
+// accent-tinted box every other redirect reason uses.
+function ReasonBanner({ reason }: { reason: string }) {
+  const isIdleTimeout = reason.toLowerCase().includes("inactivity");
+  return (
+    <div
+      className={
+        isIdleTimeout
+          ? "mt-4 flex items-start gap-2.5 rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-foreground"
+          : "mt-4 flex items-start gap-2.5 rounded-lg border border-accent/30 bg-accent/10 px-4 py-3 text-sm text-foreground"
+      }
+    >
+      {isIdleTimeout ? (
+        <Clock className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+      ) : (
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+      )}
+      <span>{reason}</span>
+    </div>
+  );
+}
 
 function SignIn() {
   const nav = useNavigate();
@@ -226,11 +251,7 @@ function SignIn() {
             ? "Your properties, protests, deadlines, and savings — all in one place."
             : "Save your property, analysis, documents, and preview history."}
         </p>
-        {searchParams.reason && (
-          <p className="mt-4 rounded-lg border border-accent/30 bg-accent/5 px-4 py-3 text-sm text-foreground">
-            {searchParams.reason}
-          </p>
-        )}
+        {searchParams.reason && <ReasonBanner reason={searchParams.reason} />}
       </div>
 
       <div className="container-page pb-16 max-w-2xl">
