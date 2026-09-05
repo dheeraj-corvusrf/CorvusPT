@@ -25,6 +25,10 @@ export const Route = createFileRoute("/sign-in")({
   // just the raw string read off the URL; it's never resolved/trusted here,
   // only passed through to signUp()'s options.data for handle_new_user() to
   // resolve server-side (see schema.sql).
+  // reason is a short, plain-text explanation set by whatever guard sent a
+  // signed-out visitor here (e.g. the /dashboard/* guard's REDIRECT_REASONS
+  // map) — shown as a small banner so the redirect doesn't feel unexplained.
+  // Never HTML — always rendered as plain text below.
   validateSearch: (
     search: Record<string, unknown>,
   ): {
@@ -35,6 +39,7 @@ export const Route = createFileRoute("/sign-in")({
     lastName?: string;
     beta?: string;
     ref?: string;
+    reason?: string;
   } => ({
     redirect: typeof search.redirect === "string" ? search.redirect : undefined,
     mode: search.mode === "signup" ? "signup" : undefined,
@@ -43,6 +48,7 @@ export const Route = createFileRoute("/sign-in")({
     lastName: typeof search.lastName === "string" ? search.lastName : undefined,
     beta: typeof search.beta === "string" ? search.beta : undefined,
     ref: typeof search.ref === "string" ? search.ref : undefined,
+    reason: typeof search.reason === "string" ? search.reason : undefined,
   }),
   component: SignIn,
 });
@@ -220,6 +226,11 @@ function SignIn() {
             ? "Your properties, protests, deadlines, and savings — all in one place."
             : "Save your property, analysis, documents, and preview history."}
         </p>
+        {searchParams.reason && (
+          <p className="mt-4 rounded-lg border border-accent/30 bg-accent/5 px-4 py-3 text-sm text-foreground">
+            {searchParams.reason}
+          </p>
+        )}
       </div>
 
       <div className="container-page pb-16 max-w-2xl">
