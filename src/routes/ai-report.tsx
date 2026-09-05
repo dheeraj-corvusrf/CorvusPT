@@ -76,6 +76,7 @@ import {
 } from "@/lib/ai-report-modules";
 import { getComps, type CompsResult, type CompProperty } from "@/lib/cad-comps";
 import { getSiteGis, type SiteGisResult } from "@/lib/site-gis";
+import { geocodeAddress, type GeocodedPoint } from "@/lib/geocode";
 import { pickHeadlineFactor, countDataGaps, type SiteFactor } from "@/lib/site-condition";
 import { getTypicalEconomicLife, computeDepreciation } from "@/lib/improvement-condition";
 import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
@@ -223,9 +224,31 @@ function Report() {
   // Separate from moduleData since it's not an AI call and has its own real/empty
   // result shape (CompsResult, not the free-text ModuleResultMap) — only fetched
   // when the Comps module (module 3) is opened.
-  const [compsMap, setCompsMap] = useState<{ data: CompsResult | null; loading: boolean }>({
+  // `attempted` distinguishes "settled, genuinely no subject" from "not
+  // started yet" — same reason siteGisMap below carries its own.
+  const [compsMap, setCompsMap] = useState<{
+    data: CompsResult | null;
+    loading: boolean;
+    attempted: boolean;
+  }>({
     data: null,
     loading: false,
+    attempted: false,
+  });
+  // Fallback coordinates for every county getComps() has no comps platform
+  // for (see its own comment — only 4 counties return a real subject/lat-
+  // lng). Only attempted once compsMap has genuinely settled with no
+  // subject of its own (see the firing effect below) — CAD's own
+  // coordinates are preferred when they exist, tied to the actual parcel
+  // rather than a geocoder's best guess at the mailing address.
+  const [geocodedSubject, setGeocodedSubject] = useState<{
+    data: GeocodedPoint | null;
+    loading: boolean;
+    attempted: boolean;
+  }>({
+    data: null,
+    loading: false,
+    attempted: false,
   });
   // Real FEMA flood-zone + USGS elevation for the subject's lat/lng, once
   // compsMap resolves one (see loadSiteGis()/its firing effect below). Same
@@ -810,11 +833,50 @@ function Report() {
 
   function loadCompsMap() {
     if (compsMap.data || compsMap.loading) return;
-    setCompsMap({ data: null, loading: true });
+    setCompsMap({ data: null, loading: true, attempted: true });
     getComps({ cad: state.cad, accountNumber: state.accountNumber })
-      .then((data) => setCompsMap({ data, loading: false }))
-      .catch(() => setCompsMap({ data: null, loading: false }));
+      .then((data) => setCompsMap({ data, loading: false, attempted: true }))
+      .catch(() => setCompsMap({ data: null, loading: false, attempted: true }));
   }
+
+  // Real coordinates for Module 4's map/FEMA-flood/USGS-elevation/highway-
+  // rail lookups — the real CAD subject when getComps() has one, otherwise
+  // the geocoded fallback below. Neither is ever fabricated: a property with
+  // no CAD coordinates AND a failed/no-match geocode simply has none, and
+  // Module 4 honestly shows "Additional Data Needed" throughout, same as
+  // before this fallback existed.
+  const cadSubject = compsMap.data?.subject;
+  const siteCoords: GeocodedPoint | null = cadSubject
+    ? { lat: cadSubject.latitude, lng: cadSubject.longitude }
+    : geocodedSubject.data;
+  // True once we know for certain whether real coordinates exist at all —
+  // either a CAD subject was there all along, or the geocode fallback has
+  // itself settled (found something or genuinely didn't). Lets the firing
+  // sequence below wait for a real answer instead of firing "site" with a
+  // premature "no data" the instant compsMap alone settles.
+  const siteCoordsSettled = !!cadSubject || geocodedSubject.attempted;
+
+  // Only reachable once compsMap has settled with no subject of its own —
+  // most counties (see getComps' own comment), so this is the common path,
+  // not a rare edge case.
+  useEffect(() => {
+    if (!compsMap.attempted || compsMap.loading || compsMap.data?.subject) return;
+    if (geocodedSubject.attempted || geocodedSubject.loading) return;
+    const address = resolvedProperty?.address || state.address;
+    if (!address) return;
+    setGeocodedSubject({ data: null, loading: true, attempted: false });
+    geocodeAddress(address)
+      .then((point) => setGeocodedSubject({ data: point, loading: false, attempted: true }))
+      .catch(() => setGeocodedSubject({ data: null, loading: false, attempted: true }));
+  }, [
+    compsMap.attempted,
+    compsMap.loading,
+    compsMap.data,
+    resolvedProperty,
+    state.address,
+    geocodedSubject.attempted,
+    geocodedSubject.loading,
+  ]);
 
   // Real point GIS facts (Module 4) — only ever fetched once compsMap has
   // resolved a real lat/lng (see the firing effect below); most counties
@@ -1010,8 +1072,7 @@ function Report() {
   useEffect(() => {
     if (!state.totalValue) return;
     loadCompsMap();
-    const subject = compsMap.data?.subject;
-    if (subject) loadSiteGis(subject.latitude, subject.longitude);
+    if (siteCoords) loadSiteGis(siteCoords.lat, siteCoords.lng);
     const strategyState = moduleData.strategy;
     const fire = () => {
       for (const id of SEQUENCED_AFTER_STRATEGY) {
@@ -1026,17 +1087,21 @@ function Report() {
         // that fetch actually settles, giving "comps" a second real chance
         // to fire with real data instead of silently going out ungrounded.
         if (id === "comps" && compsMap.loading) continue;
-        // "site" needs compsMap settled AND, only when a real subject/lat-
-        // lng came out of it, siteGisMap itself settled too — otherwise it
-        // could fire while the GIS fetch is merely not-yet-started instead
-        // of genuinely unavailable, and Module 4 would show "Additional
-        // Data Needed" for something that was actually about to resolve.
-        // `!siteGisMap.attempted` (not `siteGisMap.loading`) is the right
-        // check here — `loading` is also false before the fetch starts, so
-        // it can't tell "not started" apart from "settled" on its own.
+        // "site" needs real coordinates settled (either a CAD subject or the
+        // geocode fallback — see siteCoordsSettled above) AND, only when
+        // coordinates actually exist, siteGisMap itself settled too —
+        // otherwise it could fire while the GIS fetch is merely not-yet-
+        // started instead of genuinely unavailable, and Module 4 would show
+        // "Additional Data Needed" for something that was actually about to
+        // resolve. `!siteGisMap.attempted` (not `siteGisMap.loading`) is the
+        // right check here — `loading` is also false before the fetch
+        // starts, so it can't tell "not started" apart from "settled" on
+        // its own.
         if (
           id === "site" &&
-          (compsMap.loading || (!!subject && (!siteGisMap.attempted || siteGisMap.loading)))
+          (compsMap.loading ||
+            !siteCoordsSettled ||
+            (!!siteCoords && (!siteGisMap.attempted || siteGisMap.loading)))
         ) {
           continue;
         }
@@ -1052,10 +1117,10 @@ function Report() {
     return () => clearTimeout(t);
     // Same rationale as the effect above for omitting loadModule/loadCompsMap/
     // loadSiteGis; moduleData.strategy's data/error (plus compsMap.loading/
-    // .data and siteGisMap's own settle state, for the races described
-    // above) are read explicitly instead of the whole moduleData/compsMap/
-    // siteGisMap objects so this only re-fires on those specific state
-    // transitions, not every other module's load.
+    // .data, geocodedSubject's own settle state, and siteGisMap's own settle
+    // state, for the races described above) are read explicitly instead of
+    // the whole moduleData/compsMap/siteGisMap objects so this only re-fires
+    // on those specific state transitions, not every other module's load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     state.totalValue,
@@ -1064,6 +1129,9 @@ function Report() {
     moduleData.strategy?.error,
     compsMap.loading,
     compsMap.data,
+    geocodedSubject.attempted,
+    geocodedSubject.loading,
+    geocodedSubject.data,
     siteGisMap.attempted,
     siteGisMap.loading,
   ]);
@@ -1304,6 +1372,7 @@ function Report() {
               moduleData={moduleData}
               compsMap={compsMap}
               siteGisMap={siteGisMap}
+              siteCoords={siteCoords}
               estimated={estimated}
               propertyType={state.propertyType}
               totalValue={state.totalValue}
@@ -1351,6 +1420,7 @@ function Report() {
                 moduleData={moduleData}
                 compsMap={compsMap}
                 siteGisMap={siteGisMap}
+                siteCoords={siteCoords}
                 onRetry={() => {}}
                 allowEvidenceUpload={false}
                 evidenceDocs={evidenceDocs}
@@ -1391,6 +1461,7 @@ function Report() {
             moduleData={moduleData}
             compsMap={compsMap}
             siteGisMap={siteGisMap}
+            siteCoords={siteCoords}
             onRetry={() => loadModule(openModel.id)}
             allowEvidenceUpload
             evidenceDocs={evidenceDocs}
@@ -1481,6 +1552,7 @@ function ModuleCard({
   moduleData,
   compsMap,
   siteGisMap,
+  siteCoords,
   estimated,
   propertyType,
   totalValue,
@@ -1496,6 +1568,7 @@ function ModuleCard({
   moduleData: Record<string, ModuleAsyncState>;
   compsMap: { data: CompsResult | null; loading: boolean };
   siteGisMap: { data: SiteGisResult | null; loading: boolean };
+  siteCoords: GeocodedPoint | null;
   estimated: {
     reduction: number;
     savings: number;
@@ -1602,6 +1675,7 @@ function ModuleCard({
             moduleData={moduleData}
             compsMap={compsMap}
             siteGisMap={siteGisMap}
+            siteCoords={siteCoords}
             estimated={estimated}
             propertyType={propertyType}
             totalValue={totalValue}
@@ -1659,6 +1733,7 @@ function ModuleVisual({
   moduleData,
   compsMap,
   siteGisMap,
+  siteCoords,
   estimated,
   propertyType,
   totalValue,
@@ -1672,6 +1747,7 @@ function ModuleVisual({
   moduleData: Record<string, ModuleAsyncState>;
   compsMap: { data: CompsResult | null; loading: boolean };
   siteGisMap: { data: SiteGisResult | null; loading: boolean };
+  siteCoords: GeocodedPoint | null;
   estimated: {
     reduction: number;
     savings: number;
@@ -1859,13 +1935,12 @@ function ModuleVisual({
     }
     case "site": {
       const d = moduleState.data as ModuleResultMap["site"];
-      const subject = compsMap.data?.subject;
       const headline = pickHeadlineFactor(d.factors);
       return (
         <div>
           <div className="relative">
-            {subject ? (
-              <SiteMapThumb lat={subject.latitude} lng={subject.longitude} height={128} />
+            {siteCoords ? (
+              <SiteMapThumb lat={siteCoords.lat} lng={siteCoords.lng} height={128} />
             ) : (
               <div className="grid h-32 place-items-center rounded-lg bg-secondary/40">
                 <MapPin className="h-6 w-6 text-muted-foreground" />
@@ -4329,6 +4404,7 @@ function ModulePreviewContent({
   moduleData,
   compsMap,
   siteGisMap,
+  siteCoords,
   onRetry,
   allowEvidenceUpload,
   evidenceDocs,
@@ -4357,6 +4433,7 @@ function ModulePreviewContent({
   moduleData: Record<string, ModuleAsyncState>;
   compsMap: { data: CompsResult | null; loading: boolean };
   siteGisMap: { data: SiteGisResult | null; loading: boolean };
+  siteCoords: GeocodedPoint | null;
   onRetry: () => void;
   allowEvidenceUpload: boolean;
   evidenceDocs: DocumentRecord[];
@@ -4938,7 +5015,6 @@ function ModulePreviewContent({
     }
     case "site": {
       const d = moduleState.data as ModuleResultMap["site"];
-      const subject = compsMap.data?.subject;
       const siteGis = siteGisMap.data;
       const gaps = countDataGaps(d.factors);
       const nextModule = MODULES.find((mm) => mm.id === "improvement");
@@ -4946,8 +5022,8 @@ function ModulePreviewContent({
         <div className="mt-4 grid gap-4">
           <div>
             <div className="relative">
-              {subject ? (
-                <SiteMapThumb lat={subject.latitude} lng={subject.longitude} height={220} />
+              {siteCoords ? (
+                <SiteMapThumb lat={siteCoords.lat} lng={siteCoords.lng} height={220} />
               ) : (
                 <div className="grid h-[220px] place-items-center rounded-lg bg-secondary/40">
                   <MapPin className="h-8 w-8 text-muted-foreground" />
