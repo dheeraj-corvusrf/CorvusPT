@@ -50,14 +50,16 @@ export async function getMyReferrals(): Promise<ReferralRecord[]> {
   }));
 }
 
-// A real, working sign-up link — ?ref= is read by sign-in.tsx and threaded
-// through supabase.auth.signUp()'s options.data, resolved server-side by
-// handle_new_user() (see schema.sql) into a real referred_by user id. Never
-// trust/resolve the code client-side — this function only ever builds the
-// URL, it doesn't look anyone up.
+// A real, working sign-up link — /join is a thin, friendlier-looking alias
+// (see src/routes/join.tsx) that forwards straight into /sign-in?mode=
+// signup&ref=..., which is what actually reads the code: sign-in.tsx passes
+// it through to supabase.auth.signUp()'s options.data, resolved server-side
+// by handle_new_user() (see schema.sql) into a real referred_by user id.
+// Never trust/resolve the code client-side — this function only ever builds
+// the URL, it doesn't look anyone up.
 export function buildReferralLink(code: string): string {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  return `${origin}/sign-in?mode=signup&ref=${encodeURIComponent(code)}`;
+  return `${origin}/join?ref=${encodeURIComponent(code)}`;
 }
 
 // A real, branded "your friend referred you" email via send-referral-invite

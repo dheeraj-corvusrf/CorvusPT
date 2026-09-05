@@ -180,7 +180,9 @@ Deno.serve(async (req: Request) => {
       throw new Error("Could not find your referral code — please try again shortly.");
     }
 
-    const referralUrl = `${safeOrigin}/sign-in?mode=signup&ref=${encodeURIComponent(profile.referral_code)}`;
+    // /join is a thin, friendlier-looking alias for /sign-in?mode=signup&ref=
+    // (see src/routes/join.tsx) — same real sign-up flow either way.
+    const referralUrl = `${safeOrigin}/join?ref=${encodeURIComponent(profile.referral_code)}`;
     const referrerName = (profile.first_name as string | null)?.trim() || "";
 
     const resendKey = Deno.env.get("RESEND_API_KEY");

@@ -25,7 +25,7 @@ const { getMyReferralCode, getMyReferrals, buildReferralLink, sendReferralInvite
 describe("buildReferralLink", () => {
   it("builds a real sign-up URL carrying the code", () => {
     const link = buildReferralLink("ABCD1234");
-    expect(link).toBe(`${window.location.origin}/sign-in?mode=signup&ref=ABCD1234`);
+    expect(link).toBe(`${window.location.origin}/join?ref=ABCD1234`);
   });
 
   it("URL-encodes the code", () => {

@@ -19,6 +19,7 @@ import { Route as DocumentReviewRouteImport } from './routes/document-review'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as HowItWorksRouteImport } from './routes/how-it-works'
 import { Route as IntakeRouteImport } from './routes/intake'
+import { Route as JoinRouteImport } from './routes/join'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as PropertyProtestRouteImport } from './routes/property-protest'
 import { Route as PropertyTaxManagementRouteImport } from './routes/property-tax-management'
@@ -86,6 +87,11 @@ const HowItWorksRoute = HowItWorksRouteImport.update({
 const IntakeRoute = IntakeRouteImport.update({
   id: '/intake',
   path: '/intake',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const JoinRoute = JoinRouteImport.update({
+  id: '/join',
+  path: '/join',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PricingRoute = PricingRouteImport.update({
@@ -195,6 +201,7 @@ export interface FileRoutesByFullPath {
   '/forgot-password': typeof ForgotPasswordRoute
   '/how-it-works': typeof HowItWorksRoute
   '/intake': typeof IntakeRoute
+  '/join': typeof JoinRoute
   '/pricing': typeof PricingRoute
   '/property-protest': typeof PropertyProtestRoute
   '/property-tax-management': typeof PropertyTaxManagementRoute
@@ -225,6 +232,7 @@ export interface FileRoutesByTo {
   '/forgot-password': typeof ForgotPasswordRoute
   '/how-it-works': typeof HowItWorksRoute
   '/intake': typeof IntakeRoute
+  '/join': typeof JoinRoute
   '/pricing': typeof PricingRoute
   '/property-protest': typeof PropertyProtestRoute
   '/property-tax-management': typeof PropertyTaxManagementRoute
@@ -255,6 +263,7 @@ export interface FileRoutesById {
   '/forgot-password': typeof ForgotPasswordRoute
   '/how-it-works': typeof HowItWorksRoute
   '/intake': typeof IntakeRoute
+  '/join': typeof JoinRoute
   '/pricing': typeof PricingRoute
   '/property-protest': typeof PropertyProtestRoute
   '/property-tax-management': typeof PropertyTaxManagementRoute
@@ -287,6 +296,7 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/how-it-works'
     | '/intake'
+    | '/join'
     | '/pricing'
     | '/property-protest'
     | '/property-tax-management'
@@ -317,6 +327,7 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/how-it-works'
     | '/intake'
+    | '/join'
     | '/pricing'
     | '/property-protest'
     | '/property-tax-management'
@@ -346,6 +357,7 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/how-it-works'
     | '/intake'
+    | '/join'
     | '/pricing'
     | '/property-protest'
     | '/property-tax-management'
@@ -377,6 +389,7 @@ export interface RootRouteChildren {
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   HowItWorksRoute: typeof HowItWorksRoute
   IntakeRoute: typeof IntakeRoute
+  JoinRoute: typeof JoinRoute
   PricingRoute: typeof PricingRoute
   PropertyProtestRoute: typeof PropertyProtestRoute
   PropertyTaxManagementRoute: typeof PropertyTaxManagementRoute
@@ -456,6 +469,13 @@ declare module '@tanstack/react-router' {
       path: '/intake'
       fullPath: '/intake'
       preLoaderRoute: typeof IntakeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/join': {
+      id: '/join'
+      path: '/join'
+      fullPath: '/join'
+      preLoaderRoute: typeof JoinRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pricing': {
@@ -630,6 +650,7 @@ const rootRouteChildren: RootRouteChildren = {
   ForgotPasswordRoute: ForgotPasswordRoute,
   HowItWorksRoute: HowItWorksRoute,
   IntakeRoute: IntakeRoute,
+  JoinRoute: JoinRoute,
   PricingRoute: PricingRoute,
   PropertyProtestRoute: PropertyProtestRoute,
   PropertyTaxManagementRoute: PropertyTaxManagementRoute,
