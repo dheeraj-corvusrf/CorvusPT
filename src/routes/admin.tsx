@@ -38,16 +38,10 @@ import {
 import type { ProtestRecord, ProtestStatus } from "@/lib/protests";
 import { listProperties, addProperty, deleteProperty, type PropertyRecord } from "@/lib/properties";
 import { currency } from "@/lib/intake-store";
-import {
-  getAppSettings,
-  setEnforcePerPropertyEntitlement,
-  type AppSettings,
-} from "@/lib/app-settings";
 import { AddressAutocomplete } from "@/components/AddressAutocomplete";
 import { AdminCaseProgressModal } from "@/components/AdminCaseProgressModal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CopyButton } from "@/components/CopyButton";
-import { Switch } from "@/components/ui/switch";
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
@@ -57,14 +51,7 @@ export const Route = createFileRoute("/admin")({
 });
 
 type AdminTab =
-  | "users"
-  | "owner_managed"
-  | "corvus_managed"
-  | "admins"
-  | "invited"
-  | "beta"
-  | "activity"
-  | "settings";
+  "users" | "owner_managed" | "corvus_managed" | "admins" | "invited" | "beta" | "activity";
 
 function AdminPanel() {
   const nav = useNavigate();
@@ -93,10 +80,6 @@ function AdminPanel() {
 
   const [invitedUsers, setInvitedUsers] = useState<InvitedUserRecord[]>([]);
   const [invitedUsersLoading, setInvitedUsersLoading] = useState(true);
-
-  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
-  const [appSettingsLoading, setAppSettingsLoading] = useState(true);
-  const [savingEntitlementToggle, setSavingEntitlementToggle] = useState(false);
 
   useEffect(() => {
     if (loading) return;
@@ -138,31 +121,7 @@ function AdminPanel() {
       .then(setInvitedUsers)
       .catch((err) => console.error(err))
       .finally(() => setInvitedUsersLoading(false));
-    setAppSettingsLoading(true);
-    getAppSettings()
-      .then(setAppSettings)
-      .catch((err) => console.error("Could not load app settings:", err))
-      .finally(() => setAppSettingsLoading(false));
     refreshAuditLog();
-  }
-
-  async function handleToggleEntitlement(enabled: boolean) {
-    const prev = appSettings;
-    setSavingEntitlementToggle(true);
-    setAppSettings({ enforcePerPropertyEntitlement: enabled });
-    try {
-      await setEnforcePerPropertyEntitlement(enabled);
-      toast.success(
-        enabled
-          ? "Per-property entitlement is now enforced."
-          : "Per-property entitlement is off — every paid property's plan unlocks the AI Report on every property again.",
-      );
-    } catch (err) {
-      setAppSettings(prev);
-      toast.error(err instanceof Error ? err.message : "Could not update this setting.");
-    } finally {
-      setSavingEntitlementToggle(false);
-    }
   }
 
   useEffect(() => {
@@ -514,7 +473,6 @@ function AdminPanel() {
     },
     { key: "beta", label: "Beta Signups", count: betaLeadsLoading ? null : betaLeads.length },
     { key: "activity", label: "Activity Log", count: auditLogLoading ? null : auditLog.length },
-    { key: "settings", label: "Settings", count: null },
   ];
 
   return (
@@ -748,42 +706,6 @@ function AdminPanel() {
               <p className="text-sm text-muted-foreground">No admin activity logged yet.</p>
             ) : (
               auditLog.map((entry) => <AuditLogRow key={entry.id} entry={entry} />)
-            )}
-          </div>
-        </section>
-      )}
-
-      {activeTab === "settings" && (
-        <section className="mt-8 max-w-2xl">
-          <h2 className="font-serif text-xl font-semibold">Settings</h2>
-          <p className="text-sm text-muted-foreground">
-            App-wide switches — changes here take effect immediately for every user, no code change
-            or redeploy needed.
-          </p>
-          <div className="mt-4 card-elev p-4">
-            {appSettingsLoading || !appSettings ? (
-              <Skeleton className="h-14 w-full" />
-            ) : (
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold">Enforce per-property entitlement</div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    When on, an Owner-Managed or CorvusPT-Managed subscription's AI Report access
-                    only covers as many properties as the customer's paid bracket quantities
-                    actually add up to — the oldest paid-for properties first. When off (the
-                    default), any active subscription on those two plans unlocks the AI Report on
-                    every property the customer has, regardless of how many they paid for. Beta
-                    accounts are always unlimited either way.
-                  </p>
-                </div>
-                <Switch
-                  checked={appSettings.enforcePerPropertyEntitlement}
-                  onCheckedChange={handleToggleEntitlement}
-                  disabled={savingEntitlementToggle}
-                  aria-label="Enforce per-property entitlement"
-                  className="mt-0.5 shrink-0"
-                />
-              </div>
             )}
           </div>
         </section>

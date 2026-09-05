@@ -60,7 +60,6 @@ import {
   bracketPropertyCount,
   type PlanValue,
 } from "@/lib/billing";
-import { getAppSettings } from "@/lib/app-settings";
 import {
   getHealthScore,
   type HealthScoreResult,
@@ -918,22 +917,20 @@ function Report() {
   // bracket-priced plan (owner_managed/corvusrf_managed) whose paid
   // property count doesn't actually cover THIS property, instead of the
   // effect above's plan-only check letting one paid property's worth of
-  // subscription unlock every property the customer ever adds. Gated on a
-  // real, admin-toggleable setting (app_settings.enforce_per_property_
-  // entitlement — see app-settings.ts and the Settings tab in admin.tsx),
-  // not a hardcoded constant, so turning this on/off is a live DB write, no
-  // redeploy needed. Only ever narrows access (never widens it back past
-  // what the effect above already granted), and only once resolvedProperty
-  // is actually known — a property that hasn't been saved yet isn't
-  // consuming a paid slot either, so there's nothing real to check against
-  // yet.
+  // subscription unlock every property the customer ever adds. Unconditional
+  // (the admin-toggleable kill switch this used to be gated on was removed
+  // per explicit product direction — "it should be completely enabled").
+  // Only ever narrows access (never widens it back past what the effect
+  // above already granted), and only once resolvedProperty is actually
+  // known — a property that hasn't been saved yet isn't consuming a paid
+  // slot either, so there's nothing real to check against yet.
   useEffect(() => {
     if (!user || !myPlan || !resolvedProperty) return;
     if (!planUsesPerPropertyEntitlement(myPlan)) return;
     let cancelled = false;
-    Promise.all([getAppSettings(), getMyBilling(user.id), listProperties(user.id)])
-      .then(([settings, { subscriptionBrackets }, properties]) => {
-        if (cancelled || !settings.enforcePerPropertyEntitlement) return;
+    Promise.all([getMyBilling(user.id), listProperties(user.id)])
+      .then(([{ subscriptionBrackets }, properties]) => {
+        if (cancelled) return;
         const entitled = getEntitledPropertyIds(
           properties,
           bracketPropertyCount(subscriptionBrackets),

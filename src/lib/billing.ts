@@ -83,16 +83,12 @@ export function bracketPropertyCount(brackets: BracketQuantities): number {
 // ── Per-property entitlement ────────────────────────────────────────────
 // Real business rule: a subscription's bracket quantities pay for that many
 // PROPERTIES, not for the account as a whole — one payment does not unlock
-// every property the customer ever adds. Today, ai-report.tsx's
-// `hasFullAccess` is computed from `plan` alone (owner_managed/
-// corvusrf_managed/etc. → true), with no check against how many properties
-// that subscription actually covers, so a customer who pays for 1 property
-// currently gets full AI Report access on every property in their account.
-// This function is the real fix — see ai-report.tsx for how it's wired in —
-// but is gated behind ENFORCE_PER_PROPERTY_ENTITLEMENT below, left OFF for
-// now per explicit product direction ("put it on hold, I'll say when to
-// enable it"). While off, every call site's behavior is byte-for-byte
-// unchanged from before this existed.
+// every property the customer ever adds. This is unconditionally enforced
+// (an earlier admin-toggleable kill switch was removed per explicit product
+// direction — "it should be completely enabled") everywhere a paid action
+// depends on a specific property being covered: AI Report access
+// (ai-report.tsx), the Paid/Not Paid badge and Request Protest Filing gate
+// on /dashboard/properties.
 //
 // Rule: the first `paidPropertyCount` properties, oldest first (by
 // createdAt), are entitled; everything added after that isn't, until the
@@ -127,12 +123,6 @@ const BRACKET_PRICED_PLANS: PlanValue[] = ["owner_managed", "corvusrf_managed"];
 export function planUsesPerPropertyEntitlement(plan: PlanValue): boolean {
   return BRACKET_PRICED_PLANS.includes(plan);
 }
-
-// The kill switch used to live here as a hardcoded `false` constant —
-// flipping it meant a code change and a redeploy. It's now a real,
-// admin-toggleable setting instead: see getAppSettings()/
-// setEnforcePerPropertyEntitlement() in app-settings.ts (backed by the
-// app_settings table) and the Settings tab in admin.tsx.
 
 export const PLAN_OPTIONS: { value: PlanValue; label: string }[] = [
   { value: "free_ai_review", label: "Free AI Review" },
