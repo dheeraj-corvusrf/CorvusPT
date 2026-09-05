@@ -21,6 +21,10 @@ export const Route = createFileRoute("/sign-in")({
   // are for the admin panel's invite links (see buildSignupInviteLink in
   // src/lib/admin.ts) — they only prefill the form; no account exists until
   // the invitee actually completes sign-up themselves (password or Google).
+  // ref is a referral code (see buildReferralLink in src/lib/referrals.ts) —
+  // just the raw string read off the URL; it's never resolved/trusted here,
+  // only passed through to signUp()'s options.data for handle_new_user() to
+  // resolve server-side (see schema.sql).
   validateSearch: (
     search: Record<string, unknown>,
   ): {
@@ -30,6 +34,7 @@ export const Route = createFileRoute("/sign-in")({
     firstName?: string;
     lastName?: string;
     beta?: string;
+    ref?: string;
   } => ({
     redirect: typeof search.redirect === "string" ? search.redirect : undefined,
     mode: search.mode === "signup" ? "signup" : undefined,
@@ -37,6 +42,7 @@ export const Route = createFileRoute("/sign-in")({
     firstName: typeof search.firstName === "string" ? search.firstName : undefined,
     lastName: typeof search.lastName === "string" ? search.lastName : undefined,
     beta: typeof search.beta === "string" ? search.beta : undefined,
+    ref: typeof search.ref === "string" ? search.ref : undefined,
   }),
   component: SignIn,
 });
@@ -122,6 +128,9 @@ function SignIn() {
               // Read server-side by handle_new_user() (supabase/schema.sql) to set
               // plan='beta' at row-creation — never written by the client directly.
               wants_beta: String(wantsBeta),
+              // Same pattern — the raw code from ?ref=, resolved into a real
+              // referred_by user id by handle_new_user(), not here.
+              referral_code_used: searchParams.ref ?? null,
             },
           },
         });

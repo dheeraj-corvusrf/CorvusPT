@@ -58,6 +58,69 @@ function summarizeItems(items: Stripe.SubscriptionItem[]) {
   return { quantity: quantity || 1, ...totals };
 }
 
+// One month free for whoever referred this NEW paying customer — real
+// business rule ("each referral gives one month free"), so the credit
+// amount is the REFERRER's own real current monthly total (summed straight
+// off their real Stripe subscription line items), never a guessed flat
+// dollar figure. Granted via Stripe's customer balance (a negative balance
+// transaction), which Stripe applies to the referrer's own next invoice(s)
+// automatically — not a coupon/promo code, which would need per-price setup
+// this per-property/per-bracket pricing doesn't have a fixed Price id for
+// (see create-checkout-session's own comment on ad hoc price_data).
+//
+// referral_reward_granted_at (on the REFERRED user's own row, set here)
+// is the one-time guard — if this specific referred user's checkout ever
+// fires checkout.session.completed again (e.g. they cancel and
+// re-subscribe), the referrer is never paid out twice for the same
+// referral. Never throws: a failure here must not roll back or fail the
+// primary subscription sync above, which already succeeded.
+async function grantReferralRewardIfDue(
+  stripe: Stripe,
+  adminClient: ReturnType<typeof createClient>,
+  referredUserId: string,
+): Promise<void> {
+  try {
+    const { data: referred } = await adminClient
+      .from("profiles")
+      .select("referred_by, referral_reward_granted_at")
+      .eq("id", referredUserId)
+      .maybeSingle();
+    const referrerId = referred?.referred_by as string | null | undefined;
+    if (!referrerId || referred?.referral_reward_granted_at) return;
+
+    const { data: referrer } = await adminClient
+      .from("profiles")
+      .select("stripe_customer_id, stripe_subscription_id")
+      .eq("id", referrerId)
+      .maybeSingle();
+    const customerId = referrer?.stripe_customer_id as string | null | undefined;
+    const subscriptionId = referrer?.stripe_subscription_id as string | null | undefined;
+    if (!customerId || !subscriptionId) return; // referrer isn't a paying customer themselves yet
+
+    const referrerSub = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ["items.data.price"],
+    });
+    const creditCents = referrerSub.items.data.reduce(
+      (sum, item) => sum + (item.price.unit_amount ?? 0) * (item.quantity ?? 1),
+      0,
+    );
+    if (creditCents <= 0) return;
+
+    await stripe.customers.createBalanceTransaction(customerId, {
+      amount: -creditCents,
+      currency: "usd",
+      description: "CorvusPT referral reward — one month free for referring a new customer",
+    });
+
+    await adminClient
+      .from("profiles")
+      .update({ referral_reward_granted_at: new Date().toISOString() })
+      .eq("id", referredUserId);
+  } catch (err) {
+    console.error("Referral reward grant failed (subscription sync above still succeeded):", err);
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -124,6 +187,8 @@ Deno.serve(async (req: Request) => {
               typeof session.subscription === "string" ? session.subscription : null,
           })
           .eq("id", userId);
+
+        await grantReferralRewardIfDue(stripe, adminClient, userId);
       }
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object as Stripe.Subscription;
