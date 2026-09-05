@@ -53,7 +53,15 @@ import {
 import { MODULES, type Module } from "@/lib/modules";
 import type { IconColor } from "@/lib/icon-colors";
 import { useAuth } from "@/lib/auth";
-import { getMyBilling, type PlanValue } from "@/lib/billing";
+import {
+  getMyBilling,
+  startPropertyCheckout,
+  bracketForValue,
+  formatMoney,
+  TIER_BRACKET_PRICES,
+  type PlanValue,
+  type Tier,
+} from "@/lib/billing";
 import {
   getHealthScore,
   type HealthScoreResult,
@@ -260,6 +268,11 @@ function Report() {
   const [resolvedProperty, setResolvedProperty] = useState<PropertyRecord | null>(null);
   const [existingProtest, setExistingProtest] = useState<ProtestRecord | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
+  // Which tier's checkout is currently redirecting, for the unpaid-property
+  // "Subscribe" buttons in the banner below (real, one-click checkout right
+  // here — see handleSubscribeToProperty — rather than sending the user off
+  // to the Properties list to find this same property again).
+  const [subscribingTier, setSubscribingTier] = useState<Tier | null>(null);
   // Evidence (photos/repair estimates/appraisals) the user has uploaded for this
   // property, fed into the Improvement Condition module's analysis — see
   // handleUploadEvidence() and loadModule() below.
@@ -401,6 +414,28 @@ function Report() {
     } catch (err) {
       console.error("Could not save this property:", err);
       return null;
+    }
+  }
+
+  // Real, one-click checkout for THIS property, right from the banner below
+  // — no detour through /dashboard/properties to find it again. The bracket
+  // is already known from the property's own value; only the tier
+  // (Owner-Managed vs CorvusPT-Managed) is a real choice only the customer
+  // can make, so both real prices are shown rather than picking one.
+  async function handleSubscribeToProperty(tier: Tier) {
+    const property = await ensureProperty();
+    if (!property) {
+      toast.error("Could not save this property. Please try again.");
+      return;
+    }
+    setSubscribingTier(tier);
+    try {
+      await startPropertyCheckout(property.id, tier);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not start checkout. Please try again.",
+      );
+      setSubscribingTier(null);
     }
   }
 
@@ -1324,13 +1359,28 @@ function Report() {
               </button>
             ) : (
               // Real payment gate (see startProtest's own check) reflected
-              // honestly in the button itself — an enabled-looking "File
-              // Protest" that silently no-ops when clicked while unpaid
-              // would be worse than just sending the user to where they can
-              // actually fix it.
-              <Link to="/dashboard/properties" className="btn-accent text-sm py-1.5">
-                Subscribe to File Protest
-              </Link>
+              // honestly here — real, one-click checkout for THIS property
+              // right in the banner, not a dead-end link to go find it again
+              // on the Properties list. The bracket is already known from
+              // the property's own value; only the tier is a real choice,
+              // so both real prices are shown.
+              <div className="flex flex-wrap gap-2">
+                {(["owner_managed", "corvusrf_managed"] as const).map((tier) => {
+                  const bracket = bracketForValue(resolvedProperty?.totalValue ?? state.totalValue);
+                  return (
+                    <button
+                      key={tier}
+                      disabled={!!subscribingTier}
+                      onClick={() => handleSubscribeToProperty(tier)}
+                      className="btn-accent text-sm py-1.5 disabled:opacity-60"
+                    >
+                      {subscribingTier === tier
+                        ? "Redirecting…"
+                        : `Subscribe — ${tier === "owner_managed" ? "Owner-Managed" : "CorvusPT-Managed"} $${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}/mo`}
+                    </button>
+                  );
+                })}
+              </div>
             )}
           </div>
         )}
