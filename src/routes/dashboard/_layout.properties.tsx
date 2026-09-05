@@ -9,6 +9,13 @@ import {
   buildAiReportIntakePatch,
   type PropertyRecord,
 } from "@/lib/properties";
+import {
+  getMyBilling,
+  getEntitledPropertyIds,
+  bracketPropertyCount,
+  planUsesPerPropertyEntitlement,
+  type BillingInfo,
+} from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
@@ -42,6 +49,7 @@ function Properties() {
   const [importOpen, setImportOpen] = useState(false);
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
+  const [billing, setBilling] = useState<BillingInfo | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -57,7 +65,25 @@ function Properties() {
     listHealthScores(user.id)
       .then(setHealthScores)
       .catch((err) => console.error(err));
+    getMyBilling(user.id)
+      .then(setBilling)
+      .catch((err) => console.error("Could not load billing info:", err));
   }, [user]);
+
+  // Which properties this subscription's paid bracket quantities actually
+  // cover — see getEntitledPropertyIds's own comment in billing.ts (oldest
+  // `paidPropertyCount` properties, by createdAt). Only meaningful for the
+  // two real bracket-priced tiers (planUsesPerPropertyEntitlement) — beta
+  // and the free/legacy plans have no such per-property purchase to check
+  // against, so `entitledIds` stays null and no Paid/Not Paid badge shows
+  // for those, rather than a misleading answer either way. Shown regardless
+  // of whether the admin-toggleable enforcement setting is actually on
+  // (see app-settings.ts) — this is honest information about what the
+  // subscription covers, not a statement about what's currently blocked.
+  const showsPaymentStatus = !!billing && planUsesPerPropertyEntitlement(billing.plan);
+  const entitledIds = showsPaymentStatus
+    ? getEntitledPropertyIds(properties, bracketPropertyCount(billing!.subscriptionBrackets))
+    : null;
 
   useSavingsBackfill(properties, setProperties);
 
@@ -173,6 +199,7 @@ function Properties() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
+                        {entitledIds && <PaymentStatusBadge paid={entitledIds.has(p.id)} />}
                       </div>
                       <h3 className="font-serif text-xl font-semibold">{p.address}</h3>
                       <p className="text-sm text-muted-foreground inline-flex items-center flex-wrap gap-1">
@@ -335,6 +362,17 @@ function ActionStatusBadge({
 }) {
   const { status, label } = getPropertyProtestStatus(property, protests);
   return <span className={`badge-soft ${STATUS_TONE[status]}`}>{label}</span>;
+}
+
+// Only rendered at all on a bracket-priced plan (owner_managed/
+// corvusrf_managed) — see showsPaymentStatus/entitledIds above. `paid` means
+// this property is one of the ones the subscription's paid property count
+// actually covers (oldest properties first — see getEntitledPropertyIds in
+// billing.ts), not that a payment was literally attached to this one row.
+function PaymentStatusBadge({ paid }: { paid: boolean }) {
+  return (
+    <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
+  );
 }
 
 // Only appears once the background AI health-score call (fired from addProperty())
