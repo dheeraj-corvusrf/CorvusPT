@@ -18,6 +18,7 @@ const {
   startCheckout,
   openBillingPortal,
   resumeSubscription,
+  removePropertyFromPlan,
   bracketLineTotal,
   bracketMonthlyTotal,
   getEntitledPropertyIds,
@@ -125,6 +126,16 @@ describe("resumeSubscription", () => {
     mockInvoke.mockResolvedValue({ ok: true });
     await resumeSubscription();
     expect(mockInvoke).toHaveBeenCalledWith("resume-subscription", {});
+  });
+});
+
+describe("removePropertyFromPlan", () => {
+  it("calls remove-property-from-plan with the property id and returns the real remaining count", async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue({ ok: true, remainingPaidCount: 2 });
+    const remaining = await removePropertyFromPlan("prop-1");
+    expect(mockInvoke).toHaveBeenCalledWith("remove-property-from-plan", { propertyId: "prop-1" });
+    expect(remaining).toBe(2);
   });
 });
 

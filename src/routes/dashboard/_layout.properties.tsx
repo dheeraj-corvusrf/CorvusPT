@@ -14,6 +14,7 @@ import {
   getEntitledPropertyIds,
   bracketPropertyCount,
   planUsesPerPropertyEntitlement,
+  removePropertyFromPlan,
   type BillingInfo,
 } from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
@@ -50,6 +51,7 @@ function Properties() {
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
   const [billing, setBilling] = useState<BillingInfo | null>(null);
+  const [removingFromPlanId, setRemovingFromPlanId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -80,11 +82,52 @@ function Properties() {
   // otherwise (no admin toggle) — drives both the badge below and the real
   // gate on Request Protest Filing/Re-file (see isPaid in the property map).
   const showsPaymentStatus = !!billing && planUsesPerPropertyEntitlement(billing.plan);
-  const entitledIds = showsPaymentStatus
-    ? getEntitledPropertyIds(properties, bracketPropertyCount(billing!.subscriptionBrackets))
-    : null;
+  // The REAL Stripe-paid count — not entitledIds.size, which is capped at
+  // properties.length and so understates this whenever the subscription
+  // pays for more properties than the customer has actually added yet.
+  const paidCount = billing ? bracketPropertyCount(billing.subscriptionBrackets) : 0;
+  const entitledIds = showsPaymentStatus ? getEntitledPropertyIds(properties, paidCount) : null;
 
   useSavingsBackfill(properties, setProperties);
+
+  // Real "stop paying for this one" action (see remove-property-from-plan/
+  // index.ts) — reduces the paid count by one directly on the live Stripe
+  // subscription. Coverage is oldest-properties-first across the WHOLE
+  // account, not a specific slot tied to this property (see
+  // getEntitledPropertyIds's own comment in billing.ts), so reducing the
+  // count by one doesn't always mean THIS exact property loses coverage —
+  // simulated here (one fewer paid slot) so the confirmation is honest about
+  // which outcome will actually happen before the customer confirms.
+  async function handleRemoveFromPlan(p: PropertyRecord) {
+    const stillCoveredAfter = getEntitledPropertyIds(properties, Math.max(0, paidCount - 1)).has(
+      p.id,
+    );
+    const confirmed = window.confirm(
+      stillCoveredAfter
+        ? "This reduces your paid property count by one. Coverage applies to your oldest properties first, so a different (newer) property will lose coverage instead of this one. Continue?"
+        : `This removes paid coverage for ${p.address} — you'll no longer be charged for it, and it'll show as Not Paid. Continue?`,
+    );
+    if (!confirmed || !user) return;
+    setRemovingFromPlanId(p.id);
+    try {
+      await removePropertyFromPlan(p.id);
+      toast.success("Your plan has been updated.");
+      // Real remaining count comes back from Stripe immediately; the DB's
+      // own profiles.qty_* sync lands a moment later via the existing
+      // customer.subscription.updated webhook, same lag any Stripe-driven
+      // change already has. Re-fetching billing here (rather than trusting
+      // the function's own return value to patch state by hand) keeps this
+      // page reading from the one real source, same as on initial load.
+      const fresh = await getMyBilling(user.id);
+      setBilling(fresh);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not update your plan. Please try again.",
+      );
+    } finally {
+      setRemovingFromPlanId(null);
+    }
+  }
 
   async function handleDelete(id: string) {
     if (!window.confirm("Remove this property from your dashboard?")) return;
@@ -271,6 +314,15 @@ function Properties() {
                         label="Request Protest Filing"
                         onAuthorize={() => setAuthorizingProperty(p)}
                       />
+                    )}
+                    {isPaid && entitledIds && (
+                      <button
+                        disabled={removingFromPlanId === p.id}
+                        onClick={() => handleRemoveFromPlan(p)}
+                        className="btn-outline text-warning-foreground disabled:opacity-60"
+                      >
+                        {removingFromPlanId === p.id ? "Updating…" : "Remove from Plan"}
+                      </button>
                     )}
                     <button
                       disabled={deletingId === p.id}

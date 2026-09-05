@@ -200,6 +200,21 @@ export async function openBillingPortal(): Promise<void> {
   window.location.href = url;
 }
 
+// Real per-property "stop paying for this one" action (see
+// remove-property-from-plan/index.ts for the actual Stripe subscription-item
+// mutation) — reduces the paid property count by one directly, instead of
+// sending the customer into the Customer Portal's all-or-nothing "Cancel
+// subscription." Returns the real remaining paid count so the caller can
+// update its own UI immediately, ahead of the customer.subscription.updated/
+// deleted webhook that syncs profiles.qty_* a moment later.
+export async function removePropertyFromPlan(propertyId: string): Promise<number> {
+  const { remainingPaidCount } = await invokeEdgeFunction<{
+    ok: boolean;
+    remainingPaidCount: number;
+  }>("remove-property-from-plan", { propertyId });
+  return remainingPaidCount;
+}
+
 // Undoes a scheduled cancel-at-period-end in one click, rather than sending the user
 // into the full Stripe Customer Portal to find the "renew" option.
 export async function resumeSubscription(): Promise<void> {
