@@ -942,23 +942,35 @@ function Report() {
         // model existed) grant unconditional access from the account plan
         // alone. owner_managed/corvusrf_managed no longer do — each
         // property now has its own independent Stripe subscription (see
-        // src/lib/properties.ts), so access for those two plans is decided
-        // by the effect below instead, keyed on resolvedProperty's own
-        // subscriptionStatus.
-        setHasFullAccess(plan === "ai_report" || plan === "managed_protest" || plan === "beta");
+        // src/lib/properties.ts), so access for those two plans is fully
+        // decided by the effect below instead, keyed on resolvedProperty's
+        // own subscriptionStatus — left untouched here (not set to false)
+        // so that effect, which runs after this one resolves myPlan, is
+        // never raced into briefly reading a stale null plan as "not
+        // owner_managed" and skipping its own real check.
+        if (plan === "ai_report" || plan === "managed_protest" || plan === "beta") {
+          setHasFullAccess(true);
+        }
       })
       .catch(() => setHasFullAccess(false))
       .finally(() => setBillingChecked(true));
   }, [user]);
 
-  // Per-property access — real and direct now that every property carries
-  // its own subscriptionStatus (no more account-level "oldest N properties"
-  // simulation to approximate it). Only ever widens access (never narrows
-  // what the effect above already granted for beta/legacy plans), and only
-  // once resolvedProperty is actually known.
+  // Per-property access for owner_managed/corvusrf_managed — confirmed live
+  // bug this replaces: the previous version only ever set hasFullAccess to
+  // true and never back to false, so once ANY property in a session was
+  // found active, it stayed "true" for every OTHER property viewed
+  // afterward too (switching from a paid property to a different, unpaid
+  // one never revoked access — a real protest got filed on a property that
+  // was never paid for). This always recomputes the full real answer from
+  // scratch on every resolvedProperty change instead of only ever upgrading
+  // it, so switching properties can revoke access, not just grant it. Never
+  // touches beta/legacy plans (guarded by myPlan), which effect above
+  // already decided unconditionally.
   useEffect(() => {
-    if (resolvedProperty?.subscriptionStatus === "active") setHasFullAccess(true);
-  }, [resolvedProperty]);
+    if (myPlan !== "owner_managed" && myPlan !== "corvusrf_managed") return;
+    setHasFullAccess(resolvedProperty?.subscriptionStatus === "active");
+  }, [myPlan, resolvedProperty]);
 
   // Auto-opens a module for a deep link (CaseDetailModal's "Upload Evidence —
   // Go to Module 8" button, ?openModule=evidence) — waits for billingChecked
