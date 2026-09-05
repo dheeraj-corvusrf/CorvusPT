@@ -1341,9 +1341,28 @@ function UserRow({
             value={record.plan}
             onChange={(e) => onPlanChange(e.target.value as PlanValue)}
             className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+            title={
+              record.plan === "owner_managed" || record.plan === "corvusrf_managed"
+                ? "Reflects this account's real per-property Stripe subscriptions — not manually assignable. Use Beta to grant free full access instead."
+                : undefined
+            }
           >
             {PLAN_OPTIONS.map((p) => (
-              <option key={p.value} value={p.value}>
+              // owner_managed/corvusrf_managed are real, per-PROPERTY Stripe
+              // subscriptions now (see startPropertyCheckout in billing.ts) —
+              // there's no account-level "plan" left to grant here. This
+              // dropdown can only display them (so an already-subscribed
+              // account's current tier still shows correctly) — picking one
+              // by hand would grant nothing (every access check reads each
+              // property's own real subscriptionStatus, never this field for
+              // these two values) and gets silently overwritten by the next
+              // real subscription webhook event for this user anyway. Beta
+              // is still real: it's the one unconditional, non-Stripe grant.
+              <option
+                key={p.value}
+                value={p.value}
+                disabled={p.value === "owner_managed" || p.value === "corvusrf_managed"}
+              >
                 {p.label}
               </option>
             ))}
