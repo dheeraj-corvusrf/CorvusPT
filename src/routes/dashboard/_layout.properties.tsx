@@ -131,16 +131,19 @@ function Properties() {
   useSavingsBackfill(properties, setProperties);
 
   // Starts a real, one-click checkout for exactly this property — see
-  // startPropertyCheckout in billing.ts. Redirects the page to Stripe on
-  // success; only the failure path needs to release the loading state.
+  // startPropertyCheckout in billing.ts. Opens in a new tab (newTab: true)
+  // so the property list stays put underneath; unlike a same-tab redirect,
+  // that means this tab never navigates away, so the loading state is
+  // always released here, not just on the failure path.
   async function handleSubscribe(p: PropertyRecord, tier: Tier) {
     setSubscribing({ propertyId: p.id, tier });
     try {
-      await startPropertyCheckout(p.id, tier);
+      await startPropertyCheckout(p.id, tier, { newTab: true });
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Could not start checkout. Please try again.",
       );
+    } finally {
       setSubscribing(null);
     }
   }

@@ -421,7 +421,10 @@ function Report() {
   // — no detour through /dashboard/properties to find it again. The bracket
   // is already known from the property's own value; only the tier
   // (Owner-Managed vs CorvusPT-Managed) is a real choice only the customer
-  // can make, so both real prices are shown rather than picking one.
+  // can make, so both real prices are shown rather than picking one. Opens
+  // in a new tab (newTab: true) so the report stays put underneath; since
+  // this tab never navigates away, the loading state is always released
+  // here, not just on the failure path.
   async function handleSubscribeToProperty(tier: Tier) {
     const property = await ensureProperty();
     if (!property) {
@@ -430,11 +433,12 @@ function Report() {
     }
     setSubscribingTier(tier);
     try {
-      await startPropertyCheckout(property.id, tier);
+      await startPropertyCheckout(property.id, tier, { newTab: true });
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Could not start checkout. Please try again.",
       );
+    } finally {
       setSubscribingTier(null);
     }
   }

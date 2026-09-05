@@ -119,16 +119,35 @@ export async function getMyBilling(userId: string): Promise<BillingInfo> {
 // know on its own (it runs server-side, with no view of Vite's base path) —
 // the client computes it via import.meta.env.BASE_URL, same pattern
 // forgot-password.tsx's redirectTo already uses.
-export async function startPropertyCheckout(propertyId: string, tier: Tier): Promise<void> {
-  const basePath = import.meta.env.BASE_URL;
-  const { url } = await invokeEdgeFunction<{ url: string }>("create-checkout-session", {
-    propertyId,
-    tier,
-    successPath: `${basePath}dashboard/properties?checkout=success`,
-    cancelPath: `${basePath}dashboard/properties`,
-  });
-  if (!url) throw new Error("Stripe did not return a checkout URL. Please try again.");
-  window.location.href = url;
+//
+// `newTab: true` (both Subscribe buttons — properties.tsx and ai-report.tsx
+// — so clicking one doesn't navigate away from whatever the customer was
+// looking at) opens a blank tab BEFORE the await, not after — window.open()
+// called from inside a .then()/await continuation is treated as not
+// user-initiated by most browsers' popup blockers and gets silently
+// blocked. Deliberately no `noopener` here: that would return null for the
+// handle this needs to later point at the real Stripe URL once it resolves.
+export async function startPropertyCheckout(
+  propertyId: string,
+  tier: Tier,
+  options?: { newTab?: boolean },
+): Promise<void> {
+  const newTabHandle = options?.newTab ? window.open("", "_blank") : null;
+  try {
+    const basePath = import.meta.env.BASE_URL;
+    const { url } = await invokeEdgeFunction<{ url: string }>("create-checkout-session", {
+      propertyId,
+      tier,
+      successPath: `${basePath}dashboard/properties?checkout=success`,
+      cancelPath: `${basePath}dashboard/properties`,
+    });
+    if (!url) throw new Error("Stripe did not return a checkout URL. Please try again.");
+    if (newTabHandle) newTabHandle.location.href = url;
+    else window.location.href = url;
+  } catch (err) {
+    newTabHandle?.close();
+    throw err;
+  }
 }
 
 // Opens Stripe's real Customer Portal — with one subscription per property
