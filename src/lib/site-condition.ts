@@ -1,4 +1,4 @@
-// Deterministic helpers over Module 4's real 14-factor site assessment — same
+// Deterministic helpers over Module 4's real 16-factor site assessment — same
 // convention as executive-summary.ts: real logic, never re-asked of the AI.
 import type { ModuleResultMap } from "./ai-report-modules";
 
@@ -25,8 +25,8 @@ export function pickHeadlineFactor(factors: SiteFactor[]): SiteFactor | null {
   return [...withData].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])[0];
 }
 
-// Real count of factors still needing more data — shown plainly (e.g. "12 of
-// 14 factors need more data") rather than buried, so the honesty of the
+// Real count of factors still needing more data — shown plainly (e.g. "14 of
+// 16 factors need more data") rather than buried, so the honesty of the
 // "Additional Data Needed" majority is visible, not just implied by the
 // individual row statuses.
 export function countDataGaps(factors: SiteFactor[]): number {

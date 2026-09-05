@@ -106,6 +106,8 @@ type ModulesInput = {
   siteGis?: {
     floodZone: { zone: string; label: string; inSFHA: boolean } | null;
     elevationFt: number | null;
+    nearestHighwayMi: number | null;
+    nearestRailMi: number | null;
   } | null;
   // Only for moduleId "improvement" — the real typical economic-life range
   // for this property's type (src/lib/improvement-condition.ts,
@@ -358,9 +360,12 @@ const defenseQA = (
         .slice(0, 6)
     : [];
 
-// Module 4 (site) — the 14 factors from the spec, in a fixed order. Enforced
+// Module 4 (site) — the 16 factors from the spec, in a fixed order. Enforced
 // as an allow-list (not left to the AI to name/omit/invent categories) so
-// the UI's table always has exactly 14 rows in a stable order.
+// the UI's table always has exactly 16 rows in a stable order. Highway
+// Proximity/Railroad Proximity are the two newest factors — real distances
+// from site-gis's OSM Overpass lookup, same real-data discipline as
+// Floodplain/Grade (see enforceSiteFactorRealData below).
 const SITE_FACTORS = [
   "Floodplain",
   "Easements",
@@ -376,6 +381,8 @@ const SITE_FACTORS = [
   "Grade",
   "Topography",
   "Access Limitations",
+  "Highway Proximity",
+  "Railroad Proximity",
 ] as const;
 type SiteFactorName = (typeof SITE_FACTORS)[number];
 type SiteFactorStatus = "Confirmed" | "Partial Data" | "Additional Data Needed" | "Not Applicable";
@@ -398,7 +405,7 @@ const SITE_FACTOR_STATUSES: SiteFactorStatus[] = [
 const SITE_FACTOR_SEVERITIES: SiteFactorSeverity[] = ["High", "Moderate", "Low", "Unknown"];
 const SITE_FACTOR_CONFIDENCES: SiteFactorConfidence[] = ["High", "Moderate", "Low"];
 
-// First pass — validates the AI's raw factor array into exactly 14 typed
+// First pass — validates the AI's raw factor array into exactly 16 typed
 // entries (one per SITE_FACTORS name, in order), defaulting anything
 // missing/malformed to a safe "Additional Data Needed" row. Does NOT yet
 // know about real siteGis data — see enforceSiteFactorRealData below, which
@@ -445,13 +452,17 @@ function siteFactors(v: unknown): SiteFactor[] {
 // only read "Confirmed" when a real FEMA zone was actually fetched for this
 // property; Grade can only read "Partial Data" (never "Confirmed" — a
 // single elevation point is not a contour survey) when a real USGS
-// elevation was fetched; every other factor is hard-clamped to "Additional
-// Data Needed" with "Low" confidence no matter what the AI returned — this
-// app has no real source for any of them yet, and the AI's own discipline
-// alone isn't trusted to guarantee that. notApplicable is a real, user-
-// confirmed exclusion (see module-overrides.ts) — checked LAST so it can
-// never suppress an actual real finding: a factor with a genuine FEMA/USGS
-// source above still wins even if it's also (stale-)listed here.
+// elevation was fetched; Highway Proximity/Railroad Proximity can only read
+// "Confirmed" when a real OSM-measured distance came back (site-gis's
+// Overpass lookup is a real but best-effort/sometimes-slow free API — see
+// its own comments — so this is null more often than the FEMA/USGS fields
+// are); every other factor is hard-clamped to "Additional Data Needed" with
+// "Low" confidence no matter what the AI returned — this app has no real
+// source for any of them yet, and the AI's own discipline alone isn't
+// trusted to guarantee that. notApplicable is a real, user-confirmed
+// exclusion (see module-overrides.ts) — checked LAST so it can never
+// suppress an actual real finding: a factor with a genuine real-data source
+// above still wins even if it's also (stale-)listed here.
 function enforceSiteFactorRealData(
   factors: SiteFactor[],
   siteGis: ModulesInput["siteGis"],
@@ -462,6 +473,10 @@ function enforceSiteFactorRealData(
       if (siteGis?.floodZone) return { ...f, status: "Confirmed" };
     } else if (f.factor === "Grade") {
       if (siteGis?.elevationFt != null) return { ...f, status: "Partial Data" };
+    } else if (f.factor === "Highway Proximity") {
+      if (siteGis?.nearestHighwayMi != null) return { ...f, status: "Confirmed" };
+    } else if (f.factor === "Railroad Proximity") {
+      if (siteGis?.nearestRailMi != null) return { ...f, status: "Confirmed" };
     }
     if (notApplicable.includes(f.factor)) {
       return {
@@ -621,28 +636,32 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
   },
   site: {
     instruction:
-      "Assess this property's site conditions across exactly these 14 factors, in this exact " +
+      "Assess this property's site conditions across exactly these 16 factors, in this exact " +
       "order: Floodplain, Easements, Drainage, Sewer, Water Availability, Buildability, Ponds, " +
       "Streams, Road Frontage, Visibility, Traffic Counts / VPD, Grade, Topography, Access " +
-      "Limitations. Only Floodplain and Grade can ever be backed by real data (given above, " +
-      "when present) — for every other factor you have no real source, so briefly explain what " +
-      "the factor is, why it could matter for THIS property type/value, and what to upload to " +
+      "Limitations, Highway Proximity, Railroad Proximity. Only Floodplain, Grade, Highway " +
+      "Proximity, and Railroad Proximity can ever be backed by real data (given above, when " +
+      "present) — for every other factor you have no real source, so briefly explain what the " +
+      "factor is, why it could matter for THIS property type/value, and what to upload to " +
       "assess it (a plat, a drainage plan, a utility letter, a traffic study, a topo survey, " +
       "etc.); never claim a specific site condition you weren't given real data for. For " +
       "Floodplain, state the real zone/Special Flood Hazard Area status given above; for Grade, " +
       "state the real elevation given above but note a single point isn't a full topographic " +
-      "assessment. Also give an overall 0-100 documentation-priority score for how worthwhile " +
-      "pursuing site-condition evidence looks for this property (its value profile and property " +
-      "type), and a one-sentence key finding grounded only in whichever factors have real/" +
-      "partial data — say plainly that more data is needed if nothing real was found, never " +
-      "assert a valuation impact you can't back with a real fact.",
+      "assessment; for Highway Proximity and Railroad Proximity, state the real distance given " +
+      "above (if given) and note this as a potential noise/traffic/access factor an appraiser " +
+      "may not have adjusted for — if no real distance was given for either, treat it like any " +
+      "other undocumented factor. Also give an overall 0-100 documentation-priority score for " +
+      "how worthwhile pursuing site-condition evidence looks for this property (its value " +
+      "profile and property type), and a one-sentence key finding grounded only in whichever " +
+      "factors have real/partial data — say plainly that more data is needed if nothing real " +
+      "was found, never assert a valuation impact you can't back with a real fact.",
     schema:
       `{"guidance": "<ONE short sentence, max ~18 words>", ` +
-      `"factors": [{"factor": "<one of the 14 exact names above>", "status": "<Confirmed | ` +
+      `"factors": [{"factor": "<one of the 16 exact names above>", "status": "<Confirmed | ` +
       `Partial Data | Additional Data Needed>", "finding": "<short factual statement, max ~10 ` +
       `words>", "severity": "<High | Moderate | Low | Unknown>", "confidence": "<High | ` +
       `Moderate | Low>", "potentialImpact": "<short phrase, max ~8 words>", "evidenceNeeded": ` +
-      `"<short phrase, or null if nothing further is needed>"}, ...] (exactly 14 entries, one ` +
+      `"<short phrase, or null if nothing further is needed>"}, ...] (exactly 16 entries, one ` +
       `per factor, in the order listed above), ` +
       `"keyFinding": "<max 2 short sentences>", "priorityScore": <integer 0-100>}`,
     parse: (p) => ({
@@ -865,9 +884,19 @@ function buildRecord(input: ModulesInput): string {
           `a single point, not a full topographic survey.`,
       );
     }
+    if (g.nearestHighwayMi != null) {
+      parts.push(
+        `Real distance to the nearest major highway (OpenStreetMap): ${g.nearestHighwayMi.toFixed(2)} miles.`,
+      );
+    }
+    if (g.nearestRailMi != null) {
+      parts.push(
+        `Real distance to the nearest rail line (OpenStreetMap): ${g.nearestRailMi.toFixed(2)} miles.`,
+      );
+    }
     if (parts.length > 0) {
       lines.push(
-        `${parts.join(" ")} Use these exact real values — never invent a different zone or elevation.`,
+        `${parts.join(" ")} Use these exact real values — never invent a different zone, elevation, or distance.`,
       );
     }
   }
