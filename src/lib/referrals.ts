@@ -50,24 +50,40 @@ export async function getMyReferrals(): Promise<ReferralRecord[]> {
   }));
 }
 
-// A real, working sign-up link — /join is a thin, friendlier-looking alias
-// (see src/routes/join.tsx) that forwards straight into /sign-in?mode=
-// signup&ref=..., which is what actually reads the code: sign-in.tsx passes
-// it through to supabase.auth.signUp()'s options.data, resolved server-side
-// by handle_new_user() (see schema.sql) into a real referred_by user id.
-// Never trust/resolve the code client-side — this function only ever builds
-// the URL, it doesn't look anyone up.
+// A real, working sign-up link, built as a clean path — .../join/CODE, no
+// "?" — rather than /join?ref=CODE directly, since a raw query string reads
+// as a tracking link to a friend deciding whether to click it. This app is a
+// fully static site (GitHub Pages, no server), so /join/CODE can't be a real
+// prerendered page for every possible code; hub/404.html (GitHub's one
+// site-wide 404 fallback) recognizes exactly that path shape and forwards it
+// into the real /join?ref=CODE page (src/routes/join.tsx), which is what
+// actually reads the code — that page then forwards again into /sign-in?
+// mode=signup&ref=..., which is what sign-in.tsx passes through to
+// supabase.auth.signUp()'s options.data, resolved server-side by
+// handle_new_user() (see schema.sql) into a real referred_by user id. Never
+// trust/resolve the code client-side — this function only ever builds the
+// URL, it doesn't look anyone up.
+//
+// import.meta.env.BASE_URL (not just window.location.origin) matters here —
+// this app is deployed under a real path prefix (e.g. "/corvuspt/", see
+// deploy.yml's SITE_BASE), same as every other absolute-URL builder in this
+// app already accounts for (buildSignupInviteLink in admin.ts, sign-in.tsx's
+// Google OAuth redirectTo, forgot-password.tsx's reset redirect) — omitting
+// it here was a real bug: the link this used to build 404'd in production.
 export function buildReferralLink(code: string): string {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  return `${origin}/join?ref=${encodeURIComponent(code)}`;
+  const base = typeof window !== "undefined" ? import.meta.env.BASE_URL : "/";
+  return `${origin}${base}join/${encodeURIComponent(code)}`;
 }
 
 // A real, branded "your friend referred you" email via send-referral-invite
 // (Resend) — the referrer's own name/code are resolved server-side from
-// their own authenticated profile, never trusted from this call; `origin`
-// is only ever used as a URL prefix, same convention startCheckout's own
-// successPath/cancelPath already use.
+// their own authenticated profile, never trusted from this call. `origin`
+// here is the full origin+base prefix (see buildReferralLink's own comment
+// on why BASE_URL matters) — the edge function only ever uses it as a URL
+// prefix, same convention startCheckout's own successPath/cancelPath use.
 export async function sendReferralInvite(toEmail: string): Promise<void> {
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const origin =
+    typeof window !== "undefined" ? `${window.location.origin}${import.meta.env.BASE_URL}` : "";
   await invokeEdgeFunction("send-referral-invite", { toEmail, origin });
 }

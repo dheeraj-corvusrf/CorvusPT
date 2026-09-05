@@ -11,12 +11,12 @@ export const Route = createFileRoute("/join")({
       },
     ],
   }),
-  // A clean, shareable alias for the referral link (see buildReferralLink in
-  // src/lib/referrals.ts) — /sign-in?mode=signup&ref=CODE works identically
-  // but reads like a tracking URL when a friend sees it raw. This route is
-  // just a thin forward into that same real sign-up flow (still the one
-  // source of truth — no duplicated form), swapping in a friendlier path
-  // before the query string a friend actually sees when copying the link.
+  // The real referral link a friend actually shares/clicks is a clean path
+  // — .../join/CODE, no "?" (see buildReferralLink in src/lib/referrals.ts)
+  // — since this is a static site with no server, hub/404.html is what
+  // turns that path into a request for THIS page, at ?ref=CODE. This route
+  // is just a thin forward from there into the one real sign-up flow
+  // (/sign-in?mode=signup&ref=CODE) — no duplicated form.
   validateSearch: (search: Record<string, unknown>): { ref?: string } => ({
     ref: typeof search.ref === "string" ? search.ref : undefined,
   }),
