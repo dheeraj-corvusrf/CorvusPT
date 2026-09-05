@@ -6,6 +6,7 @@ import { mockQueryBuilder } from "./test-utils/supabase-query-mock";
 
 const mockFrom = vi.fn();
 const mockRpc = vi.fn();
+const mockInvoke = vi.fn();
 
 vi.mock("./supabase", () => ({
   supabase: {
@@ -13,9 +14,13 @@ vi.mock("./supabase", () => ({
     rpc: (...args: unknown[]) => mockRpc(...args),
   },
 }));
+vi.mock("./edge-functions", () => ({
+  invokeEdgeFunction: (...args: unknown[]) => mockInvoke(...args),
+}));
 
 // Imported after the mocks above so referrals.ts picks up the mocked module.
-const { getMyReferralCode, getMyReferrals, buildReferralLink } = await import("./referrals");
+const { getMyReferralCode, getMyReferrals, buildReferralLink, sendReferralInvite } =
+  await import("./referrals");
 
 describe("buildReferralLink", () => {
   it("builds a real sign-up URL carrying the code", () => {
@@ -97,5 +102,21 @@ describe("getMyReferrals", () => {
   it("throws on a real Supabase error", async () => {
     mockRpc.mockResolvedValue({ data: null, error: new Error("nope") });
     await expect(getMyReferrals()).rejects.toThrow("nope");
+  });
+});
+
+describe("sendReferralInvite", () => {
+  it("invokes send-referral-invite with the target email and the real page origin", async () => {
+    mockInvoke.mockResolvedValue({ ok: true });
+    await sendReferralInvite("friend@example.com");
+    expect(mockInvoke).toHaveBeenCalledWith("send-referral-invite", {
+      toEmail: "friend@example.com",
+      origin: window.location.origin,
+    });
+  });
+
+  it("throws when the edge function call fails", async () => {
+    mockInvoke.mockRejectedValue(new Error("send failed"));
+    await expect(sendReferralInvite("friend@example.com")).rejects.toThrow("send failed");
   });
 });

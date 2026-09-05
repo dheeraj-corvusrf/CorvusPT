@@ -1,15 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Gift, Users } from "lucide-react";
+import type { FormEvent } from "react";
+import { Gift, Users, Mail } from "lucide-react";
+import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import {
   getMyReferralCode,
   getMyReferrals,
   buildReferralLink,
+  sendReferralInvite,
   type ReferralRecord,
 } from "@/lib/referrals";
 import { CopyButton } from "@/components/CopyButton";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getErrorMessage } from "@/lib/error-message";
 
 export const Route = createFileRoute("/dashboard/_layout/referrals")({
   head: () => ({
@@ -30,6 +34,8 @@ function Referrals() {
   const [code, setCode] = useState<string | null>(null);
   const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [sendingInvite, setSendingInvite] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -44,6 +50,21 @@ function Referrals() {
 
   const rewardedCount = referrals.filter((r) => r.rewarded).length;
   const link = code ? buildReferralLink(code) : null;
+
+  async function handleSendInvite(e: FormEvent) {
+    e.preventDefault();
+    if (!inviteEmail.trim()) return;
+    setSendingInvite(true);
+    try {
+      await sendReferralInvite(inviteEmail.trim());
+      toast.success(`Invite sent to ${inviteEmail.trim()}.`);
+      setInviteEmail("");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not send this invite. Please try again."));
+    } finally {
+      setSendingInvite(false);
+    }
+  }
 
   return (
     <div>
@@ -75,6 +96,37 @@ function Referrals() {
                   automatically credit your account one month free — applied to your next bill, no
                   action needed from you.
                 </p>
+                <form onSubmit={handleSendInvite} className="mt-4 border-t border-border pt-4">
+                  <label
+                    htmlFor="referral-invite-email"
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    Or email a friend directly
+                  </label>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    <input
+                      id="referral-invite-email"
+                      type="email"
+                      required
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      placeholder="friend@email.com"
+                      className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={sendingInvite}
+                      className="btn-accent inline-flex items-center gap-1.5 text-sm disabled:opacity-60"
+                    >
+                      <Mail className="h-3.5 w-3.5" />
+                      {sendingInvite ? "Sending…" : "Send Invite"}
+                    </button>
+                  </div>
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    We'll send a real email from CorvusPT with your name and your real referral link
+                    — nothing is created on their end until they actually sign up.
+                  </p>
+                </form>
               </>
             ) : (
               <p className="mt-2 text-sm text-destructive">

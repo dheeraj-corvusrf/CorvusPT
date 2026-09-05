@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { invokeEdgeFunction } from "./edge-functions";
 
 // One month free, per successful referral — see stripe-webhook/index.ts for
 // where the actual Stripe credit is granted (real amount = the referrer's
@@ -57,4 +58,14 @@ export async function getMyReferrals(): Promise<ReferralRecord[]> {
 export function buildReferralLink(code: string): string {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   return `${origin}/sign-in?mode=signup&ref=${encodeURIComponent(code)}`;
+}
+
+// A real, branded "your friend referred you" email via send-referral-invite
+// (Resend) — the referrer's own name/code are resolved server-side from
+// their own authenticated profile, never trusted from this call; `origin`
+// is only ever used as a URL prefix, same convention startCheckout's own
+// successPath/cancelPath already use.
+export async function sendReferralInvite(toEmail: string): Promise<void> {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  await invokeEdgeFunction("send-referral-invite", { toEmail, origin });
 }
