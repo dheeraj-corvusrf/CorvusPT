@@ -13,6 +13,7 @@ import {
   getMyBilling,
   startPropertyCheckout,
   cancelPropertySubscription,
+  resumePropertySubscription,
   bracketForValue,
   formatMoney,
   TIER_BRACKET_PRICES,
@@ -67,6 +68,7 @@ function Properties() {
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
   const [billing, setBilling] = useState<BillingInfo | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [resumingId, setResumingId] = useState<string | null>(null);
   const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
 
   useEffect(() => {
@@ -169,6 +171,29 @@ function Properties() {
       toast.error(err instanceof Error ? err.message : "Could not cancel this subscription.");
     } finally {
       setCancelingId(null);
+    }
+  }
+
+  // Undoes a subscription already scheduled to cancel at period end — the
+  // Stripe Customer Portal's own "Cancel subscription" defaults to
+  // cancel-at-period-end (unlike this page's own Cancel Subscription button,
+  // which cancels immediately), so a property can land in that state without
+  // ever touching this page. Before this, cancelAtPeriodEnd/"Canceling at
+  // period end" was only ever displayed, never something the user could
+  // undo from inside the app — resumePropertySubscription existed and was
+  // tested but had no caller anywhere.
+  async function handleResumeSubscription(p: PropertyRecord) {
+    setResumingId(p.id);
+    try {
+      await resumePropertySubscription(p.id);
+      toast.success("Subscription resumed — it will keep renewing as normal.");
+      setProperties((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, cancelAtPeriodEnd: false, cancelAt: null } : x)),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not resume this subscription.");
+    } finally {
+      setResumingId(null);
     }
   }
 
@@ -381,7 +406,16 @@ function Properties() {
                         );
                       })
                     )}
-                    {isPaid && !isBeta && (
+                    {isPaid && !isBeta && p.cancelAtPeriodEnd && (
+                      <button
+                        disabled={resumingId === p.id}
+                        onClick={() => handleResumeSubscription(p)}
+                        className="btn-outline disabled:opacity-60"
+                      >
+                        {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
+                      </button>
+                    )}
+                    {isPaid && !isBeta && !p.cancelAtPeriodEnd && (
                       <button
                         disabled={cancelingId === p.id}
                         onClick={() => handleCancelSubscription(p)}

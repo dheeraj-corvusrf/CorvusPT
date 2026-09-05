@@ -175,10 +175,18 @@ create policy "Users can insert their own properties"
   on public.properties for insert
   with check (auth.uid() = user_id);
 
+-- subscription_status is distinct from 'active' is the real, server-side half of
+-- the "can't delete a paid property" gate (see handleDelete's own isPaid check in
+-- _layout.properties.tsx) — without it, a user could call
+-- supabase.from('properties').delete(...) directly and delete a property with a
+-- real Stripe subscription still running and billing them, with nothing left in
+-- the app to see or cancel it from. Beta properties never get a real subscription
+-- (see startPropertyCheckout in billing.ts), so subscription_status is never
+-- 'active' for them — this never blocks a beta user's own deletes.
 drop policy if exists "Users can delete their own properties" on public.properties;
 create policy "Users can delete their own properties"
   on public.properties for delete
-  using (auth.uid() = user_id);
+  using (auth.uid() = user_id and subscription_status is distinct from 'active');
 
 -- Was missing entirely until this was added, which meant markPropertyPaid()'s
 -- update() call was silently rejected by RLS the whole time (no error surfaced —
@@ -460,10 +468,41 @@ create policy "Users can view their own protests"
   on public.protests for select
   using (auth.uid() = user_id);
 
+-- Real, server-side half of the protest-payment gate. Every "isPaid"/
+-- "hasFullAccess" check in the app (ProtestAuthorizationFlow, ai-report.tsx,
+-- _layout.properties.tsx, JourneyTracker.tsx, BulkProtestAuthorizationFlow)
+-- is client-side UX only — without this, a signed-in user could call
+-- supabase.from('protests').insert(...) directly (e.g. from devtools) and
+-- file a protest for a property with no active subscription, bypassing
+-- every one of those UI gates at once. security definer bypasses RLS
+-- internally so it can safely be referenced from protests' own INSERT
+-- policy without recursively re-evaluating RLS on properties/profiles (same
+-- convention as is_admin() above). Mirrors the app's own beta-bypasses-
+-- unconditionally / everyone-else-reads-their-property's-real-
+-- subscription_status convention.
+create or replace function public.property_is_paid(p_property_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1
+    from public.properties p
+    where p.id = p_property_id
+      and p.user_id = auth.uid()
+      and (
+        p.subscription_status = 'active'
+        or (select plan from public.profiles where id = auth.uid()) = 'beta'
+      )
+  );
+$$;
+
 drop policy if exists "Users can request their own protests" on public.protests;
 create policy "Users can request their own protests"
   on public.protests for insert
-  with check (auth.uid() = user_id);
+  with check (auth.uid() = user_id and public.property_is_paid(property_id));
 
 drop policy if exists "Admins can view all protests" on public.protests;
 create policy "Admins can view all protests"
