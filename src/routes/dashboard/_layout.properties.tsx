@@ -169,12 +169,22 @@ function Properties() {
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!window.confirm("Remove this property from your dashboard?")) return;
-    setDeletingId(id);
+  // Deleting a property with an active subscription would leave that
+  // subscription still running (and still billing) with nothing left in the
+  // app to see or cancel it from — the property row is its only link back
+  // to cancelPropertySubscription/the Stripe subscription id. Checked here
+  // too (not just via the button's own disabled state below) so this can
+  // never fire for a paid property regardless of how it's triggered.
+  async function handleDelete(p: PropertyRecord, isPaid: boolean) {
+    if (isPaid) {
+      toast.error("Cancel this property's subscription before deleting it.");
+      return;
+    }
+    if (!window.confirm(`Remove ${p.address} from your dashboard?`)) return;
+    setDeletingId(p.id);
     try {
-      await deleteProperty(id);
-      setProperties((prev) => prev.filter((p) => p.id !== id));
+      await deleteProperty(p.id);
+      setProperties((prev) => prev.filter((x) => x.id !== p.id));
       resetIntake();
       toast.success("Property removed.");
     } catch (err) {
@@ -184,13 +194,12 @@ function Properties() {
     }
   }
 
-  // Soonest deadline first — the property that needs attention should always be
-  // the first thing you see, not buried in whatever order they were added.
-  const sortedProperties = [...properties].sort((a, b) => {
-    const rankA = a.protestDeadline ? new Date(a.protestDeadline).getTime() : Infinity;
-    const rankB = b.protestDeadline ? new Date(b.protestDeadline).getTime() : Infinity;
-    return rankA - rankB;
-  });
+  // Most recently added first, per explicit request — the property you just
+  // added/imported should be the first thing you see, not wherever its own
+  // protest deadline happens to rank it.
+  const sortedProperties = [...properties].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
 
   function openAiReport(p: PropertyRecord) {
     updateIntake(buildAiReportIntakePatch(p));
@@ -379,9 +388,14 @@ function Properties() {
                       </button>
                     )}
                     <button
-                      disabled={deletingId === p.id}
-                      onClick={() => handleDelete(p.id)}
+                      disabled={deletingId === p.id || isPaid}
+                      onClick={() => handleDelete(p, isPaid)}
                       className="btn-outline text-destructive disabled:opacity-60"
+                      title={
+                        isPaid
+                          ? "Cancel this property's subscription before deleting it."
+                          : undefined
+                      }
                     >
                       {deletingId === p.id ? "Removing…" : "Delete"}
                     </button>
