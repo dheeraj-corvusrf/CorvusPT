@@ -2,42 +2,31 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
-import {
-  getMyBilling,
-  openBillingPortal,
-  resumeSubscription,
-  bracketPropertyCount,
-  EMPTY_BRACKETS,
-  VALUE_BRACKETS,
-  PLAN_OPTIONS,
-  type PlanValue,
-  type BracketQuantities,
-} from "@/lib/billing";
+import { getMyBilling, openBillingPortal, PLAN_OPTIONS, type PlanValue } from "@/lib/billing";
+import { listProperties, type PropertyRecord } from "@/lib/properties";
 
 export const Route = createFileRoute("/dashboard/_layout/billing")({
   component: Billing,
 });
 
+const TIER_LABEL: Record<string, string> = {
+  owner_managed: "Owner-Managed",
+  corvusrf_managed: "CorvusPT-Managed",
+};
+
 function Billing() {
   const { user } = useAuth();
   const [plan, setPlan] = useState<PlanValue | null>(null);
-  const [subscriptionStatus, setSubscriptionStatus] = useState<string | null>(null);
-  const [subscriptionBrackets, setSubscriptionBrackets] = useState<BracketQuantities>(EMPTY_BRACKETS);
-  const [cancelAtPeriodEnd, setCancelAtPeriodEnd] = useState(false);
-  const [cancelAt, setCancelAt] = useState<string | null>(null);
+  const [properties, setProperties] = useState<PropertyRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [openingPortal, setOpeningPortal] = useState(false);
-  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (!user) return;
-    getMyBilling(user.id)
-      .then((b) => {
+    Promise.all([getMyBilling(user.id), listProperties(user.id)])
+      .then(([b, props]) => {
         setPlan(b.plan);
-        setSubscriptionStatus(b.subscriptionStatus);
-        setSubscriptionBrackets(b.subscriptionBrackets);
-        setCancelAtPeriodEnd(b.cancelAtPeriodEnd);
-        setCancelAt(b.cancelAt);
+        setProperties(props);
       })
       .catch((err) => console.error(err))
       .finally(() => setLoading(false));
@@ -53,89 +42,74 @@ function Billing() {
     }
   }
 
-  async function handleResume() {
-    setResuming(true);
-    try {
-      await resumeSubscription();
-      setCancelAtPeriodEnd(false);
-      setCancelAt(null);
-      toast.success("Your subscription will continue — it's no longer set to cancel.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not resume your subscription.");
-    } finally {
-      setResuming(false);
-    }
-  }
-
-  const isPaid = plan && plan !== "free_ai_review";
+  const isBeta = plan === "beta";
   const planLabel = PLAN_OPTIONS.find((o) => o.value === plan)?.label ?? plan;
-  const hasPaymentProblem = subscriptionStatus === "past_due" || subscriptionStatus === "unpaid";
+  // Every property now carries its own independent Stripe subscription (see
+  // src/lib/properties.ts) — there's no single account-level subscription to
+  // summarize anymore, so this lists each one instead.
+  const subscribedProperties = properties.filter(
+    (p) => p.subscriptionStatus === "active" || p.cancelAtPeriodEnd,
+  );
 
   return (
     <div>
       <h1 className="font-serif text-2xl font-semibold">Billing</h1>
-      <p className="text-muted-foreground text-sm">Your CorvusPT subscription.</p>
+      <p className="text-muted-foreground text-sm">Your CorvusPT subscriptions, by property.</p>
 
       {loading ? (
         <p className="mt-6 text-sm text-muted-foreground">Loading…</p>
       ) : (
         <div className="mt-6 card-elev p-6 max-w-xl">
-          {hasPaymentProblem && (
-            <div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-              There's a problem with your last payment — update your billing details to keep your
-              subscription active.
-            </div>
-          )}
-          {cancelAtPeriodEnd && (
-            <div className="mb-4 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
-              Your subscription is set to cancel
-              {cancelAt
-                ? ` on ${new Date(cancelAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`
-                : " at the end of your current billing period"}
-              . Click Resubscribe if you'd like to keep it going.
-            </div>
-          )}
-
           <div className="text-xs text-muted-foreground uppercase tracking-wide">Current plan</div>
           <div className="mt-1 font-serif text-2xl font-semibold">{planLabel}</div>
-          {isPaid && (
-            <>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {bracketPropertyCount(subscriptionBrackets)} propert
-                {bracketPropertyCount(subscriptionBrackets) === 1 ? "y" : "ies"}
-              </p>
-              <ul className="mt-1 text-xs text-muted-foreground">
-                {VALUE_BRACKETS.filter((b) => subscriptionBrackets[b.value] > 0).map((b) => (
-                  <li key={b.value}>
-                    {subscriptionBrackets[b.value]} × {b.label}
-                  </li>
-                ))}
-              </ul>
-            </>
+
+          {isBeta ? (
+            <p className="mt-2 text-sm text-muted-foreground">
+              Every AI module is unlocked on every property, free, for as long as you're in the beta
+              — no subscriptions to manage.
+            </p>
+          ) : subscribedProperties.length > 0 ? (
+            <ul className="mt-4 grid gap-2">
+              {subscribedProperties.map((p) => (
+                <li
+                  key={p.id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border p-3 text-sm"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{p.address}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {p.planTier ? TIER_LABEL[p.planTier] : "—"}
+                      {p.cancelAtPeriodEnd && " · Canceling at period end"}
+                    </div>
+                  </div>
+                  <span className="badge-soft shrink-0">
+                    {p.subscriptionStatus === "active" ? "Active" : (p.subscriptionStatus ?? "—")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-sm text-muted-foreground">
+              You don't have any paid property subscriptions yet.
+            </p>
           )}
 
           <div className="mt-6 grid gap-2 sm:flex sm:flex-wrap">
-            {isPaid ? (
-              <>
-                {cancelAtPeriodEnd && (
-                  <button
-                    onClick={handleResume}
-                    disabled={resuming}
-                    className="btn-accent disabled:opacity-60"
-                  >
-                    {resuming ? "Resuming…" : "Resubscribe"}
-                  </button>
-                )}
-                <button onClick={handleManage} disabled={openingPortal} className="btn-outline disabled:opacity-60">
-                  {openingPortal ? "Redirecting…" : "Manage Subscription"}
-                </button>
-                <Link to="/pricing" className="btn-outline">
-                  Compare Plans
-                </Link>
-              </>
-            ) : (
+            <Link to="/dashboard/properties" className="btn-outline">
+              Manage Properties
+            </Link>
+            {!isBeta && subscribedProperties.length > 0 && (
+              <button
+                onClick={handleManage}
+                disabled={openingPortal}
+                className="btn-outline disabled:opacity-60"
+              >
+                {openingPortal ? "Redirecting…" : "Manage Billing"}
+              </button>
+            )}
+            {!isBeta && (
               <Link to="/pricing" className="btn-primary btn-primary-hover">
-                Upgrade Your Plan
+                {subscribedProperties.length > 0 ? "Compare Plans" : "See Pricing"}
               </Link>
             )}
           </div>

@@ -9,6 +9,17 @@ import {
   buildAiReportIntakePatch,
   type PropertyRecord,
 } from "@/lib/properties";
+import {
+  getMyBilling,
+  startPropertyCheckout,
+  cancelPropertySubscription,
+  resumePropertySubscription,
+  bracketForValue,
+  formatMoney,
+  TIER_BRACKET_PRICES,
+  type BillingInfo,
+  type Tier,
+} from "@/lib/billing";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
@@ -24,13 +35,26 @@ import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
 import { ExternalLink } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
+  // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
+  // page know it just landed back from a real Stripe checkout, so it can
+  // poll for the subscription actually going active (see the effect below)
+  // instead of only showing whatever it fetched at the exact instant the
+  // page loaded.
+  validateSearch: (search: Record<string, unknown>): { checkout?: "success" } => ({
+    checkout: search.checkout === "success" ? "success" : undefined,
+  }),
   component: Properties,
 });
 
 const CURRENT_YEAR = new Date().getFullYear();
+const TIER_LABEL: Record<Tier, string> = {
+  owner_managed: "Owner-Managed",
+  corvusrf_managed: "CorvusPT-Managed",
+};
 
 function Properties() {
   const navigate = useNavigate();
+  const { checkout } = Route.useSearch();
   const { user } = useAuth();
   const [properties, setProperties] = useState<PropertyRecord[]>([]);
   const [propertiesLoading, setPropertiesLoading] = useState(true);
@@ -42,6 +66,10 @@ function Properties() {
   const [importOpen, setImportOpen] = useState(false);
   const [ownershipsOpen, setOwnershipsOpen] = useState(false);
   const [authorizingBatch, setAuthorizingBatch] = useState<PropertyRecord[] | null>(null);
+  const [billing, setBilling] = useState<BillingInfo | null>(null);
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [resumingId, setResumingId] = useState<string | null>(null);
+  const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -57,16 +85,134 @@ function Properties() {
     listHealthScores(user.id)
       .then(setHealthScores)
       .catch((err) => console.error(err));
+    getMyBilling(user.id)
+      .then(setBilling)
+      .catch((err) => console.error("Could not load billing info:", err));
   }, [user]);
+
+  // Real race, not a bug: Stripe redirects the browser to successPath the
+  // instant checkout completes, but the webhook that actually flips a
+  // property's subscriptionStatus to "active" (stripe-webhook/index.ts) is a
+  // separate, slightly-delayed server-to-server call — so the very first
+  // fetch above can land just before it, showing "Not Paid" for a property
+  // that really was just paid for. Landing here with ?checkout=success (set
+  // by startPropertyCheckout's successPath) re-fetches a few times over the
+  // next several seconds to catch up, rather than requiring a manual
+  // refresh. Clears the query param once done so a later plain page
+  // reload/revisit never re-triggers this.
+  useEffect(() => {
+    if (!user || checkout !== "success") return;
+    let cancelled = false;
+    const delaysMs = [1500, 3000, 5000, 8000];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const delay of delaysMs) {
+      timers.push(
+        setTimeout(() => {
+          if (cancelled) return;
+          listProperties(user.id)
+            .then(setProperties)
+            .catch((err) => console.error("Could not refresh properties:", err));
+        }, delay),
+      );
+    }
+    navigate({ to: ".", search: (prev) => ({ ...prev, checkout: undefined }), replace: true });
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, checkout]);
+
+  // Beta is a free, unlimited grant (see handle_new_user() in schema.sql) —
+  // never gated by a per-property subscription. Every other plan reads each
+  // property's OWN real subscriptionStatus directly (see isPaid in the
+  // property map below) — there's no account-level entitlement math anymore
+  // now that every property has its own independent Stripe subscription.
+  const isBeta = billing?.plan === "beta";
 
   useSavingsBackfill(properties, setProperties);
 
-  async function handleDelete(id: string) {
-    if (!window.confirm("Remove this property from your dashboard?")) return;
-    setDeletingId(id);
+  // Starts a real, one-click checkout for exactly this property — see
+  // startPropertyCheckout in billing.ts. Opens in a new tab (newTab: true)
+  // so the property list stays put underneath; unlike a same-tab redirect,
+  // that means this tab never navigates away, so the loading state is
+  // always released here, not just on the failure path.
+  async function handleSubscribe(p: PropertyRecord, tier: Tier) {
+    setSubscribing({ propertyId: p.id, tier });
     try {
-      await deleteProperty(id);
-      setProperties((prev) => prev.filter((p) => p.id !== id));
+      await startPropertyCheckout(p.id, tier, { newTab: true });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not start checkout. Please try again.",
+      );
+    } finally {
+      setSubscribing(null);
+    }
+  }
+
+  // Cancels exactly this property's own subscription — unambiguous now that
+  // each property has its own (see cancel-property-subscription/index.ts).
+  async function handleCancelSubscription(p: PropertyRecord) {
+    const confirmed = window.confirm(
+      `Cancel the subscription for ${p.address}? You'll lose paid AI Report access and the ability to request a new protest filing for this property.`,
+    );
+    if (!confirmed) return;
+    setCancelingId(p.id);
+    try {
+      await cancelPropertySubscription(p.id);
+      toast.success("Subscription canceled.");
+      // Reflects immediately rather than waiting on the customer.
+      // subscription.deleted webhook round trip; the webhook confirms the
+      // same value a moment later (idempotent, not a conflict).
+      setProperties((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, subscriptionStatus: "canceled" } : x)),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not cancel this subscription.");
+    } finally {
+      setCancelingId(null);
+    }
+  }
+
+  // Undoes a subscription already scheduled to cancel at period end — the
+  // Stripe Customer Portal's own "Cancel subscription" defaults to
+  // cancel-at-period-end (unlike this page's own Cancel Subscription button,
+  // which cancels immediately), so a property can land in that state without
+  // ever touching this page. Before this, cancelAtPeriodEnd/"Canceling at
+  // period end" was only ever displayed, never something the user could
+  // undo from inside the app — resumePropertySubscription existed and was
+  // tested but had no caller anywhere.
+  async function handleResumeSubscription(p: PropertyRecord) {
+    setResumingId(p.id);
+    try {
+      await resumePropertySubscription(p.id);
+      toast.success("Subscription resumed — it will keep renewing as normal.");
+      setProperties((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, cancelAtPeriodEnd: false, cancelAt: null } : x)),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not resume this subscription.");
+    } finally {
+      setResumingId(null);
+    }
+  }
+
+  // Deleting a property with an active subscription would leave that
+  // subscription still running (and still billing) with nothing left in the
+  // app to see or cancel it from — the property row is its only link back
+  // to cancelPropertySubscription/the Stripe subscription id. Checked here
+  // too (not just via the button's own disabled state below) so this can
+  // never fire for a paid property regardless of how it's triggered.
+  async function handleDelete(p: PropertyRecord, isPaid: boolean) {
+    if (isPaid) {
+      toast.error("Cancel this property's subscription before deleting it.");
+      return;
+    }
+    if (!window.confirm(`Remove ${p.address} from your dashboard?`)) return;
+    setDeletingId(p.id);
+    try {
+      await deleteProperty(p.id);
+      setProperties((prev) => prev.filter((x) => x.id !== p.id));
       resetIntake();
       toast.success("Property removed.");
     } catch (err) {
@@ -76,13 +222,12 @@ function Properties() {
     }
   }
 
-  // Soonest deadline first — the property that needs attention should always be
-  // the first thing you see, not buried in whatever order they were added.
-  const sortedProperties = [...properties].sort((a, b) => {
-    const rankA = a.protestDeadline ? new Date(a.protestDeadline).getTime() : Infinity;
-    const rankB = b.protestDeadline ? new Date(b.protestDeadline).getTime() : Infinity;
-    return rankA - rankB;
-  });
+  // Most recently added first, per explicit request — the property you just
+  // added/imported should be the first thing you see, not wherever its own
+  // protest deadline happens to rank it.
+  const sortedProperties = [...properties].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
 
   function openAiReport(p: PropertyRecord) {
     updateIntake(buildAiReportIntakePatch(p));
@@ -162,6 +307,10 @@ function Properties() {
               const recordUrl = cad
                 ? getCadRecordUrl({ cad, accountNumber: p.accountNumber })
                 : null;
+              // Beta bypasses per-property billing entirely; every other
+              // plan reads this exact property's own real subscription.
+              const isPaid = isBeta || p.subscriptionStatus === "active";
+              const bracket = bracketForValue(p.totalValue);
               return (
                 <div
                   key={p.id}
@@ -173,6 +322,7 @@ function Properties() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
+                        {!isBeta && <PaymentStatusBadge paid={isPaid} />}
                       </div>
                       <h3 className="font-serif text-xl font-semibold">{p.address}</h3>
                       <p className="text-sm text-muted-foreground inline-flex items-center flex-wrap gap-1">
@@ -199,9 +349,6 @@ function Properties() {
                     <button onClick={() => openAiReport(p)} className="btn-outline">
                       Open AI Report
                     </button>
-                    <Link to="/pricing" className="btn-outline">
-                      Upgrade
-                    </Link>
                     {recordUrl && cad && (
                       <a
                         href={recordUrl}
@@ -215,35 +362,77 @@ function Properties() {
                           : `Search on ${cad}`}
                       </a>
                     )}
-                    {existingProtest ? (
-                      <>
-                        <Link
-                          to="/dashboard/case"
-                          search={{ propertyId: p.id }}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn-outline"
-                        >
-                          View Case
-                        </Link>
-                        {canReFile && (
+                    {existingProtest && (
+                      <Link
+                        to="/dashboard/case"
+                        search={{ propertyId: p.id }}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-outline"
+                      >
+                        View Case
+                      </Link>
+                    )}
+                    {isPaid ? (
+                      !existingProtest ? (
+                        <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
+                          Request Protest Filing
+                        </button>
+                      ) : (
+                        canReFile && (
                           <button
                             onClick={() => setAuthorizingProperty(p)}
                             className="btn-primary btn-primary-hover"
                           >
                             Re-file for {CURRENT_YEAR}
                           </button>
-                        )}
-                      </>
+                        )
+                      )
                     ) : (
-                      <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
-                        Request Protest Filing
+                      (["owner_managed", "corvusrf_managed"] as const).map((tier) => {
+                        const isSubscribingThis =
+                          subscribing?.propertyId === p.id && subscribing.tier === tier;
+                        return (
+                          <button
+                            key={tier}
+                            disabled={!!subscribing}
+                            onClick={() => handleSubscribe(p, tier)}
+                            className="btn-outline disabled:opacity-60"
+                          >
+                            {isSubscribingThis
+                              ? "Redirecting…"
+                              : `Subscribe — ${TIER_LABEL[tier]} $${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}/mo`}
+                          </button>
+                        );
+                      })
+                    )}
+                    {isPaid && !isBeta && p.cancelAtPeriodEnd && (
+                      <button
+                        disabled={resumingId === p.id}
+                        onClick={() => handleResumeSubscription(p)}
+                        className="btn-outline disabled:opacity-60"
+                      >
+                        {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
+                      </button>
+                    )}
+                    {isPaid && !isBeta && !p.cancelAtPeriodEnd && (
+                      <button
+                        disabled={cancelingId === p.id}
+                        onClick={() => handleCancelSubscription(p)}
+                        className="btn-outline text-warning-foreground disabled:opacity-60"
+                      >
+                        {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
                       </button>
                     )}
                     <button
-                      disabled={deletingId === p.id}
-                      onClick={() => handleDelete(p.id)}
+                      disabled={deletingId === p.id || isPaid}
+                      onClick={() => handleDelete(p, isPaid)}
                       className="btn-outline text-destructive disabled:opacity-60"
+                      title={
+                        isPaid
+                          ? "Cancel this property's subscription before deleting it."
+                          : undefined
+                      }
                     >
                       {deletingId === p.id ? "Removing…" : "Delete"}
                     </button>
@@ -274,6 +463,7 @@ function Properties() {
           userId={user.id}
           property={authorizingProperty}
           userEmail={user.email}
+          isPaid={isBeta || authorizingProperty.subscriptionStatus === "active"}
           open={!!authorizingProperty}
           onOpenChange={(open) => {
             if (!open) setAuthorizingProperty(null);
@@ -294,6 +484,7 @@ function Properties() {
           userId={user.id}
           properties={authorizingBatch}
           userEmail={user.email}
+          isBeta={isBeta}
           open={!!authorizingBatch}
           onOpenChange={(open) => {
             if (!open) setAuthorizingBatch(null);
@@ -335,6 +526,15 @@ function ActionStatusBadge({
 }) {
   const { status, label } = getPropertyProtestStatus(property, protests);
   return <span className={`badge-soft ${STATUS_TONE[status]}`}>{label}</span>;
+}
+
+// `paid` means this property's OWN real Stripe subscription is active — see
+// isPaid in the property map above. Never shown for beta accounts, which
+// have no per-property subscription to report on at all.
+function PaymentStatusBadge({ paid }: { paid: boolean }) {
+  return (
+    <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
+  );
 }
 
 // Only appears once the background AI health-score call (fired from addProperty())

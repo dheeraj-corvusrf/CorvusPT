@@ -140,7 +140,6 @@ export function SiteNav() {
           <LogoMark />
           <span className="font-serif text-lg font-semibold tracking-tight">
             Corvus<span className="text-emerald-600 dark:text-emerald-400">PT</span>
-            <span className="text-accent">.ai</span>
           </span>
         </Link>
 

@@ -6,7 +6,14 @@
 //
 // No Supabase auth here — Stripe calls this directly and authenticates via an HMAC
 // signature (verified below) instead of a Supabase JWT. The service-role client is
-// used to write to profiles, bypassing RLS, since there is no end-user session.
+// used to write to profiles/properties, bypassing RLS, since there is no end-user
+// session.
+//
+// One real, independent Stripe subscription per PROPERTY (not one shared
+// subscription per customer with bracket quantities, as before) — every
+// event here is keyed by which PROPERTY row a subscription belongs to
+// (matched via properties.stripe_subscription_id), not by customer alone,
+// since one customer can now have many active subscriptions at once.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
 
@@ -17,56 +24,53 @@ const corsHeaders = {
   "Content-Type": "application/json",
 };
 
-// create-checkout-session prices every bracket via ad hoc price_data (a fresh
-// Price/Product per checkout, to support the 15%-off-2nd-property discount),
-// so there's no fixed, known-ahead-of-time Price id to match line items
-// against any more. Instead it stamps { tier, bracket } as metadata on each
-// line item's Product (see that function), which persists on the Product for
-// the life of the subscription — read back here via BRACKET_COLUMN. This also
-// correctly re-derives brackets after a quantity change made through the
-// Stripe Billing Portal, not just at fresh-checkout time. Anything with no
-// recognizable bracket metadata (e.g. a manually-created test subscription)
-// still counts toward subscription_quantity below, just without a bracket
-// breakdown.
-const BRACKET_COLUMN: Record<string, "qty_under_2m" | "qty_2m_10m" | "qty_over_10m"> = {
-  under2m: "qty_under_2m",
-  mid2m10m: "qty_2m_10m",
-  over10m: "qty_over_10m",
-};
+// profiles.plan is a coarse, account-level signal only now (see its own
+// comment in src/lib/billing.ts) — "the tier of this customer's most
+// recently created active property subscription," recomputed here after
+// every property-subscription change. Never touched for a 'beta' account:
+// that's an unconditional, non-Stripe grant (see handle_new_user() in
+// schema.sql) that must never be overwritten by ordinary subscription
+// activity.
+async function syncProfilePlan(
+  adminClient: ReturnType<typeof createClient>,
+  userId: string,
+): Promise<void> {
+  const { data: profile } = await adminClient
+    .from("profiles")
+    .select("plan")
+    .eq("id", userId)
+    .maybeSingle();
+  if (profile?.plan === "beta") return;
 
-// Sums every line item's quantity (a subscription now has up to 6 — up to 2
-// per non-empty value bracket, full-price + discounted — instead of always
-// exactly 1) for the total, and separately buckets each line item's quantity
-// into its matching bracket column via the Product metadata BRACKET_COLUMN
-// reads. `items` must come from a subscription fetched with
-// `expand: ["items.data.price.product"]` so `item.price.product` is a full
-// object, not just an id string.
-function summarizeItems(items: Stripe.SubscriptionItem[]) {
-  const totals = { qty_under_2m: 0, qty_2m_10m: 0, qty_over_10m: 0 };
-  let quantity = 0;
-  for (const item of items) {
-    const q = item.quantity ?? 0;
-    quantity += q;
-    const product = item.price?.product;
-    const bracket =
-      product && typeof product === "object" && !product.deleted
-        ? (product as Stripe.Product).metadata?.bracket
-        : undefined;
-    const column = bracket ? BRACKET_COLUMN[bracket] : undefined;
-    if (column) totals[column] += q;
-  }
-  return { quantity: quantity || 1, ...totals };
+  const { data: activeProps } = await adminClient
+    .from("properties")
+    .select("plan_tier")
+    .eq("user_id", userId)
+    .eq("subscription_status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const mostRecentTier = activeProps?.[0]?.plan_tier as string | null | undefined;
+  await adminClient
+    .from("profiles")
+    .update({ plan: mostRecentTier ?? "free_ai_review" })
+    .eq("id", userId);
 }
 
 // One month free for whoever referred this NEW paying customer — real
 // business rule ("each referral gives one month free"), so the credit
-// amount is the REFERRER's own real current monthly total (summed straight
-// off their real Stripe subscription line items), never a guessed flat
-// dollar figure. Granted via Stripe's customer balance (a negative balance
-// transaction), which Stripe applies to the referrer's own next invoice(s)
-// automatically — not a coupon/promo code, which would need per-price setup
-// this per-property/per-bracket pricing doesn't have a fixed Price id for
-// (see create-checkout-session's own comment on ad hoc price_data).
+// amount is the REFERRER's own real current monthly total, never a guessed
+// flat dollar figure. Granted via Stripe's customer balance (a negative
+// balance transaction), which Stripe applies to the referrer's own next
+// invoice(s) automatically — not a coupon/promo code, which would need
+// per-price setup this ad hoc per-property pricing doesn't have a fixed
+// Price id for (see create-checkout-session's own comment).
+//
+// A customer can now have MANY active property subscriptions at once (one
+// per property) rather than a single shared one — there's no longer one
+// canonical "their subscription" to read. Uses the referrer's most
+// recently created active property subscription's own real monthly total
+// as the credit amount, a reasonable real-money proxy for "their current
+// spend" without summing every subscription they have.
 //
 // referral_reward_granted_at (on the REFERRED user's own row, set here)
 // is the one-time guard — if this specific referred user's checkout ever
@@ -90,12 +94,22 @@ async function grantReferralRewardIfDue(
 
     const { data: referrer } = await adminClient
       .from("profiles")
-      .select("stripe_customer_id, stripe_subscription_id")
+      .select("stripe_customer_id")
       .eq("id", referrerId)
       .maybeSingle();
     const customerId = referrer?.stripe_customer_id as string | null | undefined;
-    const subscriptionId = referrer?.stripe_subscription_id as string | null | undefined;
-    if (!customerId || !subscriptionId) return; // referrer isn't a paying customer themselves yet
+    if (!customerId) return; // referrer isn't a paying customer themselves yet
+
+    const { data: activeProps } = await adminClient
+      .from("properties")
+      .select("stripe_subscription_id")
+      .eq("user_id", referrerId)
+      .eq("subscription_status", "active")
+      .not("stripe_subscription_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const subscriptionId = activeProps?.[0]?.stripe_subscription_id as string | undefined;
+    if (!subscriptionId) return; // referrer has no active property subscription of their own
 
     const referrerSub = await stripe.subscriptions.retrieve(subscriptionId, {
       expand: ["items.data.price"],
@@ -164,77 +178,71 @@ Deno.serve(async (req: Request) => {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object as Stripe.Checkout.Session;
       const userId = session.client_reference_id;
-      const tier = session.metadata?.tier === "corvusrf_managed" ? "corvusrf_managed" : "owner_managed";
-      if (userId) {
-        let summary = summarizeItems([]);
-        if (typeof session.subscription === "string") {
-          const sub = await stripe.subscriptions.retrieve(session.subscription, {
-            expand: ["items.data.price.product"],
-          });
-          summary = summarizeItems(sub.items.data);
-        }
+      const propertyId = session.metadata?.propertyId;
+      const tier =
+        session.metadata?.tier === "corvusrf_managed" ? "corvusrf_managed" : "owner_managed";
+      const bracket = session.metadata?.bracket ?? null;
+      if (userId && propertyId && typeof session.subscription === "string") {
         await adminClient
-          .from("profiles")
+          .from("properties")
           .update({
-            plan: tier,
+            stripe_subscription_id: session.subscription,
             subscription_status: "active",
-            subscription_quantity: summary.quantity,
-            qty_under_2m: summary.qty_under_2m,
-            qty_2m_10m: summary.qty_2m_10m,
-            qty_over_10m: summary.qty_over_10m,
-            stripe_customer_id: typeof session.customer === "string" ? session.customer : null,
-            stripe_subscription_id:
-              typeof session.subscription === "string" ? session.subscription : null,
+            plan_tier: tier,
+            value_bracket: bracket,
+            cancel_at_period_end: false,
+            cancel_at: null,
           })
-          .eq("id", userId);
+          .eq("id", propertyId)
+          .eq("user_id", userId);
 
+        if (typeof session.customer === "string") {
+          await adminClient
+            .from("profiles")
+            .update({ stripe_customer_id: session.customer })
+            .eq("id", userId);
+        }
+
+        await syncProfilePlan(adminClient, userId);
         await grantReferralRewardIfDue(stripe, adminClient, userId);
       }
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object as Stripe.Subscription;
-      const customerId = typeof subscription.customer === "string" ? subscription.customer : null;
-      if (customerId) {
-        const tier =
-          subscription.metadata?.tier === "corvusrf_managed" ? "corvusrf_managed" : "owner_managed";
-        // The event payload's subscription.items.data isn't expanded to full
-        // Product objects — re-fetch so summarizeItems can read bracket
-        // metadata off item.price.product.
-        const expandedSub = await stripe.subscriptions.retrieve(subscription.id, {
-          expand: ["items.data.price.product"],
-        });
-        const summary = summarizeItems(expandedSub.items.data);
-        const update: Record<string, string | number | boolean | null> = {
-          subscription_status: subscription.status,
-          subscription_quantity: summary.quantity,
-          qty_under_2m: summary.qty_under_2m,
-          qty_2m_10m: summary.qty_2m_10m,
-          qty_over_10m: summary.qty_over_10m,
-          cancel_at_period_end: subscription.cancel_at_period_end,
-          cancel_at: subscription.cancel_at
-            ? new Date(subscription.cancel_at * 1000).toISOString()
-            : null,
-        };
-        if (subscription.status === "active") update.plan = tier;
-        if (subscription.status === "canceled") update.plan = "free_ai_review";
-        await adminClient.from("profiles").update(update).eq("stripe_customer_id", customerId);
+      const { data: property } = await adminClient
+        .from("properties")
+        .select("id, user_id")
+        .eq("stripe_subscription_id", subscription.id)
+        .maybeSingle();
+      if (property) {
+        await adminClient
+          .from("properties")
+          .update({
+            subscription_status: subscription.status,
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            cancel_at: subscription.cancel_at
+              ? new Date(subscription.cancel_at * 1000).toISOString()
+              : null,
+          })
+          .eq("id", property.id);
+        await syncProfilePlan(adminClient, property.user_id as string);
       }
     } else if (event.type === "customer.subscription.deleted") {
       const subscription = event.data.object as Stripe.Subscription;
-      const customerId = typeof subscription.customer === "string" ? subscription.customer : null;
-      if (customerId) {
+      const { data: property } = await adminClient
+        .from("properties")
+        .select("id, user_id")
+        .eq("stripe_subscription_id", subscription.id)
+        .maybeSingle();
+      if (property) {
         await adminClient
-          .from("profiles")
+          .from("properties")
           .update({
-            plan: "free_ai_review",
             subscription_status: "canceled",
-            subscription_quantity: 1,
-            qty_under_2m: 0,
-            qty_2m_10m: 0,
-            qty_over_10m: 0,
             cancel_at_period_end: false,
             cancel_at: null,
           })
-          .eq("stripe_customer_id", customerId);
+          .eq("id", property.id);
+        await syncProfilePlan(adminClient, property.user_id as string);
       }
     }
     // All other event types are intentionally ignored but still return 200 below so

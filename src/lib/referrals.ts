@@ -81,7 +81,7 @@ export function buildReferralLink(code: string): string {
 // their own authenticated profile, never trusted from this call. `origin`
 // here is the full origin+base prefix (see buildReferralLink's own comment
 // on why BASE_URL matters) — the edge function only ever uses it as a URL
-// prefix, same convention startCheckout's own successPath/cancelPath use.
+// prefix, same convention startPropertyCheckout's own successPath/cancelPath use.
 export async function sendReferralInvite(toEmail: string): Promise<void> {
   const origin =
     typeof window !== "undefined" ? `${window.location.origin}${import.meta.env.BASE_URL}` : "";

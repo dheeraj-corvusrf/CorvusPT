@@ -55,12 +55,13 @@ import type { IconColor } from "@/lib/icon-colors";
 import { useAuth } from "@/lib/auth";
 import {
   getMyBilling,
-  getEntitledPropertyIds,
-  planUsesPerPropertyEntitlement,
-  bracketPropertyCount,
+  startPropertyCheckout,
+  bracketForValue,
+  formatMoney,
+  TIER_BRACKET_PRICES,
   type PlanValue,
+  type Tier,
 } from "@/lib/billing";
-import { getAppSettings } from "@/lib/app-settings";
 import {
   getHealthScore,
   type HealthScoreResult,
@@ -98,12 +99,7 @@ import {
   applyValueTrendAdjustment,
 } from "@/lib/texas-tax-rates";
 import { CompsMap, useLeaflet } from "@/components/CompsMap";
-import {
-  findExistingProperty,
-  addProperty,
-  listProperties,
-  type PropertyRecord,
-} from "@/lib/properties";
+import { findExistingProperty, addProperty, type PropertyRecord } from "@/lib/properties";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -272,6 +268,11 @@ function Report() {
   const [resolvedProperty, setResolvedProperty] = useState<PropertyRecord | null>(null);
   const [existingProtest, setExistingProtest] = useState<ProtestRecord | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
+  // Which tier's checkout is currently redirecting, for the unpaid-property
+  // "Subscribe" buttons in the banner below (real, one-click checkout right
+  // here — see handleSubscribeToProperty — rather than sending the user off
+  // to the Properties list to find this same property again).
+  const [subscribingTier, setSubscribingTier] = useState<Tier | null>(null);
   // Evidence (photos/repair estimates/appraisals) the user has uploaded for this
   // property, fed into the Improvement Condition module's analysis — see
   // handleUploadEvidence() and loadModule() below.
@@ -416,7 +417,46 @@ function Report() {
     }
   }
 
+  // Real, one-click checkout for THIS property, right from the banner below
+  // — no detour through /dashboard/properties to find it again. The bracket
+  // is already known from the property's own value; only the tier
+  // (Owner-Managed vs CorvusPT-Managed) is a real choice only the customer
+  // can make, so both real prices are shown rather than picking one. Opens
+  // in a new tab (newTab: true) so the report stays put underneath; since
+  // this tab never navigates away, the loading state is always released
+  // here, not just on the failure path.
+  async function handleSubscribeToProperty(tier: Tier) {
+    const property = await ensureProperty();
+    if (!property) {
+      toast.error("Could not save this property. Please try again.");
+      return;
+    }
+    setSubscribingTier(tier);
+    try {
+      await startPropertyCheckout(property.id, tier, { newTab: true });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not start checkout. Please try again.",
+      );
+    } finally {
+      setSubscribingTier(null);
+    }
+  }
+
   async function startProtest() {
+    // Real payment gate, not just a hidden/disabled button — startProtest is
+    // reachable from more than one place (the banner button below AND
+    // onStartProtest passed into the module preview modal), so the check
+    // belongs here, once, rather than trusted to whichever caller happens to
+    // render a button. myPlan alone isn't enough: it's an account-level
+    // signal ("owner_managed" once ANY property is active), so a customer
+    // with one paid property could otherwise file a protest on a second,
+    // unpaid one — hasFullAccess is the real per-property answer (reads
+    // resolvedProperty's own subscriptionStatus; see its own effect above).
+    if (!hasFullAccess) {
+      toast.error("Subscribe to this property before filing a protest.");
+      return;
+    }
     const property = await ensureProperty();
     if (!property) return;
     // Owner-managed customers file their own protest — ProtestAuthorizationFlow
@@ -902,49 +942,39 @@ function Report() {
     getMyBilling(user.id)
       .then(({ plan }) => {
         setMyPlan(plan);
-        setHasFullAccess(
-          plan === "owner_managed" ||
-            plan === "corvusrf_managed" ||
-            plan === "ai_report" ||
-            plan === "managed_protest" ||
-            plan === "beta",
-        );
+        // beta and the legacy flat-rate plans (from before the per-property
+        // model existed) grant unconditional access from the account plan
+        // alone. owner_managed/corvusrf_managed no longer do — each
+        // property now has its own independent Stripe subscription (see
+        // src/lib/properties.ts), so access for those two plans is fully
+        // decided by the effect below instead, keyed on resolvedProperty's
+        // own subscriptionStatus — left untouched here (not set to false)
+        // so that effect, which runs after this one resolves myPlan, is
+        // never raced into briefly reading a stale null plan as "not
+        // owner_managed" and skipping its own real check.
+        if (plan === "ai_report" || plan === "managed_protest" || plan === "beta") {
+          setHasFullAccess(true);
+        }
       })
       .catch(() => setHasFullAccess(false))
       .finally(() => setBillingChecked(true));
   }, [user]);
 
-  // Per-property entitlement — narrows hasFullAccess back down for a
-  // bracket-priced plan (owner_managed/corvusrf_managed) whose paid
-  // property count doesn't actually cover THIS property, instead of the
-  // effect above's plan-only check letting one paid property's worth of
-  // subscription unlock every property the customer ever adds. Gated on a
-  // real, admin-toggleable setting (app_settings.enforce_per_property_
-  // entitlement — see app-settings.ts and the Settings tab in admin.tsx),
-  // not a hardcoded constant, so turning this on/off is a live DB write, no
-  // redeploy needed. Only ever narrows access (never widens it back past
-  // what the effect above already granted), and only once resolvedProperty
-  // is actually known — a property that hasn't been saved yet isn't
-  // consuming a paid slot either, so there's nothing real to check against
-  // yet.
+  // Per-property access for owner_managed/corvusrf_managed — confirmed live
+  // bug this replaces: the previous version only ever set hasFullAccess to
+  // true and never back to false, so once ANY property in a session was
+  // found active, it stayed "true" for every OTHER property viewed
+  // afterward too (switching from a paid property to a different, unpaid
+  // one never revoked access — a real protest got filed on a property that
+  // was never paid for). This always recomputes the full real answer from
+  // scratch on every resolvedProperty change instead of only ever upgrading
+  // it, so switching properties can revoke access, not just grant it. Never
+  // touches beta/legacy plans (guarded by myPlan), which effect above
+  // already decided unconditionally.
   useEffect(() => {
-    if (!user || !myPlan || !resolvedProperty) return;
-    if (!planUsesPerPropertyEntitlement(myPlan)) return;
-    let cancelled = false;
-    Promise.all([getAppSettings(), getMyBilling(user.id), listProperties(user.id)])
-      .then(([settings, { subscriptionBrackets }, properties]) => {
-        if (cancelled || !settings.enforcePerPropertyEntitlement) return;
-        const entitled = getEntitledPropertyIds(
-          properties,
-          bracketPropertyCount(subscriptionBrackets),
-        );
-        if (!entitled.has(resolvedProperty.id)) setHasFullAccess(false);
-      })
-      .catch((err) => console.error("Could not check per-property entitlement:", err));
-    return () => {
-      cancelled = true;
-    };
-  }, [user, myPlan, resolvedProperty]);
+    if (myPlan !== "owner_managed" && myPlan !== "corvusrf_managed") return;
+    setHasFullAccess(resolvedProperty?.subscriptionStatus === "active");
+  }, [myPlan, resolvedProperty]);
 
   // Auto-opens a module for a deep link (CaseDetailModal's "Upload Evidence —
   // Go to Module 8" button, ?openModule=evidence) — waits for billingChecked
@@ -1339,10 +1369,34 @@ function Report() {
                   </Link>
                 )}
               </div>
-            ) : (
+            ) : hasFullAccess ? (
               <button onClick={startProtest} className="btn-accent text-sm py-1.5">
                 {myPlan === "owner_managed" ? "File Protest" : "Request Protest Filing"}
               </button>
+            ) : (
+              // Real payment gate (see startProtest's own check) reflected
+              // honestly here — real, one-click checkout for THIS property
+              // right in the banner, not a dead-end link to go find it again
+              // on the Properties list. The bracket is already known from
+              // the property's own value; only the tier is a real choice,
+              // so both real prices are shown.
+              <div className="flex flex-wrap gap-2">
+                {(["owner_managed", "corvusrf_managed"] as const).map((tier) => {
+                  const bracket = bracketForValue(resolvedProperty?.totalValue ?? state.totalValue);
+                  return (
+                    <button
+                      key={tier}
+                      disabled={!!subscribingTier}
+                      onClick={() => handleSubscribeToProperty(tier)}
+                      className="btn-accent text-sm py-1.5 disabled:opacity-60"
+                    >
+                      {subscribingTier === tier
+                        ? "Redirecting…"
+                        : `Subscribe — ${tier === "owner_managed" ? "Owner-Managed" : "CorvusPT-Managed"} $${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}/mo`}
+                    </button>
+                  );
+                })}
+              </div>
             )}
           </div>
         )}
@@ -1530,6 +1584,7 @@ function Report() {
           userId={user.id}
           property={resolvedProperty}
           userEmail={user.email}
+          isPaid={hasFullAccess}
           open={authorizing}
           onOpenChange={(open) => setAuthorizing(open)}
           onDone={(created) => {

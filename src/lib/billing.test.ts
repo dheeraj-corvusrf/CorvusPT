@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// startCheckout/openBillingPortal write to window.location, which doesn't
-// exist under the default node environment set in vitest.config.ts.
+// startPropertyCheckout/openBillingPortal write to window.location, which
+// doesn't exist under the default node environment set in vitest.config.ts.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mockQueryBuilder } from "./test-utils/supabase-query-mock";
 
@@ -15,44 +15,22 @@ vi.mock("./edge-functions", () => ({
 // Imported after the mocks above so billing.ts picks up the mocked modules.
 const {
   getMyBilling,
-  startCheckout,
+  startPropertyCheckout,
   openBillingPortal,
-  resumeSubscription,
-  bracketLineTotal,
-  bracketMonthlyTotal,
-  getEntitledPropertyIds,
-  planUsesPerPropertyEntitlement,
+  cancelPropertySubscription,
+  resumePropertySubscription,
+  bracketForValue,
+  propertyMonthlyPrice,
 } = await import("./billing");
 
 describe("getMyBilling", () => {
-  it("maps snake_case profile columns to BillingInfo", async () => {
-    mockFrom.mockReturnValue(
-      mockQueryBuilder({
-        data: {
-          plan: "owner_managed",
-          subscription_status: "active",
-          subscription_quantity: 3,
-          qty_under_2m: 2,
-          qty_2m_10m: 1,
-          qty_over_10m: 0,
-          cancel_at_period_end: false,
-          cancel_at: null,
-        },
-        error: null,
-      }),
-    );
+  it("reads the real plan column off profiles", async () => {
+    mockFrom.mockReturnValue(mockQueryBuilder({ data: { plan: "owner_managed" }, error: null }));
 
     const result = await getMyBilling("user-1");
 
     expect(mockFrom).toHaveBeenCalledWith("profiles");
-    expect(result).toEqual({
-      plan: "owner_managed",
-      subscriptionStatus: "active",
-      subscriptionQuantity: 3,
-      subscriptionBrackets: { under2m: 2, mid2m10m: 1, over10m: 0 },
-      cancelAtPeriodEnd: false,
-      cancelAt: null,
-    });
+    expect(result).toEqual({ plan: "owner_managed" });
   });
 
   it("throws when Supabase returns an error", async () => {
@@ -61,7 +39,7 @@ describe("getMyBilling", () => {
   });
 });
 
-describe("startCheckout", () => {
+describe("startPropertyCheckout", () => {
   const originalLocation = window.location;
 
   beforeEach(() => {
@@ -78,25 +56,25 @@ describe("startCheckout", () => {
     window.location = originalLocation;
   });
 
-  it("calls create-checkout-session with the tier/brackets/base-path-aware redirect paths and redirects to the returned URL", async () => {
+  it("calls create-checkout-session with the property/tier/base-path-aware redirect paths and redirects to the returned URL", async () => {
     mockInvoke.mockResolvedValue({ url: "https://checkout.stripe.com/session/abc" });
 
-    await startCheckout("owner_managed", { under2m: 2, mid2m10m: 0, over10m: 0 });
+    await startPropertyCheckout("prop-1", "owner_managed");
 
     expect(mockInvoke).toHaveBeenCalledWith("create-checkout-session", {
+      propertyId: "prop-1",
       tier: "owner_managed",
-      brackets: { under2m: 2, mid2m10m: 0, over10m: 0 },
-      successPath: `${import.meta.env.BASE_URL}dashboard?checkout=success`,
-      cancelPath: `${import.meta.env.BASE_URL}pricing`,
+      successPath: `${import.meta.env.BASE_URL}dashboard/properties?checkout=success`,
+      cancelPath: `${import.meta.env.BASE_URL}dashboard/properties`,
     });
     expect(window.location.href).toBe("https://checkout.stripe.com/session/abc");
   });
 
   it("throws instead of redirecting when Stripe returns no URL", async () => {
     mockInvoke.mockResolvedValue({ url: "" });
-    await expect(
-      startCheckout("corvusrf_managed", { under2m: 1, mid2m10m: 0, over10m: 0 }),
-    ).rejects.toThrow(/did not return a checkout URL/);
+    await expect(startPropertyCheckout("prop-1", "corvusrf_managed")).rejects.toThrow(
+      /did not return a checkout URL/,
+    );
     expect(window.location.href).toBe("");
   });
 });
@@ -119,71 +97,48 @@ describe("openBillingPortal", () => {
   });
 });
 
-describe("resumeSubscription", () => {
-  it("calls resume-subscription with no body", async () => {
+describe("cancelPropertySubscription", () => {
+  it("calls cancel-property-subscription with the property id", async () => {
     mockInvoke.mockReset();
     mockInvoke.mockResolvedValue({ ok: true });
-    await resumeSubscription();
-    expect(mockInvoke).toHaveBeenCalledWith("resume-subscription", {});
+    await cancelPropertySubscription("prop-1");
+    expect(mockInvoke).toHaveBeenCalledWith("cancel-property-subscription", {
+      propertyId: "prop-1",
+    });
   });
 });
 
-describe("bracketLineTotal", () => {
-  it("returns 0 for zero quantity", () => {
-    expect(bracketLineTotal(499, 0)).toBe(0);
-  });
-
-  it("charges full price for a single property", () => {
-    expect(bracketLineTotal(499, 1)).toBe(499);
-  });
-
-  it("discounts every property after the first by 15%", () => {
-    // 1 full-price + 2 at 85% = 499 + 2 * 424.15
-    expect(bracketLineTotal(499, 3)).toBeCloseTo(499 + 2 * 424.15, 5);
+describe("resumePropertySubscription", () => {
+  it("calls resume-subscription with the property id", async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue({ ok: true });
+    await resumePropertySubscription("prop-1");
+    expect(mockInvoke).toHaveBeenCalledWith("resume-subscription", { propertyId: "prop-1" });
   });
 });
 
-describe("bracketMonthlyTotal", () => {
-  it("sums the discounted total across brackets", () => {
-    const total = bracketMonthlyTotal("owner_managed", { under2m: 2, mid2m10m: 0, over10m: 0 });
-    // 1 full-price ($99) + 1 at 85% ($84.15)
-    expect(total).toBeCloseTo(99 + 84.15, 5);
+describe("bracketForValue", () => {
+  it("classifies by the real $2M/$10M boundaries", () => {
+    expect(bracketForValue(1_500_000)).toBe("under2m");
+    expect(bracketForValue(2_000_000)).toBe("mid2m10m");
+    expect(bracketForValue(9_999_999)).toBe("mid2m10m");
+    expect(bracketForValue(10_000_000)).toBe("over10m");
+    expect(bracketForValue(50_000_000)).toBe("over10m");
+  });
+
+  it("defaults to the cheapest bracket for a missing value, never a guess upward", () => {
+    expect(bracketForValue(null)).toBe("under2m");
+    expect(bracketForValue(undefined)).toBe("under2m");
   });
 });
 
-describe("getEntitledPropertyIds", () => {
-  const properties = [
-    { id: "c", createdAt: "2024-03-01T00:00:00Z" },
-    { id: "a", createdAt: "2024-01-01T00:00:00Z" },
-    { id: "b", createdAt: "2024-02-01T00:00:00Z" },
-  ];
-
-  it("returns nothing for a zero or negative paid count", () => {
-    expect(getEntitledPropertyIds(properties, 0)).toEqual(new Set());
-    expect(getEntitledPropertyIds(properties, -1)).toEqual(new Set());
+describe("propertyMonthlyPrice", () => {
+  it("charges full price for a customer's first property in a bracket", () => {
+    expect(propertyMonthlyPrice("owner_managed", "under2m", false)).toBe(99);
   });
 
-  it("picks the oldest N properties by createdAt, regardless of input order", () => {
-    expect(getEntitledPropertyIds(properties, 1)).toEqual(new Set(["a"]));
-    expect(getEntitledPropertyIds(properties, 2)).toEqual(new Set(["a", "b"]));
-  });
-
-  it("covers every property once the paid count meets or exceeds the total", () => {
-    expect(getEntitledPropertyIds(properties, 3)).toEqual(new Set(["a", "b", "c"]));
-    expect(getEntitledPropertyIds(properties, 10)).toEqual(new Set(["a", "b", "c"]));
-  });
-});
-
-describe("planUsesPerPropertyEntitlement", () => {
-  it("is true only for the two real bracket-priced tiers", () => {
-    expect(planUsesPerPropertyEntitlement("owner_managed")).toBe(true);
-    expect(planUsesPerPropertyEntitlement("corvusrf_managed")).toBe(true);
-  });
-
-  it("is false for beta and the legacy pre-bracket plans", () => {
-    expect(planUsesPerPropertyEntitlement("beta")).toBe(false);
-    expect(planUsesPerPropertyEntitlement("ai_report")).toBe(false);
-    expect(planUsesPerPropertyEntitlement("managed_protest")).toBe(false);
-    expect(planUsesPerPropertyEntitlement("free_ai_review")).toBe(false);
+  it("discounts 15% for an additional property in the same bracket", () => {
+    // 799 * 0.85 = 679.15
+    expect(propertyMonthlyPrice("corvusrf_managed", "over10m", true)).toBeCloseTo(679.15, 5);
   });
 });

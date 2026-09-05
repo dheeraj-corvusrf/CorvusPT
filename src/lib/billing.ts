@@ -25,13 +25,9 @@ export type Tier = "owner_managed" | "corvusrf_managed";
 // src/lib).
 export type PropertyValueBracket = "under2m" | "mid2m10m" | "over10m";
 
-export type BracketQuantities = Record<PropertyValueBracket, number>;
-
-export const EMPTY_BRACKETS: BracketQuantities = { under2m: 0, mid2m10m: 0, over10m: 0 };
-
 // "over10m" now means the capped $10M-$25M bracket, not open-ended — anything
 // above $25M moved to CUSTOM_TIER below, which isn't part of this bracket
-// system (no quantity, no checkout).
+// system (no checkout).
 export const VALUE_BRACKETS: { value: PropertyValueBracket; label: string }[] = [
   { value: "under2m", label: "$0 - $2M" },
   { value: "mid2m10m", label: "$2M - $10M" },
@@ -44,23 +40,30 @@ export const TIER_BRACKET_PRICES: Record<Tier, Record<PropertyValueBracket, numb
 };
 
 // Non-metered — shown on /pricing as a third, always-visible card with a
-// "Contact Us" link instead of Subscribe. Never enters BracketQuantities,
-// checkout, or the DB.
+// "Contact Us" link instead of Subscribe. Never enters checkout or the DB.
 export const CUSTOM_TIER = {
   label: "$25M+",
   tag: "Custom pricing",
   blurb: "Portfolios above $25M per property are priced individually — talk to us.",
 };
 
-// 1st property in a bracket is full price; every additional property in that
-// same bracket is 15% off. Mirrored in create-checkout-session/index.ts,
-// which can't import this file.
-export const ADDITIONAL_PROPERTY_DISCOUNT = 0.15;
-
-export function bracketLineTotal(basePrice: number, qty: number): number {
-  if (qty <= 0) return 0;
-  return basePrice + (qty - 1) * basePrice * (1 - ADDITIONAL_PROPERTY_DISCOUNT);
+// A property's own real value classifies it into a bracket automatically —
+// no self-declared quantity picker anymore (each property gets its own
+// subscription; see create-property-checkout-session). Same $2M/$10M
+// boundaries as VALUE_BRACKETS above. Mirrored by hand into
+// create-checkout-session/index.ts, which can't import this file.
+export function bracketForValue(value: number | null | undefined): PropertyValueBracket {
+  if (value == null) return "under2m";
+  if (value < 2_000_000) return "under2m";
+  if (value < 10_000_000) return "mid2m10m";
+  return "over10m";
 }
+
+// 1st property in a bracket is full price; every additional property a
+// customer already has an active subscription for in that SAME bracket
+// gets this discount on the new one. Mirrored in create-checkout-session/
+// index.ts, which can't import this file.
+export const ADDITIONAL_PROPERTY_DISCOUNT = 0.15;
 
 // The 15%-off math produces amounts like $84.15 — plain integers still print
 // as-is (no trailing ".00"), but anything with cents gets exactly 2 decimals
@@ -69,70 +72,21 @@ export function formatMoney(amount: number): string {
   return Number.isInteger(amount) ? String(amount) : amount.toFixed(2);
 }
 
-export function bracketMonthlyTotal(tier: Tier, brackets: BracketQuantities): number {
-  return VALUE_BRACKETS.reduce(
-    (sum, { value }) => sum + bracketLineTotal(TIER_BRACKET_PRICES[tier][value], brackets[value]),
-    0,
-  );
+// Real price for ONE property's own subscription — full rate, or the
+// 2nd-property discount once `isAdditionalInBracket` (the customer already
+// has another active property in this same tier+bracket) is true. Display
+// only; create-checkout-session computes and charges the authoritative
+// amount server-side the same way.
+export function propertyMonthlyPrice(
+  tier: Tier,
+  bracket: PropertyValueBracket,
+  isAdditionalInBracket: boolean,
+): number {
+  const base = TIER_BRACKET_PRICES[tier][bracket];
+  return isAdditionalInBracket
+    ? Math.round(base * (1 - ADDITIONAL_PROPERTY_DISCOUNT) * 100) / 100
+    : base;
 }
-
-export function bracketPropertyCount(brackets: BracketQuantities): number {
-  return VALUE_BRACKETS.reduce((sum, { value }) => sum + brackets[value], 0);
-}
-
-// ── Per-property entitlement ────────────────────────────────────────────
-// Real business rule: a subscription's bracket quantities pay for that many
-// PROPERTIES, not for the account as a whole — one payment does not unlock
-// every property the customer ever adds. Today, ai-report.tsx's
-// `hasFullAccess` is computed from `plan` alone (owner_managed/
-// corvusrf_managed/etc. → true), with no check against how many properties
-// that subscription actually covers, so a customer who pays for 1 property
-// currently gets full AI Report access on every property in their account.
-// This function is the real fix — see ai-report.tsx for how it's wired in —
-// but is gated behind ENFORCE_PER_PROPERTY_ENTITLEMENT below, left OFF for
-// now per explicit product direction ("put it on hold, I'll say when to
-// enable it"). While off, every call site's behavior is byte-for-byte
-// unchanged from before this existed.
-//
-// Rule: the first `paidPropertyCount` properties, oldest first (by
-// createdAt), are entitled; everything added after that isn't, until the
-// subscription's bracket quantities increase. Deliberately NOT trying to
-// match a specific property's real value against a specific bracket
-// (under2m/mid2m10m/over10m) — those quantities are self-declared by the
-// customer at checkout (create-checkout-session doesn't itself validate a
-// property's value against the bracket chosen for it either), so the only
-// number that's actually real and unambiguous here is the total paid count.
-export function getEntitledPropertyIds(
-  properties: { id: string; createdAt: string }[],
-  paidPropertyCount: number,
-): Set<string> {
-  if (paidPropertyCount <= 0) return new Set();
-  const oldestFirst = [...properties].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-  );
-  return new Set(oldestFirst.slice(0, paidPropertyCount).map((p) => p.id));
-}
-
-// Plans this entitlement cap actually applies to — the two real, current
-// per-property-bracket-priced tiers. "beta" is deliberately excluded: every
-// AI module is unlocked on every property for free for the whole beta
-// (see pricing.tsx's own "You have full Beta access" copy) — that's an
-// explicit, unlimited grant, not a bracket-quantity purchase. The legacy
-// "ai_report"/"managed_protest" values predate the per-property model
-// entirely (kept only for old rows — see the PlanValue comment above) and
-// were never sold with a bracket quantity to check against, so they're left
-// uncapped too rather than retroactively restricting a grandfathered account.
-const BRACKET_PRICED_PLANS: PlanValue[] = ["owner_managed", "corvusrf_managed"];
-
-export function planUsesPerPropertyEntitlement(plan: PlanValue): boolean {
-  return BRACKET_PRICED_PLANS.includes(plan);
-}
-
-// The kill switch used to live here as a hardcoded `false` constant —
-// flipping it meant a code change and a redeploy. It's now a real,
-// admin-toggleable setting instead: see getAppSettings()/
-// setEnforcePerPropertyEntitlement() in app-settings.ts (backed by the
-// app_settings table) and the Settings tab in admin.tsx.
 
 export const PLAN_OPTIONS: { value: PlanValue; label: string }[] = [
   { value: "free_ai_review", label: "Free AI Review" },
@@ -141,66 +95,66 @@ export const PLAN_OPTIONS: { value: PlanValue; label: string }[] = [
   { value: "beta", label: "Beta (free, full access)" },
 ];
 
+// A coarse, account-level signal only — "the tier of this customer's most
+// recently created active property subscription" (kept in sync by
+// stripe-webhook), used just where a quick at-a-glance plan label is needed
+// (pricing.tsx's own-plan banner, admin panel, get_my_referrals()'s
+// `converted` check in schema.sql). Real per-property access/billing always
+// reads the PROPERTY's own subscriptionStatus/planTier/valueBracket
+// (src/lib/properties.ts) instead — never this.
 export type BillingInfo = {
   plan: PlanValue;
-  subscriptionStatus: string | null;
-  subscriptionQuantity: number;
-  subscriptionBrackets: BracketQuantities;
-  cancelAtPeriodEnd: boolean;
-  cancelAt: string | null;
 };
 
 export async function getMyBilling(userId: string): Promise<BillingInfo> {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select(
-      "plan, subscription_status, subscription_quantity, qty_under_2m, qty_2m_10m, qty_over_10m, cancel_at_period_end, cancel_at",
-    )
-    .eq("id", userId)
-    .single();
+  const { data, error } = await supabase.from("profiles").select("plan").eq("id", userId).single();
   if (error) throw error;
-  const row = data as {
-    plan: PlanValue;
-    subscription_status: string | null;
-    subscription_quantity: number;
-    qty_under_2m: number;
-    qty_2m_10m: number;
-    qty_over_10m: number;
-    cancel_at_period_end: boolean;
-    cancel_at: string | null;
-  };
-  return {
-    plan: row.plan,
-    subscriptionStatus: row.subscription_status,
-    subscriptionQuantity: row.subscription_quantity,
-    subscriptionBrackets: {
-      under2m: row.qty_under_2m,
-      mid2m10m: row.qty_2m_10m,
-      over10m: row.qty_over_10m,
-    },
-    cancelAtPeriodEnd: row.cancel_at_period_end,
-    cancelAt: row.cancel_at,
-  };
+  return { plan: (data as { plan: PlanValue }).plan };
 }
 
-export async function startCheckout(tier: Tier, brackets: BracketQuantities): Promise<void> {
-  // Stripe redirects back to a path the edge function can't know on its own (it
-  // runs server-side, with no view of Vite's base path) — the client computes it
-  // via import.meta.env.BASE_URL, same pattern already used in
-  // forgot-password.tsx's redirectTo, and passes it along instead of the edge
-  // function guessing/hardcoding it (which is exactly how this one went stale
-  // pointing at a pre-custom-domain path).
-  const basePath = import.meta.env.BASE_URL;
-  const { url } = await invokeEdgeFunction<{ url: string }>("create-checkout-session", {
-    tier,
-    brackets,
-    successPath: `${basePath}dashboard?checkout=success`,
-    cancelPath: `${basePath}pricing`,
-  });
-  if (!url) throw new Error("Stripe did not return a checkout URL. Please try again.");
-  window.location.href = url;
+// Starts a real, independent Stripe subscription for exactly this one
+// property — see create-checkout-session/index.ts, which classifies the
+// property's own bracket from its real value and prices the 2nd-property
+// discount itself. Stripe redirects back to a path the edge function can't
+// know on its own (it runs server-side, with no view of Vite's base path) —
+// the client computes it via import.meta.env.BASE_URL, same pattern
+// forgot-password.tsx's redirectTo already uses.
+//
+// `newTab: true` (both Subscribe buttons — properties.tsx and ai-report.tsx
+// — so clicking one doesn't navigate away from whatever the customer was
+// looking at) opens a blank tab BEFORE the await, not after — window.open()
+// called from inside a .then()/await continuation is treated as not
+// user-initiated by most browsers' popup blockers and gets silently
+// blocked. Deliberately no `noopener` here: that would return null for the
+// handle this needs to later point at the real Stripe URL once it resolves.
+export async function startPropertyCheckout(
+  propertyId: string,
+  tier: Tier,
+  options?: { newTab?: boolean },
+): Promise<void> {
+  const newTabHandle = options?.newTab ? window.open("", "_blank") : null;
+  try {
+    const basePath = import.meta.env.BASE_URL;
+    const { url } = await invokeEdgeFunction<{ url: string }>("create-checkout-session", {
+      propertyId,
+      tier,
+      successPath: `${basePath}dashboard/properties?checkout=success`,
+      cancelPath: `${basePath}dashboard/properties`,
+    });
+    if (!url) throw new Error("Stripe did not return a checkout URL. Please try again.");
+    if (newTabHandle) newTabHandle.location.href = url;
+    else window.location.href = url;
+  } catch (err) {
+    newTabHandle?.close();
+    throw err;
+  }
 }
 
+// Opens Stripe's real Customer Portal — with one subscription per property
+// now, the portal itself lists every property's subscription separately,
+// each with its own real "Cancel subscription," update payment method, etc.
+// No property-specific parameter needed; Stripe scopes it to the signed-in
+// Customer's full subscription list on its own.
 export async function openBillingPortal(): Promise<void> {
   const basePath = import.meta.env.BASE_URL;
   const { url } = await invokeEdgeFunction<{ url: string }>("create-billing-portal-session", {
@@ -210,8 +164,16 @@ export async function openBillingPortal(): Promise<void> {
   window.location.href = url;
 }
 
-// Undoes a scheduled cancel-at-period-end in one click, rather than sending the user
-// into the full Stripe Customer Portal to find the "renew" option.
-export async function resumeSubscription(): Promise<void> {
-  await invokeEdgeFunction<{ ok: boolean }>("resume-subscription", {});
+// Cancels exactly one property's own subscription — trivial now that each
+// property has its own (see cancel-property-subscription/index.ts): no more
+// bracket-quantity guessing about which property actually loses coverage.
+export async function cancelPropertySubscription(propertyId: string): Promise<void> {
+  await invokeEdgeFunction<{ ok: boolean }>("cancel-property-subscription", { propertyId });
+}
+
+// Undoes a scheduled cancel-at-period-end on one property's own subscription,
+// in one click, rather than sending the user into the full Stripe Customer
+// Portal to find the "renew" option.
+export async function resumePropertySubscription(propertyId: string): Promise<void> {
+  await invokeEdgeFunction<{ ok: boolean }>("resume-subscription", { propertyId });
 }

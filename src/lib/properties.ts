@@ -2,6 +2,7 @@ import { supabase } from "./supabase";
 import { computeAndStoreHealthScore } from "./property-scores";
 import type { CadValueHistoryEntry } from "./cad-lookup";
 import type { IntakeState } from "./intake-store";
+import type { Tier, PropertyValueBracket } from "./billing";
 
 export type PropertyRecord = {
   id: string;
@@ -25,6 +26,20 @@ export type PropertyRecord = {
   savingsBasis: "comps" | "formula" | "ai" | "baseline" | null;
   createdAt: string;
   valueHistory: CadValueHistoryEntry[] | null;
+  // This property's own, real, independent Stripe subscription — see
+  // cancel-property-subscription/create-checkout-session. Never client-
+  // writable (see the column-level UPDATE grant in schema.sql); only the
+  // stripe-webhook edge function (service role) ever sets these. Optional
+  // (not just nullable) so existing test fixtures and admin.ts's
+  // toPropertyRecordStub — built from data that genuinely doesn't carry
+  // these — don't need updating; fromRow (the real, live path) always
+  // populates all six.
+  stripeSubscriptionId?: string | null;
+  subscriptionStatus?: string | null;
+  planTier?: Tier | null;
+  valueBracket?: PropertyValueBracket | null;
+  cancelAtPeriodEnd?: boolean;
+  cancelAt?: string | null;
 };
 
 type PropertyRow = {
@@ -46,6 +61,12 @@ type PropertyRow = {
   savings_basis: "comps" | "formula" | "ai" | "baseline" | null;
   created_at: string;
   value_history: string[] | null;
+  stripe_subscription_id: string | null;
+  subscription_status: string | null;
+  plan_tier: Tier | null;
+  value_bracket: PropertyValueBracket | null;
+  cancel_at_period_end: boolean;
+  cancel_at: string | null;
 };
 
 function fromRow(row: PropertyRow): PropertyRecord {
@@ -70,11 +91,17 @@ function fromRow(row: PropertyRow): PropertyRecord {
     valueHistory: row.value_history
       ? row.value_history.map((s) => JSON.parse(s) as CadValueHistoryEntry)
       : null,
+    stripeSubscriptionId: row.stripe_subscription_id,
+    subscriptionStatus: row.subscription_status,
+    planTier: row.plan_tier,
+    valueBracket: row.value_bracket,
+    cancelAtPeriodEnd: row.cancel_at_period_end,
+    cancelAt: row.cancel_at,
   };
 }
 
 const SELECT_COLUMNS =
-  "id, address, cad, account_number, owner_name, property_type, land_value, improvement_value, total_value, tax_year, protest_deadline, payment_due_date, tax_amount_due, paid_at, estimated_savings, savings_basis, created_at, value_history";
+  "id, address, cad, account_number, owner_name, property_type, land_value, improvement_value, total_value, tax_year, protest_deadline, payment_due_date, tax_amount_due, paid_at, estimated_savings, savings_basis, created_at, value_history, stripe_subscription_id, subscription_status, plan_tier, value_bracket, cancel_at_period_end, cancel_at";
 
 export async function listProperties(userId: string): Promise<PropertyRecord[]> {
   const { data, error } = await supabase
