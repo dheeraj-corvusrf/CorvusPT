@@ -94,13 +94,28 @@ grant update (first_name, last_name, phone, company_name, calendar_feed_token) o
 -- in this security-definer trigger — not via a client-side update, which the column
 -- grants above no longer allow. Runs at row-creation regardless of whether email
 -- confirmation is required, so both signup paths grant beta access correctly.
+--
+-- Also stamps a fresh referral_code on every new profile, and resolves
+-- 'referral_code_used' (the code from ?ref=, passed through the same
+-- options.data mechanism — see sign-in.tsx) into a real referred_by user id
+-- HERE, server-side — the client only ever hands over the raw code string it
+-- read from the URL, never a resolved user id, so a referral can't be
+-- spoofed to point at an arbitrary account. A code that doesn't match any
+-- real profile (typo'd, stale, tampered) just resolves to null — no error,
+-- no blocked signup.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer set search_path = public
 as $$
+declare
+  referrer_id uuid;
 begin
-  insert into public.profiles (id, email, first_name, last_name, phone, company_name, plan)
+  select id into referrer_id from public.profiles
+    where referral_code = upper(new.raw_user_meta_data ->> 'referral_code_used')
+    limit 1;
+
+  insert into public.profiles (id, email, first_name, last_name, phone, company_name, plan, referral_code, referred_by)
   values (
     new.id,
     new.email,
@@ -108,7 +123,9 @@ begin
     new.raw_user_meta_data ->> 'last_name',
     new.raw_user_meta_data ->> 'phone',
     new.raw_user_meta_data ->> 'company_name',
-    case when new.raw_user_meta_data ->> 'wants_beta' = 'true' then 'beta' else 'free_ai_review' end
+    case when new.raw_user_meta_data ->> 'wants_beta' = 'true' then 'beta' else 'free_ai_review' end,
+    upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8)),
+    referrer_id
   );
   -- Clears this address off the admin panel's "Invited Users" tab the moment
   -- a real account actually exists for it — security definer, so this runs
@@ -1289,6 +1306,59 @@ drop policy if exists "Admins can update app settings" on public.app_settings;
 create policy "Admins can update app settings"
   on public.app_settings for update
   using (public.is_admin());
+
+-- Referral program — each user's own shareable code, who referred them (set
+-- once at signup by handle_new_user() above, never changed after), and when
+-- the REFERRER was actually credited for referring THIS specific user.
+-- referral_reward_granted_at lives on the referred user's own row rather
+-- than a separate referrals table — it's the one-time "have we already paid
+-- out for this specific signup converting" flag stripe-webhook checks before
+-- granting a reward, so the same referred user's subscription reactivating
+-- later can never double-pay the referrer. None of these three columns are
+-- in the client-writable column grant below (or above) — only
+-- handle_new_user() (security definer) and stripe-webhook (service-role
+-- client, bypasses RLS) ever write them.
+alter table public.profiles add column if not exists referral_code text unique;
+alter table public.profiles add column if not exists referred_by uuid references public.profiles (id) on delete set null;
+alter table public.profiles add column if not exists referral_reward_granted_at timestamptz;
+
+-- Backfill: existing accounts created before this feature shipped have no
+-- referral_code yet — without one they'd have nothing to share.
+update public.profiles
+  set referral_code = upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))
+  where referral_code is null;
+
+-- Real reads a referrer needs (their own referral list) without granting
+-- broad SELECT on other users' full profile rows — RLS is row-level, not
+-- column-level, so a plain "referred_by = auth.uid()" policy would leak
+-- every column (phone, stripe ids, plan, ...) of everyone they referred.
+-- This security-definer function returns only the safe, minimal fields a
+-- referral-status list actually needs. "converted" checks the real plan
+-- value, not a guess; "rewarded" checks the real timestamp stripe-webhook
+-- sets, not a separate assumption.
+create or replace function public.get_my_referrals()
+returns table (
+  id uuid,
+  first_name text,
+  signed_up_at timestamptz,
+  converted boolean,
+  rewarded boolean
+)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select
+    p.id,
+    p.first_name,
+    p.created_at as signed_up_at,
+    (p.plan in ('owner_managed', 'corvusrf_managed')) as converted,
+    (p.referral_reward_granted_at is not null) as rewarded
+  from public.profiles p
+  where p.referred_by = auth.uid()
+  order by p.created_at desc;
+$$;
 
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,

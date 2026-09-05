@@ -68,13 +68,15 @@ export type ModuleAnalysisInput = {
   // when no case has been started yet.
   preFilingStatus?: { missingBlocking: string[] } | null;
   // Only for "site" — real point data from site-gis.ts's getSiteGis() (FEMA
-  // flood zone + USGS elevation) for the property's real lat/lng, when one
-  // exists. Absent entirely, not just null fields, whenever no real lat/lng
-  // exists for this property/county (most counties today) — see
-  // loadSiteGis() in ai-report.tsx.
+  // flood zone + USGS elevation + OSM highway/rail proximity) for the
+  // property's real lat/lng, when one exists. Absent entirely, not just
+  // null fields, whenever no real lat/lng exists for this property/county
+  // (most counties today) — see loadSiteGis() in ai-report.tsx.
   siteGis?: {
     floodZone: { zone: string; label: string; inSFHA: boolean } | null;
     elevationFt: number | null;
+    nearestHighwayMi: number | null;
+    nearestRailMi: number | null;
   } | null;
   // Only for "improvement" — the real typical economic-life range for this
   // property's type (improvement-condition.ts's getTypicalEconomicLife()),
@@ -123,13 +125,14 @@ export type ModuleResultMap = {
     topStrategySummary: string;
   };
   comps: { guidance: string; checklist: string[]; recommendedUse: string };
-  // Real 14-factor structured assessment — see MODULE_SPECS.site and
-  // enforceSiteFactorRealData in the edge function. Only "Floodplain" and
-  // "Grade" can ever read "Confirmed"/"Partial Data"; every other factor is
-  // server-enforced to "Additional Data Needed" until a real source exists
-  // for it, or "Not Applicable" once the user has explicitly confirmed no
-  // such document exists (see module-overrides.ts) — never trust status
-  // alone without that context.
+  // Real 16-factor structured assessment — see MODULE_SPECS.site and
+  // enforceSiteFactorRealData in the edge function. Only "Floodplain",
+  // "Grade", "Highway Proximity", and "Railroad Proximity" can ever read
+  // "Confirmed"/"Partial Data"; every other factor is server-enforced to
+  // "Additional Data Needed" until a real source exists for it, or "Not
+  // Applicable" once the user has explicitly confirmed no such document
+  // exists (see module-overrides.ts) — never trust status alone without
+  // that context.
   site: {
     guidance: string;
     factors: {
@@ -147,7 +150,9 @@ export type ModuleResultMap = {
         | "Traffic Counts / VPD"
         | "Grade"
         | "Topography"
-        | "Access Limitations";
+        | "Access Limitations"
+        | "Highway Proximity"
+        | "Railroad Proximity";
       status: "Confirmed" | "Partial Data" | "Additional Data Needed" | "Not Applicable";
       finding: string;
       severity: "High" | "Moderate" | "Low" | "Unknown";

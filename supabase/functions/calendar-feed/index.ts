@@ -45,6 +45,7 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   tax_penalty: "Tax Penalty Date",
   refund_expected: "Refund Expected",
   bpp_rendition: "BPP Rendition Deadline",
+  refile_reminder: "Re-File Reminder",
 };
 
 function nextBppRenditionDeadline(from: Date): string {
@@ -119,7 +120,7 @@ Deno.serve(async (req: Request) => {
       adminClient
         .from("protests")
         .select(
-          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date",
+          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date, tax_year",
         )
         .eq("user_id", userId),
       adminClient
@@ -134,6 +135,18 @@ Deno.serve(async (req: Request) => {
   const propertyById = new Map((properties ?? []).map((p: PropertyRow) => [p.id, p] as const));
   const taxBillPropertyIds = new Set(
     (taxBills ?? []).map((b: { property_id: string }) => b.property_id),
+  );
+  // Mirrors getCalendarEvents()'s own propertiesWithCurrentProtest set in
+  // src/lib/tax-calendar.ts by hand — suppresses the refile_reminder below
+  // once a property already has a protest on file for the current tax year.
+  const currentYear = new Date().getFullYear();
+  const propertiesWithCurrentProtest = new Set(
+    (protests ?? [])
+      .filter(
+        (p: { tax_year: number | null }) =>
+          typeof p.tax_year === "number" && p.tax_year >= currentYear,
+      )
+      .map((p: { property_id: string }) => p.property_id),
   );
   const events: EventRow[] = [];
 
@@ -182,6 +195,25 @@ Deno.serve(async (req: Request) => {
         date: toIsoDate(pr.arb_decision_date),
         type: "arb_decision",
         title: `ARB decision — ${address}`,
+        amount: null,
+      });
+    }
+    // Mirrors the refile_reminder block in src/lib/tax-calendar.ts's
+    // fromProtest() by hand — a one-time-per-year, opt-in-only nudge to
+    // check for a fresh notice once a resolved protest's tax year has
+    // passed, suppressed as soon as the property has a protest on file for
+    // the current year (see propertiesWithCurrentProtest above).
+    if (
+      pr.status === "resolved" &&
+      typeof pr.tax_year === "number" &&
+      pr.tax_year < currentYear &&
+      !propertiesWithCurrentProtest.has(pr.property_id)
+    ) {
+      events.push({
+        id: `refile-reminder:${pr.id}:${currentYear}`,
+        date: `${currentYear}-04-01`,
+        type: "refile_reminder",
+        title: `Check for this year's notice — re-file for ${currentYear}? — ${address}`,
         amount: null,
       });
     }

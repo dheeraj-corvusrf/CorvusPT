@@ -11,7 +11,8 @@ export type CalendarEventType =
   | "tax_due"
   | "tax_penalty"
   | "refund_expected"
-  | "bpp_rendition";
+  | "bpp_rendition"
+  | "refile_reminder";
 
 export type CalendarEvent = {
   id: string;
@@ -39,6 +40,7 @@ export const EVENT_TYPE_LABEL: Record<CalendarEventType, string> = {
   tax_penalty: "Tax Penalty Date",
   refund_expected: "Refund Expected",
   bpp_rendition: "BPP Rendition Deadline",
+  refile_reminder: "Re-File Reminder",
 };
 
 // Tailwind color tokens keyed by event type, used for the month-grid dots.
@@ -51,6 +53,7 @@ export const EVENT_TYPE_COLOR: Record<CalendarEventType, string> = {
   tax_penalty: "bg-destructive",
   refund_expected: "bg-success",
   bpp_rendition: "bg-violet-500",
+  refile_reminder: "bg-rose-400",
 };
 
 // Texas's BPP rendition deadline is a fixed statutory date (April 15) rather than
@@ -120,7 +123,11 @@ export function hearingEventTitle(
   return parts.join(" ");
 }
 
-function fromProtest(pr: ProtestRecord, properties: PropertyRecord[]): CalendarEvent[] {
+function fromProtest(
+  pr: ProtestRecord,
+  properties: PropertyRecord[],
+  propertiesWithCurrentProtest: Set<string>,
+): CalendarEvent[] {
   const property = properties.find((p) => p.id === pr.propertyId);
   const address = property?.address ?? "your property";
   const events: CalendarEvent[] = [];
@@ -164,6 +171,43 @@ function fromProtest(pr: ProtestRecord, properties: PropertyRecord[]): CalendarE
       propertyId: pr.propertyId,
       linkTo: "/dashboard/properties",
       resolved: true,
+      propertyLabel: address,
+    });
+  }
+  // A resolved case from a prior tax year is eligible to re-file once a new
+  // tax year has rolled around — same real condition
+  // dashboard/_layout.properties.tsx's own canReFile already uses. This
+  // surfaces that as an actual dated reminder instead of only a button the
+  // user has to remember to go find on their own — deliberately NOT an
+  // automatically-created new case (product direction was explicitly
+  // "opt-in reminder only," not auto-renewal), just a real nudge pointing
+  // back at the real Re-file button. April 1 mirrors
+  // nextBppRenditionDeadline()'s own real-statutory-season convention
+  // (Texas appraisal notices are typically mailed in April) rather than an
+  // arbitrary date; if that's already passed this year the reminder still
+  // shows (marked "Past due" by the calendar page's own daysUntil badge,
+  // same as any other date-only event), since real time remains before the
+  // real May 15 protest deadline. Suppressed once a newer protest already
+  // exists for this property (propertiesWithCurrentProtest, computed once
+  // in getCalendarEvents) — otherwise this would keep reminding forever
+  // even after the user actually re-filed, since this OLD row's own taxYear
+  // never changes.
+  const currentYear = new Date().getFullYear();
+  if (
+    pr.status === "resolved" &&
+    pr.taxYear != null &&
+    pr.taxYear < currentYear &&
+    !propertiesWithCurrentProtest.has(pr.propertyId)
+  ) {
+    events.push({
+      id: `refile-reminder:${pr.id}:${currentYear}`,
+      date: `${currentYear}-04-01`,
+      type: "refile_reminder",
+      title: `Check for this year's notice — re-file for ${currentYear}? — ${address}`,
+      amount: null,
+      propertyId: pr.propertyId,
+      linkTo: "/dashboard/properties",
+      resolved: false,
       propertyLabel: address,
     });
   }
@@ -242,10 +286,18 @@ export async function getCalendarEvents(userId: string): Promise<CalendarEvent[]
 
   const taxBillPropertyIds = new Set(taxBills.map((b) => b.propertyId));
   const now = new Date();
+  const currentYear = now.getFullYear();
+  // Which properties already have a protest for the current (or a future)
+  // tax year — computed once here, not per-protest, so the refile_reminder
+  // check in fromProtest can suppress itself once the user has actually
+  // re-filed rather than reminding forever off a stale, already-resolved row.
+  const propertiesWithCurrentProtest = new Set(
+    protests.filter((p) => p.taxYear != null && p.taxYear >= currentYear).map((p) => p.propertyId),
+  );
 
   const events: CalendarEvent[] = [
     ...properties.flatMap((p) => fromProperty(p, taxBillPropertyIds)),
-    ...protests.flatMap((pr) => fromProtest(pr, properties)),
+    ...protests.flatMap((pr) => fromProtest(pr, properties, propertiesWithCurrentProtest)),
     ...taxBills.flatMap((b) => fromTaxBill(b, properties)),
     ...bppAccounts.map((a) => fromBppAccount(a, now)),
   ];
