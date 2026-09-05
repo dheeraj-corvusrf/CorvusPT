@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import {
   ProtestAuthorizationFlow,
   type CarriedOwnerInfo,
@@ -22,6 +23,7 @@ export function BulkProtestAuthorizationFlow({
   userId,
   properties,
   userEmail,
+  isBeta,
   open,
   onOpenChange,
   onAllDone,
@@ -29,6 +31,11 @@ export function BulkProtestAuthorizationFlow({
   userId: string;
   properties: PropertyRecord[];
   userEmail?: string | null;
+  // Beta bypasses the per-property payment gate unconditionally, same
+  // convention as isPaid in _layout.properties.tsx/hasFullAccess in
+  // ai-report.tsx — every other plan reads each property's own real
+  // subscriptionStatus directly (see the skip effect below).
+  isBeta: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAllDone: (completed: ProtestRecord[]) => void;
@@ -45,8 +52,28 @@ export function BulkProtestAuthorizationFlow({
     setCompleted([]);
   }, [open]);
 
-  if (!open || properties.length === 0) return null;
-  const current = properties[index];
+  const current = open ? (properties[index] ?? null) : null;
+  const isPaid = isBeta || current?.subscriptionStatus === "active";
+
+  // Real payment gate — skips straight past any property with no active
+  // subscription instead of walking it through a real legal "Appointment of
+  // Agent" it wouldn't be allowed to actually sign anyway (see
+  // ProtestAuthorizationFlow's own isPaid gate, which blocks Sign & Submit
+  // regardless). Newly bulk-imported properties (AddOwnershipsModal) are
+  // almost always unpaid — this is the common case, not an edge case.
+  useEffect(() => {
+    if (!open || !current || isPaid) return;
+    toast.error(`${current.address} isn't paid — subscribe to it first, then request its protest.`);
+    if (index >= properties.length - 1) {
+      onOpenChange(false);
+      onAllDone(completed);
+    } else {
+      setIndex((i) => i + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, current, isPaid, index]);
+
+  if (!open || !current || !isPaid) return null;
   const isLast = index === properties.length - 1;
 
   return (
@@ -55,6 +82,7 @@ export function BulkProtestAuthorizationFlow({
       userId={userId}
       property={current}
       userEmail={userEmail}
+      isPaid={isPaid}
       open={open}
       initialOwnerInfo={carriedOwnerInfo}
       batchProgress={{ index: index + 1, total: properties.length }}

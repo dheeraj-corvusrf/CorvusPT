@@ -405,6 +405,19 @@ function Report() {
   }
 
   async function startProtest() {
+    // Real payment gate, not just a hidden/disabled button — startProtest is
+    // reachable from more than one place (the banner button below AND
+    // onStartProtest passed into the module preview modal), so the check
+    // belongs here, once, rather than trusted to whichever caller happens to
+    // render a button. myPlan alone isn't enough: it's an account-level
+    // signal ("owner_managed" once ANY property is active), so a customer
+    // with one paid property could otherwise file a protest on a second,
+    // unpaid one — hasFullAccess is the real per-property answer (reads
+    // resolvedProperty's own subscriptionStatus; see its own effect above).
+    if (!hasFullAccess) {
+      toast.error("Subscribe to this property before filing a protest.");
+      return;
+    }
     const property = await ensureProperty();
     if (!property) return;
     // Owner-managed customers file their own protest — ProtestAuthorizationFlow
@@ -1305,10 +1318,19 @@ function Report() {
                   </Link>
                 )}
               </div>
-            ) : (
+            ) : hasFullAccess ? (
               <button onClick={startProtest} className="btn-accent text-sm py-1.5">
                 {myPlan === "owner_managed" ? "File Protest" : "Request Protest Filing"}
               </button>
+            ) : (
+              // Real payment gate (see startProtest's own check) reflected
+              // honestly in the button itself — an enabled-looking "File
+              // Protest" that silently no-ops when clicked while unpaid
+              // would be worse than just sending the user to where they can
+              // actually fix it.
+              <Link to="/dashboard/properties" className="btn-accent text-sm py-1.5">
+                Subscribe to File Protest
+              </Link>
             )}
           </div>
         )}
@@ -1496,6 +1518,7 @@ function Report() {
           userId={user.id}
           property={resolvedProperty}
           userEmail={user.email}
+          isPaid={hasFullAccess}
           open={authorizing}
           onOpenChange={(open) => setAuthorizing(open)}
           onDone={(created) => {

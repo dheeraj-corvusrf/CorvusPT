@@ -412,6 +412,7 @@ function Properties() {
           userId={user.id}
           property={authorizingProperty}
           userEmail={user.email}
+          isPaid={isBeta || authorizingProperty.subscriptionStatus === "active"}
           open={!!authorizingProperty}
           onOpenChange={(open) => {
             if (!open) setAuthorizingProperty(null);
@@ -432,6 +433,7 @@ function Properties() {
           userId={user.id}
           properties={authorizingBatch}
           userEmail={user.email}
+          isBeta={isBeta}
           open={!!authorizingBatch}
           onOpenChange={(open) => {
             if (!open) setAuthorizingBatch(null);

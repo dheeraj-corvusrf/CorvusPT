@@ -6,6 +6,7 @@ import { readIntake, classifyAndStoreDocument, type IntakeState } from "@/lib/in
 import { useAuth } from "@/lib/auth";
 import { listProtests, type ProtestRecord, type ProtestStatus } from "@/lib/protests";
 import { listProperties, type PropertyRecord } from "@/lib/properties";
+import { getMyBilling } from "@/lib/billing";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 
@@ -200,6 +201,7 @@ export function JourneyTracker() {
   const [uploading, setUploading] = useState(false);
   const [page, setPage] = useState(0);
   const [authorizingProperty, setAuthorizingProperty] = useState<PropertyRecord | null>(null);
+  const [isBeta, setIsBeta] = useState(false);
   // This component lives in __root.tsx, so it mounts once and persists across
   // every route change in the app — it never remounts just because the user
   // navigated from /intake (after adding a property) to /dashboard, so a plain
@@ -221,6 +223,13 @@ export function JourneyTracker() {
       .catch((err) => console.error(err));
     listProperties(user.id)
       .then(setProperties)
+      .catch((err) => console.error(err));
+    // Real payment gate for onProtestClick below — beta bypasses
+    // unconditionally, same convention as isPaid in _layout.properties.tsx/
+    // hasFullAccess in ai-report.tsx (this widget has no other way to know
+    // about account-level plans).
+    getMyBilling(user.id)
+      .then((b) => setIsBeta(b.plan === "beta"))
       .catch((err) => console.error(err));
   }, [user, pathname]);
 
@@ -304,6 +313,7 @@ export function JourneyTracker() {
           userId={user.id}
           property={activeProperty}
           userEmail={user.email}
+          isPaid={isBeta || activeProperty.subscriptionStatus === "active"}
           open={!!authorizingProperty}
           onOpenChange={(open) => {
             if (!open) setAuthorizingProperty(null);

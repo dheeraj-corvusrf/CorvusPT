@@ -53,6 +53,7 @@ export function ProtestAuthorizationFlow({
   open,
   initialOwnerInfo,
   batchProgress,
+  isPaid,
   onOpenChange,
   onDone,
 }: {
@@ -67,6 +68,15 @@ export function ProtestAuthorizationFlow({
   // "Property 2 of 5" — purely a progress label for the batch orchestrator;
   // has no effect on this flow's own step logic.
   batchProgress?: { index: number; total: number };
+  // Real payment gate, enforced here rather than trusted to whichever
+  // caller happens to render the button that opens this modal — a hidden/
+  // disabled button elsewhere is just a hint; this is where filing an
+  // actual protest is prevented outright for an unpaid property. Callers
+  // compute this themselves (beta bypasses unconditionally; every other
+  // plan reads the property's own real subscriptionStatus — see isPaid in
+  // _layout.properties.tsx/hasFullAccess in ai-report.tsx) since this
+  // component has no independent way to know about account-level plans.
+  isPaid: boolean;
   onOpenChange: (open: boolean) => void;
   onDone: (protest: ProtestRecord, ownerInfo: CarriedOwnerInfo) => void;
 }) {
@@ -135,6 +145,10 @@ export function ProtestAuthorizationFlow({
 
   async function handleSubmit() {
     if (!signature) return;
+    if (!isPaid) {
+      setError("This property isn't covered by an active subscription — subscribe before filing.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -379,6 +393,12 @@ export function ProtestAuthorizationFlow({
 
         {step === "review" && (
           <div className="grid gap-4">
+            {!isPaid && (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+                This property isn't covered by an active subscription yet — you can review this
+                agreement, but signing is disabled until you subscribe.
+              </div>
+            )}
             <div className="rounded-lg border border-border p-4 text-sm max-h-56 overflow-y-auto">
               <h3 className="font-semibold">CorvusPT Service Agreement</h3>
               <p className="mt-2">
@@ -451,7 +471,7 @@ export function ProtestAuthorizationFlow({
                 Back
               </button>
               <button
-                disabled={!agreed || !signature || submitting}
+                disabled={!agreed || !signature || submitting || !isPaid}
                 onClick={handleSubmit}
                 className="btn-primary btn-primary-hover disabled:opacity-50"
               >
