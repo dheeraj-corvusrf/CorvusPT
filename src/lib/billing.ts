@@ -177,3 +177,35 @@ export async function cancelPropertySubscription(propertyId: string): Promise<vo
 export async function resumePropertySubscription(propertyId: string): Promise<void> {
   await invokeEdgeFunction<{ ok: boolean }>("resume-subscription", { propertyId });
 }
+
+// One live Stripe subscription, as returned by the list-my-subscriptions edge
+// function. `amountCents`/`currentPeriodEnd`/`card` are the authoritative
+// Stripe values — the real charged amount here already includes the
+// 2nd-property discount that create-checkout-session bakes into price_data,
+// which propertyMonthlyPrice() above can only estimate. `propertyId` (from
+// subscription metadata) is how the Billing page joins each subscription back
+// to its property for the address.
+export type MySubscription = {
+  id: string;
+  status: string;
+  propertyId: string | null;
+  tier: Tier | null;
+  bracket: PropertyValueBracket | null;
+  productName: string | null;
+  amountCents: number | null;
+  currency: string;
+  interval: string;
+  quantity: number;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  cancelAt: string | null;
+  card: { brand: string; last4: string } | null;
+};
+
+export async function listMySubscriptions(): Promise<MySubscription[]> {
+  const { subscriptions } = await invokeEdgeFunction<{ subscriptions: MySubscription[] }>(
+    "list-my-subscriptions",
+    {},
+  );
+  return subscriptions ?? [];
+}
