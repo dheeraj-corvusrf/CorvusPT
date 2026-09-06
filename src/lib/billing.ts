@@ -155,13 +155,24 @@ export async function startPropertyCheckout(
 // each with its own real "Cancel subscription," update payment method, etc.
 // No property-specific parameter needed; Stripe scopes it to the signed-in
 // Customer's full subscription list on its own.
-export async function openBillingPortal(): Promise<void> {
-  const basePath = import.meta.env.BASE_URL;
-  const { url } = await invokeEdgeFunction<{ url: string }>("create-billing-portal-session", {
-    returnPath: `${basePath}dashboard`,
-  });
-  if (!url) throw new Error("Stripe did not return a billing portal URL. Please try again.");
-  window.location.href = url;
+export async function openBillingPortal(options?: { newTab?: boolean }): Promise<void> {
+  // Same popup-blocker-safe pattern as startPropertyCheckout: open the blank
+  // tab synchronously (inside the click handler), then point it at the real
+  // Stripe URL once the edge function resolves. No `noopener` — that would
+  // null out the handle this needs to keep.
+  const newTabHandle = options?.newTab ? window.open("", "_blank") : null;
+  try {
+    const basePath = import.meta.env.BASE_URL;
+    const { url } = await invokeEdgeFunction<{ url: string }>("create-billing-portal-session", {
+      returnPath: `${basePath}dashboard`,
+    });
+    if (!url) throw new Error("Stripe did not return a billing portal URL. Please try again.");
+    if (newTabHandle) newTabHandle.location.href = url;
+    else window.location.href = url;
+  } catch (err) {
+    newTabHandle?.close();
+    throw err;
+  }
 }
 
 // Cancels exactly one property's own subscription — trivial now that each

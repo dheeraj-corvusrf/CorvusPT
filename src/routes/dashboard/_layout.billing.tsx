@@ -84,17 +84,17 @@ function Billing() {
   async function handleManage() {
     setOpeningPortal(true);
     try {
-      await openBillingPortal();
+      await openBillingPortal({ newTab: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not open billing portal.");
+    } finally {
       setOpeningPortal(false);
     }
   }
 
-  // openBillingPortal() leaves the page via window.location, so the success
-  // path never clears "Redirecting…". Returning with the browser back button
-  // restores this page from the bfcache with that state still on — reset it
-  // (and any in-flight row) whenever the page is shown again.
+  // Defensive: the portal now opens in a new tab so this page no longer
+  // navigates away, but keep clearing any in-flight state on pageshow in case
+  // a bfcache restore ever freezes it on.
   useEffect(() => {
     const onShow = () => {
       setOpeningPortal(false);
@@ -182,10 +182,20 @@ function Billing() {
               : "You don't have any paid property subscriptions yet."}
           </p>
           <div className="mt-4 grid gap-2 sm:flex sm:flex-wrap">
-            <Link to="/dashboard/properties" className="btn-outline">
+            <Link
+              to="/dashboard/properties"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-outline"
+            >
               Manage Properties
             </Link>
-            <Link to="/pricing" className="btn-primary btn-primary-hover">
+            <Link
+              to="/pricing"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-primary btn-primary-hover"
+            >
               See Pricing
             </Link>
           </div>
@@ -227,12 +237,22 @@ function Billing() {
                 disabled={openingPortal}
                 className="btn-outline disabled:opacity-60"
               >
-                {openingPortal ? "Redirecting…" : "Payment method & invoices"}
+                {openingPortal ? "Opening…" : "Payment method & invoices"}
               </button>
-              <Link to="/dashboard/properties" className="btn-outline">
+              <Link
+                to="/dashboard/properties"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-outline"
+              >
                 Add or cancel a property
               </Link>
-              <Link to="/pricing" className="btn-primary btn-primary-hover">
+              <Link
+                to="/pricing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-primary btn-primary-hover"
+              >
                 Compare Plans
               </Link>
             </div>
@@ -329,7 +349,7 @@ function Billing() {
                           disabled={openingPortal}
                           className="btn-outline py-1.5 text-sm disabled:opacity-60"
                         >
-                          {openingPortal ? "Redirecting…" : "Cancel in billing portal"}
+                          {openingPortal ? "Opening…" : "Cancel in billing portal"}
                         </button>
                       </>
                     )}
