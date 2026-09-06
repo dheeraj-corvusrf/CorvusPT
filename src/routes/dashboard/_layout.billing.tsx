@@ -320,6 +320,14 @@ function Billing() {
                     </span>
                   </div>
 
+                  {s.cancelAtPeriodEnd && (
+                    <p className="text-muted-foreground mt-2 text-[11px]">
+                      You've already canceled this. It stays active until{" "}
+                      {fmtDate(s.cancelAt ?? s.currentPeriodEnd)}, then ends on its own — no further
+                      charges. It'll drop off this list once that date passes.
+                    </p>
+                  )}
+
                   <div className="border-border mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
                     {prop ? (
                       s.cancelAtPeriodEnd ? (
@@ -349,7 +357,11 @@ function Billing() {
                           disabled={openingPortal}
                           className="btn-outline py-1.5 text-sm disabled:opacity-60"
                         >
-                          {openingPortal ? "Opening…" : "Cancel in billing portal"}
+                          {openingPortal
+                            ? "Opening…"
+                            : s.cancelAtPeriodEnd
+                              ? "View in billing portal"
+                              : "Cancel in billing portal"}
                         </button>
                       </>
                     )}
