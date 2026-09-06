@@ -337,7 +337,7 @@ function Properties() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
-                        {!isBeta && <PaymentStatusBadge paid={isPaid} />}
+                        {!isBeta && <PaymentStatusBadge property={p} />}
                       </div>
                       <h3 className="font-serif text-xl font-semibold">{p.address}</h3>
                       <p className="text-sm text-muted-foreground inline-flex items-center flex-wrap gap-1">
@@ -543,13 +543,28 @@ function ActionStatusBadge({
   return <span className={`badge-soft ${STATUS_TONE[status]}`}>{label}</span>;
 }
 
-// `paid` means this property's OWN real Stripe subscription is active — see
-// isPaid in the property map above. Never shown for beta accounts, which
-// have no per-property subscription to report on at all.
-function PaymentStatusBadge({ paid }: { paid: boolean }) {
-  return (
-    <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
-  );
+// Reflects this property's OWN Stripe subscription state. Never shown for beta
+// accounts, which have no per-property subscription to report on. "Canceled"
+// (a subscription the user deliberately ended) is called out separately from
+// "Not Paid" (never subscribed) — both mean no active coverage and both still
+// show the Subscribe buttons, but the wording shouldn't read as "you forgot
+// to pay" when the user chose to cancel.
+function PaymentStatusBadge({ property }: { property: PropertyRecord }) {
+  const status = property.subscriptionStatus;
+  if (status === "active") {
+    return property.cancelAtPeriodEnd ? (
+      <span className="badge-soft bg-secondary text-muted-foreground">Canceling</span>
+    ) : (
+      <span className="badge-soft">Paid</span>
+    );
+  }
+  if (status === "canceled") {
+    return <span className="badge-soft bg-secondary text-muted-foreground">Canceled</span>;
+  }
+  if (status === "past_due" || status === "unpaid") {
+    return <span className="badge-soft-warning">Payment due</span>;
+  }
+  return <span className="badge-soft-warning">Not Paid</span>;
 }
 
 // Only appears once the background AI health-score call (fired from addProperty())
