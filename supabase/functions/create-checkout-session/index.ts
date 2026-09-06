@@ -109,7 +109,7 @@ Deno.serve(async (req: Request) => {
     // start a checkout for their own property.
     const { data: property } = await adminClient
       .from("properties")
-      .select("id, total_value, stripe_subscription_id, subscription_status")
+      .select("id, address, total_value, stripe_subscription_id, subscription_status")
       .eq("id", propertyId)
       .eq("user_id", user.id)
       .maybeSingle();
@@ -146,9 +146,18 @@ Deno.serve(async (req: Request) => {
     const unitAmount = isAdditionalInBracket
       ? Math.round(baseCents * (1 - ADDITIONAL_PROPERTY_DISCOUNT))
       : baseCents;
-    const name = `${TIER_LABEL[tier]} — ${BRACKET_LABEL[bracket]}${
-      isAdditionalInBracket ? " (2nd+ property, 15% off)" : ""
+    // Lead with the property address so each line is identifiable in Stripe's
+    // hosted billing portal (which only shows the product name) when a
+    // customer has several property subscriptions — otherwise two rows like
+    // "Owner-Managed — $2M - $10M" are indistinguishable. Stripe's product
+    // name limit is 250 chars; a situs address is well under that, but trim
+    // defensively. Also set the subscription description to the bare address
+    // for portals/emails that surface it.
+    const address = ((property.address as string | null) ?? "").trim();
+    const planLabel = `${TIER_LABEL[tier]} (${BRACKET_LABEL[bracket]})${
+      isAdditionalInBracket ? ", 2nd+ property 15% off" : ""
     }`;
+    const name = (address ? `${address} — ${planLabel}` : planLabel).slice(0, 240);
 
     const { data: profile } = await adminClient
       .from("profiles")
@@ -175,7 +184,10 @@ Deno.serve(async (req: Request) => {
       client_reference_id: user.id,
       customer: profile?.stripe_customer_id ?? undefined,
       customer_email: profile?.stripe_customer_id ? undefined : (user.email ?? undefined),
-      subscription_data: { metadata: { tier, bracket, propertyId } },
+      subscription_data: {
+        ...(address ? { description: address } : {}),
+        metadata: { tier, bracket, propertyId },
+      },
       metadata: { tier, bracket, propertyId },
       success_url: `${origin}${safePath(successPath, "/dashboard/properties?checkout=success")}`,
       cancel_url: `${origin}${safePath(cancelPath, "/dashboard/properties")}`,

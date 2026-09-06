@@ -155,13 +155,24 @@ export async function startPropertyCheckout(
 // each with its own real "Cancel subscription," update payment method, etc.
 // No property-specific parameter needed; Stripe scopes it to the signed-in
 // Customer's full subscription list on its own.
-export async function openBillingPortal(): Promise<void> {
-  const basePath = import.meta.env.BASE_URL;
-  const { url } = await invokeEdgeFunction<{ url: string }>("create-billing-portal-session", {
-    returnPath: `${basePath}dashboard`,
-  });
-  if (!url) throw new Error("Stripe did not return a billing portal URL. Please try again.");
-  window.location.href = url;
+export async function openBillingPortal(options?: { newTab?: boolean }): Promise<void> {
+  // Same popup-blocker-safe pattern as startPropertyCheckout: open the blank
+  // tab synchronously (inside the click handler), then point it at the real
+  // Stripe URL once the edge function resolves. No `noopener` — that would
+  // null out the handle this needs to keep.
+  const newTabHandle = options?.newTab ? window.open("", "_blank") : null;
+  try {
+    const basePath = import.meta.env.BASE_URL;
+    const { url } = await invokeEdgeFunction<{ url: string }>("create-billing-portal-session", {
+      returnPath: `${basePath}dashboard`,
+    });
+    if (!url) throw new Error("Stripe did not return a billing portal URL. Please try again.");
+    if (newTabHandle) newTabHandle.location.href = url;
+    else window.location.href = url;
+  } catch (err) {
+    newTabHandle?.close();
+    throw err;
+  }
 }
 
 // Cancels exactly one property's own subscription — trivial now that each
@@ -176,4 +187,45 @@ export async function cancelPropertySubscription(propertyId: string): Promise<vo
 // Portal to find the "renew" option.
 export async function resumePropertySubscription(propertyId: string): Promise<void> {
   await invokeEdgeFunction<{ ok: boolean }>("resume-subscription", { propertyId });
+}
+
+// One live Stripe subscription, as returned by the list-my-subscriptions edge
+// function. `amountCents`/`currentPeriodEnd`/`card` are the authoritative
+// Stripe values — the real charged amount here already includes the
+// 2nd-property discount that create-checkout-session bakes into price_data,
+// which propertyMonthlyPrice() above can only estimate. `propertyId` (from
+// subscription metadata) is how the Billing page joins each subscription back
+// to its property for the address.
+export type MySubscription = {
+  id: string;
+  status: string;
+  propertyId: string | null;
+  tier: Tier | null;
+  bracket: PropertyValueBracket | null;
+  productName: string | null;
+  amountCents: number | null;
+  currency: string;
+  interval: string;
+  quantity: number;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  cancelAt: string | null;
+  card: { brand: string; last4: string } | null;
+};
+
+export async function listMySubscriptions(): Promise<MySubscription[]> {
+  const { subscriptions } = await invokeEdgeFunction<{ subscriptions: MySubscription[] }>(
+    "list-my-subscriptions",
+    {},
+  );
+  return subscriptions ?? [];
+}
+
+// Pull-based reconciliation for a missed/delayed (or, in the sandbox,
+// unconfigured) Stripe webhook: re-derives each property's subscription
+// columns from Stripe and writes them, the same fields stripe-webhook sets.
+// `updated` is how many property rows actually changed — callers re-fetch
+// properties when it's > 0. Safe to call on every load; only writes on a diff.
+export async function syncMySubscriptions(): Promise<{ updated: number }> {
+  return invokeEdgeFunction<{ updated: number }>("sync-my-subscriptions", {});
 }

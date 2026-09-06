@@ -14,6 +14,7 @@ import {
   startPropertyCheckout,
   cancelPropertySubscription,
   resumePropertySubscription,
+  syncMySubscriptions,
   bracketForValue,
   formatMoney,
   TIER_BRACKET_PRICES,
@@ -73,21 +74,35 @@ function Properties() {
 
   useEffect(() => {
     if (!user) return;
-    listProperties(user.id)
+    const uid = user.id;
+    listProperties(uid)
       .then(setProperties)
       .catch((err) =>
         setListError(err instanceof Error ? err.message : "Could not load your properties."),
       )
       .finally(() => setPropertiesLoading(false));
-    listProtests(user.id)
+    listProtests(uid)
       .then(setProtests)
       .catch((err) => console.error(err));
-    listHealthScores(user.id)
+    listHealthScores(uid)
       .then(setHealthScores)
       .catch((err) => console.error(err));
-    getMyBilling(user.id)
+    getMyBilling(uid)
       .then(setBilling)
       .catch((err) => console.error("Could not load billing info:", err));
+    // Self-heal a missed/delayed Stripe webhook — reconcile each property's
+    // subscription_status (and cancel flags / tier) from Stripe, then re-pull
+    // the list if anything moved. Non-blocking: the DB-backed list above still
+    // renders immediately; this only corrects it a beat later when needed
+    // (e.g. a paid property still showing "Not Paid").
+    syncMySubscriptions()
+      .then(({ updated }) => {
+        if (updated > 0) {
+          listProperties(uid).then(setProperties).catch(console.error);
+          getMyBilling(uid).then(setBilling).catch(console.error);
+        }
+      })
+      .catch((err) => console.error("Subscription reconcile failed:", err));
   }, [user]);
 
   // Real race, not a bug: Stripe redirects the browser to successPath the
@@ -322,7 +337,7 @@ function Properties() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
-                        {!isBeta && <PaymentStatusBadge paid={isPaid} />}
+                        {!isBeta && <PaymentStatusBadge property={p} />}
                       </div>
                       <h3 className="font-serif text-xl font-semibold">{p.address}</h3>
                       <p className="text-sm text-muted-foreground inline-flex items-center flex-wrap gap-1">
@@ -362,17 +377,27 @@ function Properties() {
                           : `Search on ${cad}`}
                       </a>
                     )}
-                    {existingProtest && (
-                      <Link
-                        to="/dashboard/case"
-                        search={{ propertyId: p.id }}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn-outline"
-                      >
-                        View Case
-                      </Link>
-                    )}
+                    {existingProtest &&
+                      (isPaid ? (
+                        <Link
+                          to="/dashboard/case"
+                          search={{ propertyId: p.id }}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-outline"
+                        >
+                          View Case
+                        </Link>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          title="Subscribe to this property to view its case."
+                          className="btn-outline cursor-not-allowed opacity-60"
+                        >
+                          View Case
+                        </button>
+                      ))}
                     {isPaid ? (
                       !existingProtest ? (
                         <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
@@ -528,13 +553,28 @@ function ActionStatusBadge({
   return <span className={`badge-soft ${STATUS_TONE[status]}`}>{label}</span>;
 }
 
-// `paid` means this property's OWN real Stripe subscription is active — see
-// isPaid in the property map above. Never shown for beta accounts, which
-// have no per-property subscription to report on at all.
-function PaymentStatusBadge({ paid }: { paid: boolean }) {
-  return (
-    <span className={paid ? "badge-soft" : "badge-soft-warning"}>{paid ? "Paid" : "Not Paid"}</span>
-  );
+// Reflects this property's OWN Stripe subscription state. Never shown for beta
+// accounts, which have no per-property subscription to report on. "Canceled"
+// (a subscription the user deliberately ended) is called out separately from
+// "Not Paid" (never subscribed) — both mean no active coverage and both still
+// show the Subscribe buttons, but the wording shouldn't read as "you forgot
+// to pay" when the user chose to cancel.
+function PaymentStatusBadge({ property }: { property: PropertyRecord }) {
+  const status = property.subscriptionStatus;
+  if (status === "active") {
+    return property.cancelAtPeriodEnd ? (
+      <span className="badge-soft bg-secondary text-muted-foreground">Canceling</span>
+    ) : (
+      <span className="badge-soft">Paid</span>
+    );
+  }
+  if (status === "canceled") {
+    return <span className="badge-soft text-destructive">Canceled</span>;
+  }
+  if (status === "past_due" || status === "unpaid") {
+    return <span className="badge-soft-warning">Payment due</span>;
+  }
+  return <span className="badge-soft-warning">Not Paid</span>;
 }
 
 // Only appears once the background AI health-score call (fired from addProperty())
