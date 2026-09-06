@@ -559,7 +559,7 @@ function PaymentStatusBadge({ property }: { property: PropertyRecord }) {
     );
   }
   if (status === "canceled") {
-    return <span className="badge-soft bg-secondary text-muted-foreground">Canceled</span>;
+    return <span className="badge-soft text-destructive">Canceled</span>;
   }
   if (status === "past_due" || status === "unpaid") {
     return <span className="badge-soft-warning">Payment due</span>;
