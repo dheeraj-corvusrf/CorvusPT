@@ -6,6 +6,8 @@ import {
   getMyBilling,
   openBillingPortal,
   listMySubscriptions,
+  cancelPropertySubscription,
+  resumePropertySubscription,
   formatMoney,
   TIER_BRACKET_PRICES,
   VALUE_BRACKETS,
@@ -57,6 +59,7 @@ function Billing() {
   const [loading, setLoading] = useState(true);
   const [subsError, setSubsError] = useState(false);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -85,6 +88,46 @@ function Billing() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not open billing portal.");
       setOpeningPortal(false);
+    }
+  }
+
+  // Same immediate cancel the Properties page uses (cancel-property-subscription
+  // ends the Stripe subscription now, not at period end) — keyed by the
+  // subscription's own propertyId, so it only ever works for a subscription
+  // still linked to a live property. On success drop it from the list; the
+  // list-my-subscriptions filter would exclude it on the next load anyway.
+  async function handleCancel(s: MySubscription, label: string) {
+    if (!s.propertyId) return;
+    const ok = window.confirm(
+      `Cancel the subscription for ${label}? It ends immediately — you'll lose paid AI Report ` +
+        `access and the ability to request a new protest filing for this property.`,
+    );
+    if (!ok) return;
+    setBusyId(s.id);
+    try {
+      await cancelPropertySubscription(s.propertyId);
+      toast.success("Subscription canceled.");
+      setSubs((prev) => prev.filter((x) => x.id !== s.id));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not cancel this subscription.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleResume(s: MySubscription) {
+    if (!s.propertyId) return;
+    setBusyId(s.id);
+    try {
+      await resumePropertySubscription(s.propertyId);
+      toast.success("Subscription resumed — it will keep renewing as normal.");
+      setSubs((prev) =>
+        prev.map((x) => (x.id === s.id ? { ...x, cancelAtPeriodEnd: false, cancelAt: null } : x)),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not resume this subscription.");
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -243,12 +286,41 @@ function Billing() {
                       {s.card && ` · ${s.card.brand} ···· ${s.card.last4}`}
                     </span>
                   </div>
-                  {!prop && (
-                    <p className="text-muted-foreground mt-2 text-[11px]">
-                      Not linked to a current property — it may have been deleted. Use the billing
-                      portal to cancel it.
-                    </p>
-                  )}
+
+                  <div className="border-border mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
+                    {prop ? (
+                      s.cancelAtPeriodEnd ? (
+                        <button
+                          onClick={() => handleResume(s)}
+                          disabled={busyId === s.id}
+                          className="btn-outline py-1.5 text-sm disabled:opacity-60"
+                        >
+                          {busyId === s.id ? "Resuming…" : "Resume subscription"}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleCancel(s, heading)}
+                          disabled={busyId === s.id}
+                          className="btn-outline text-warning-foreground py-1.5 text-sm disabled:opacity-60"
+                        >
+                          {busyId === s.id ? "Canceling…" : "Cancel subscription"}
+                        </button>
+                      )
+                    ) : (
+                      <>
+                        <span className="text-muted-foreground text-[11px]">
+                          Not linked to a current property — it may have been deleted.
+                        </span>
+                        <button
+                          onClick={handleManage}
+                          disabled={openingPortal}
+                          className="btn-outline py-1.5 text-sm disabled:opacity-60"
+                        >
+                          {openingPortal ? "Redirecting…" : "Cancel in billing portal"}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </li>
               );
             })}
