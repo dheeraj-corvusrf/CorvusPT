@@ -377,17 +377,27 @@ function Properties() {
                           : `Search on ${cad}`}
                       </a>
                     )}
-                    {existingProtest && (
-                      <Link
-                        to="/dashboard/case"
-                        search={{ propertyId: p.id }}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn-outline"
-                      >
-                        View Case
-                      </Link>
-                    )}
+                    {existingProtest &&
+                      (isPaid ? (
+                        <Link
+                          to="/dashboard/case"
+                          search={{ propertyId: p.id }}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-outline"
+                        >
+                          View Case
+                        </Link>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          title="Subscribe to this property to view its case."
+                          className="btn-outline cursor-not-allowed opacity-60"
+                        >
+                          View Case
+                        </button>
+                      ))}
                     {isPaid ? (
                       !existingProtest ? (
                         <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
