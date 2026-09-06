@@ -91,6 +91,19 @@ function Billing() {
     }
   }
 
+  // openBillingPortal() leaves the page via window.location, so the success
+  // path never clears "Redirecting…". Returning with the browser back button
+  // restores this page from the bfcache with that state still on — reset it
+  // (and any in-flight row) whenever the page is shown again.
+  useEffect(() => {
+    const onShow = () => {
+      setOpeningPortal(false);
+      setBusyId(null);
+    };
+    window.addEventListener("pageshow", onShow);
+    return () => window.removeEventListener("pageshow", onShow);
+  }, []);
+
   // Same immediate cancel the Properties page uses (cancel-property-subscription
   // ends the Stripe subscription now, not at period end) — keyed by the
   // subscription's own propertyId, so it only ever works for a subscription
