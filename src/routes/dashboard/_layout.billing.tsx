@@ -6,6 +6,7 @@ import {
   getMyBilling,
   openBillingPortal,
   listMySubscriptions,
+  syncMySubscriptions,
   cancelPropertySubscription,
   resumePropertySubscription,
   formatMoney,
@@ -79,6 +80,11 @@ function Billing() {
         console.error(err);
         setSubsError(true);
       });
+    // Fire-and-forget: reconcile the property rows from Stripe so a missed
+    // webhook doesn't leave other pages (Properties, AI Report) showing a paid
+    // property as unpaid. This page reads Stripe directly above, so it doesn't
+    // need the result itself.
+    syncMySubscriptions().catch((err) => console.error("Subscription reconcile failed:", err));
   }, [user]);
 
   async function handleManage() {

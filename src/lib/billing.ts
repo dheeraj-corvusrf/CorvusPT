@@ -220,3 +220,12 @@ export async function listMySubscriptions(): Promise<MySubscription[]> {
   );
   return subscriptions ?? [];
 }
+
+// Pull-based reconciliation for a missed/delayed (or, in the sandbox,
+// unconfigured) Stripe webhook: re-derives each property's subscription
+// columns from Stripe and writes them, the same fields stripe-webhook sets.
+// `updated` is how many property rows actually changed — callers re-fetch
+// properties when it's > 0. Safe to call on every load; only writes on a diff.
+export async function syncMySubscriptions(): Promise<{ updated: number }> {
+  return invokeEdgeFunction<{ updated: number }>("sync-my-subscriptions", {});
+}

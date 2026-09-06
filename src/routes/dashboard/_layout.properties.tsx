@@ -14,6 +14,7 @@ import {
   startPropertyCheckout,
   cancelPropertySubscription,
   resumePropertySubscription,
+  syncMySubscriptions,
   bracketForValue,
   formatMoney,
   TIER_BRACKET_PRICES,
@@ -73,21 +74,35 @@ function Properties() {
 
   useEffect(() => {
     if (!user) return;
-    listProperties(user.id)
+    const uid = user.id;
+    listProperties(uid)
       .then(setProperties)
       .catch((err) =>
         setListError(err instanceof Error ? err.message : "Could not load your properties."),
       )
       .finally(() => setPropertiesLoading(false));
-    listProtests(user.id)
+    listProtests(uid)
       .then(setProtests)
       .catch((err) => console.error(err));
-    listHealthScores(user.id)
+    listHealthScores(uid)
       .then(setHealthScores)
       .catch((err) => console.error(err));
-    getMyBilling(user.id)
+    getMyBilling(uid)
       .then(setBilling)
       .catch((err) => console.error("Could not load billing info:", err));
+    // Self-heal a missed/delayed Stripe webhook — reconcile each property's
+    // subscription_status (and cancel flags / tier) from Stripe, then re-pull
+    // the list if anything moved. Non-blocking: the DB-backed list above still
+    // renders immediately; this only corrects it a beat later when needed
+    // (e.g. a paid property still showing "Not Paid").
+    syncMySubscriptions()
+      .then(({ updated }) => {
+        if (updated > 0) {
+          listProperties(uid).then(setProperties).catch(console.error);
+          getMyBilling(uid).then(setBilling).catch(console.error);
+        }
+      })
+      .catch((err) => console.error("Subscription reconcile failed:", err));
   }, [user]);
 
   // Real race, not a bug: Stripe redirects the browser to successPath the
