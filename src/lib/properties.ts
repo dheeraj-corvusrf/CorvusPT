@@ -4,6 +4,21 @@ import type { CadValueHistoryEntry } from "./cad-lookup";
 import type { IntakeState } from "./intake-store";
 import type { Tier, PropertyValueBracket } from "./billing";
 
+// Fired on the window after any successful property add / delete / paid-status
+// change, so components that hold their own copy of the property list and
+// aren't re-rendered by the mutation itself can refresh right away. The one
+// that needs this is <JourneyTracker> (src/components/JourneyTracker.tsx): it
+// lives in __root.tsx, mounts once, and only re-fetches on a route change — so
+// deleting a property from the Properties list (a same-page action, no
+// navigation) otherwise left its journey on screen until the next page change.
+export const PROPERTIES_CHANGED_EVENT = "corvuspt:properties-changed";
+
+function notifyPropertiesChanged() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(PROPERTIES_CHANGED_EVENT));
+  }
+}
+
 export type PropertyRecord = {
   id: string;
   address: string;
@@ -186,6 +201,7 @@ export async function addProperty(
   if (error) throw error;
   const created = fromRow(data as PropertyRow);
   computeAndStoreHealthScore(created);
+  notifyPropertiesChanged();
   return created;
 }
 
@@ -244,6 +260,7 @@ export async function updatePropertyIdentity(
 export async function deleteProperty(id: string): Promise<void> {
   const { error } = await supabase.from("properties").delete().eq("id", id);
   if (error) throw error;
+  notifyPropertiesChanged();
 }
 
 // Keeps this "latest bill" snapshot in sync with the real per-year history in

@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { readIntake, classifyAndStoreDocument, type IntakeState } from "@/lib/intake-store";
 import { useAuth } from "@/lib/auth";
 import { listProtests, type ProtestRecord, type ProtestStatus } from "@/lib/protests";
-import { listProperties, type PropertyRecord } from "@/lib/properties";
+import { listProperties, PROPERTIES_CHANGED_EVENT, type PropertyRecord } from "@/lib/properties";
 import { getMyBilling } from "@/lib/billing";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
@@ -216,7 +216,7 @@ export function JourneyTracker() {
     setState(readIntake());
   }, [pathname]);
 
-  useEffect(() => {
+  const refreshCases = useCallback(() => {
     if (!user) return;
     listProtests(user.id)
       .then(setProtests)
@@ -231,7 +231,37 @@ export function JourneyTracker() {
     getMyBilling(user.id)
       .then((b) => setIsBeta(b.plan === "beta"))
       .catch((err) => console.error(err));
-  }, [user, pathname]);
+  }, [user]);
+
+  useEffect(() => {
+    refreshCases();
+  }, [refreshCases, pathname]);
+
+  // Adding or deleting a property happens in-page (the Properties list's own
+  // Delete button, the import/add modals) with no route change, so the
+  // pathname-keyed refresh above never re-runs for it — a just-deleted
+  // property's journey would sit here until the next navigation. Listen for
+  // the explicit broadcast those mutations fire (see PROPERTIES_CHANGED_EVENT
+  // in src/lib/properties.ts) and re-pull immediately; also re-read intake,
+  // since deleteProperty's caller resets it.
+  useEffect(() => {
+    // Debounced so a burst (e.g. ImportPropertiesModal adding many rows in a
+    // loop, each firing the event) collapses into a single refresh instead of
+    // one per property.
+    let t: ReturnType<typeof setTimeout>;
+    const onChange = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        setState(readIntake());
+        refreshCases();
+      }, 150);
+    };
+    window.addEventListener(PROPERTIES_CHANGED_EVENT, onChange);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener(PROPERTIES_CHANGED_EVENT, onChange);
+    };
+  }, [refreshCases]);
 
   async function onFile(f: File) {
     setUploading(true);
