@@ -67,9 +67,6 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    // Test vs live Stripe environment — flipped from the admin Settings tab.
-    const secretKey = stripeSecretKey(await getStripeMode());
-
     const body = (await req.json()) as { items?: unknown; paymentMethodId?: unknown };
     const paymentMethodId = body.paymentMethodId;
     if (typeof paymentMethodId !== "string" || !paymentMethodId.startsWith("pm_")) {
@@ -121,6 +118,10 @@ Deno.serve(async (req: Request) => {
         headers: corsHeaders,
       });
     }
+
+    // Test vs live Stripe — the global default, overridden per admin. Resolved
+    // from the authenticated caller; see ../_shared/stripe-mode.ts.
+    const secretKey = stripeSecretKey(await getStripeMode(user.id));
 
     const adminClient = createClient(
       Deno.env.get("SUPABASE_URL")!,

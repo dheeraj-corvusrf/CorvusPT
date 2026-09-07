@@ -57,9 +57,6 @@ Deno.serve(async (req: Request) => {
     const safePath = (p: string | undefined, fallback: string) =>
       p && p.startsWith("/") && !p.startsWith("//") ? p : fallback;
 
-    // Test vs live Stripe environment — flipped from the admin Settings tab.
-    const secretKey = stripeSecretKey(await getStripeMode());
-
     const callerClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_ANON_KEY")!,
@@ -75,6 +72,10 @@ Deno.serve(async (req: Request) => {
         headers: corsHeaders,
       });
     }
+
+    // Test vs live Stripe — the global default, overridden per admin. Resolved
+    // from the authenticated caller; see ../_shared/stripe-mode.ts.
+    const secretKey = stripeSecretKey(await getStripeMode(user.id));
 
     const adminClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
