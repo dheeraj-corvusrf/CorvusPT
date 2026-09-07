@@ -12,6 +12,7 @@
 // Only writes rows that actually differ; returns how many changed.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
+import { getStripeMode, stripeSecretKey } from "../_shared/stripe-mode.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -65,9 +66,6 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const secretKey = Deno.env.get("STRIPE_SECRET_KEY");
-    if (!secretKey) throw new Error("Missing STRIPE_SECRET_KEY");
-
     const callerClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_ANON_KEY")!,
@@ -83,6 +81,10 @@ Deno.serve(async (req: Request) => {
         headers: corsHeaders,
       });
     }
+
+    // Test vs live Stripe — the global default, overridden per admin. Resolved
+    // from the authenticated caller; see ../_shared/stripe-mode.ts.
+    const secretKey = stripeSecretKey(await getStripeMode(user.id));
 
     const adminClient = createClient(
       Deno.env.get("SUPABASE_URL")!,

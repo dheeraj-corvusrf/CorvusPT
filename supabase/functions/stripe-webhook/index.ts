@@ -1,8 +1,12 @@
 // Deploy via CLI: `supabase functions deploy stripe-webhook`.
-// Requires STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET secrets. After deploying, add
-// this function's URL as a webhook endpoint in the Stripe Dashboard, subscribed to
-// checkout.session.completed, customer.subscription.updated, and
-// customer.subscription.deleted.
+// Secrets: STRIPE_SECRET_KEY_TEST (or the legacy STRIPE_SECRET_KEY),
+// optionally STRIPE_SECRET_KEY_LIVE, and one or more of STRIPE_WEBHOOK_SECRET
+// / STRIPE_WEBHOOK_SECRET_TEST / STRIPE_WEBHOOK_SECRET_LIVE (the incoming
+// signature is checked against each). After deploying, register this
+// function's URL as a webhook endpoint in the Stripe Dashboard — in BOTH test
+// and live mode once you have a live account — subscribed to
+// checkout.session.completed, customer.subscription.created,
+// customer.subscription.updated, and customer.subscription.deleted.
 //
 // No Supabase auth here — Stripe calls this directly and authenticates via an HMAC
 // signature (verified below) instead of a Supabase JWT. The service-role client is
@@ -138,15 +142,28 @@ async function grantReferralRewardIfDue(
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  const secretKey = Deno.env.get("STRIPE_SECRET_KEY");
-  const webhookSecret = Deno.env.get("STRIPE_WEBHOOK_SECRET");
-  if (!secretKey || !webhookSecret) {
+  // The webhook is mode-agnostic: with the endpoint registered in BOTH test
+  // and live mode in Stripe, either can deliver here regardless of the admin
+  // test/live toggle. Verify the signature against whichever signing secret
+  // matches, then key the OUTBOUND Stripe client (grantReferralRewardIfDue's
+  // retrieve/createBalanceTransaction) off the event's own livemode flag.
+  const testSecretKey =
+    Deno.env.get("STRIPE_SECRET_KEY_TEST") ?? Deno.env.get("STRIPE_SECRET_KEY");
+  const liveSecretKey = Deno.env.get("STRIPE_SECRET_KEY_LIVE");
+  const webhookSecrets = [
+    Deno.env.get("STRIPE_WEBHOOK_SECRET"),
+    Deno.env.get("STRIPE_WEBHOOK_SECRET_TEST"),
+    Deno.env.get("STRIPE_WEBHOOK_SECRET_LIVE"),
+  ].filter((s): s is string => !!s);
+  if (!testSecretKey || webhookSecrets.length === 0) {
     return new Response(JSON.stringify({ error: "Missing Stripe secrets" }), {
       status: 500,
       headers: corsHeaders,
     });
   }
-  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+  // Any key works for constructEventAsync (it only uses the signing secret +
+  // crypto, not the API key); the real per-mode client is built below.
+  const verifier = new Stripe(testSecretKey, { apiVersion: "2024-06-20" });
 
   // Signature verification needs the raw, unparsed body — read as text first.
   const rawBody = await req.text();
@@ -158,16 +175,31 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  let event: Stripe.Event;
-  try {
-    event = await stripe.webhooks.constructEventAsync(rawBody, signature, webhookSecret);
-  } catch (err) {
-    console.error("Webhook signature verification failed", err);
+  let event: Stripe.Event | null = null;
+  for (const ws of webhookSecrets) {
+    try {
+      event = await verifier.webhooks.constructEventAsync(rawBody, signature, ws);
+      break;
+    } catch {
+      // try the next configured signing secret
+    }
+  }
+  if (!event) {
+    console.error("Webhook signature verification failed against all configured secrets");
     return new Response(JSON.stringify({ error: "Invalid signature" }), {
       status: 400,
       headers: corsHeaders,
     });
   }
+
+  // Live events need the live key for any outbound call; test events the test
+  // key. If a live event arrives before STRIPE_SECRET_KEY_LIVE is set, fall
+  // back to the test key — the DB writes below still work; only outbound
+  // Stripe calls in that one handler would fail, and are already best-effort.
+  const stripe =
+    event.livemode && liveSecretKey
+      ? new Stripe(liveSecretKey, { apiVersion: "2024-06-20" })
+      : verifier;
 
   const adminClient = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -205,6 +237,40 @@ Deno.serve(async (req: Request) => {
 
         await syncProfilePlan(adminClient, userId);
         await grantReferralRewardIfDue(stripe, adminClient, userId);
+      }
+    } else if (event.type === "customer.subscription.created") {
+      // bulk-subscribe creates subscriptions via the API (no Checkout, so no
+      // checkout.session.completed) — this is where a referral reward gets
+      // granted for that path, and a belt-and-suspenders row write in case
+      // bulk-subscribe's own direct write was lost. Matched by
+      // metadata.propertyId (bulk-subscribe and create-checkout-session both
+      // set it), falling back to the subscription id.
+      const subscription = event.data.object as Stripe.Subscription;
+      const propertyId = subscription.metadata?.propertyId;
+      const tier =
+        subscription.metadata?.tier === "corvusrf_managed" ? "corvusrf_managed" : "owner_managed";
+      const bracket = subscription.metadata?.bracket ?? null;
+      let query = adminClient.from("properties").select("id, user_id");
+      query = propertyId
+        ? query.eq("id", propertyId)
+        : query.eq("stripe_subscription_id", subscription.id);
+      const { data: property } = await query.maybeSingle();
+      if (property) {
+        await adminClient
+          .from("properties")
+          .update({
+            stripe_subscription_id: subscription.id,
+            subscription_status: subscription.status,
+            plan_tier: tier,
+            value_bracket: bracket,
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            cancel_at: subscription.cancel_at
+              ? new Date(subscription.cancel_at * 1000).toISOString()
+              : null,
+          })
+          .eq("id", property.id);
+        await syncProfilePlan(adminClient, property.user_id as string);
+        await grantReferralRewardIfDue(stripe, adminClient, property.user_id as string);
       }
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object as Stripe.Subscription;

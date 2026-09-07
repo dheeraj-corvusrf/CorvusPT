@@ -1355,8 +1355,19 @@ create policy "Admins can view all settlement agreements"
 create table if not exists public.app_settings (
   id boolean primary key default true,
   enforce_per_property_entitlement boolean not null default false,
+  -- The GLOBAL Stripe environment default — what every ordinary user's
+  -- payments use. Meant to be 'live'; a single admin can override just
+  -- themselves to 'test' for staff testing (see admin_stripe_overrides
+  -- below). Flipped from the admin panel's Settings tab, no redeploy. Every
+  -- payment edge function resolves override-then-global per request and picks
+  -- STRIPE_SECRET_KEY_TEST vs STRIPE_SECRET_KEY_LIVE; the client does the same
+  -- for the pk_. See ../functions/_shared/stripe-mode.ts and src/lib/stripe.ts.
+  -- Default is 'live', but the singleton row ships as 'test' and is flipped to
+  -- 'live' only once the live keys/secrets are configured.
+  stripe_mode text not null default 'live',
   updated_at timestamptz not null default now(),
-  constraint app_settings_singleton check (id = true)
+  constraint app_settings_singleton check (id = true),
+  constraint app_settings_stripe_mode_chk check (stripe_mode in ('test', 'live'))
 );
 insert into public.app_settings (id) values (true) on conflict (id) do nothing;
 
@@ -1371,6 +1382,41 @@ drop policy if exists "Admins can update app settings" on public.app_settings;
 create policy "Admins can update app settings"
   on public.app_settings for update
   using (public.is_admin());
+
+-- Per-admin Stripe environment override. app_settings.stripe_mode is the
+-- global default (live for everyone); a row here puts that ONE admin into a
+-- different mode — in practice 'test', so staff can exercise checkout/
+-- subscribe flows on production without real charges while every real user
+-- stays live. No row = follow the global. RLS is admin-only AND own-row-only:
+-- a non-admin can never create one (which would be a free-subscriptions
+-- hole), and an admin can only ever set their own.
+create table if not exists public.admin_stripe_overrides (
+  user_id uuid primary key references public.profiles (id) on delete cascade,
+  mode text not null check (mode in ('test', 'live')),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.admin_stripe_overrides enable row level security;
+
+drop policy if exists "Admins read their own stripe override" on public.admin_stripe_overrides;
+create policy "Admins read their own stripe override"
+  on public.admin_stripe_overrides for select
+  using (public.is_admin() and user_id = auth.uid());
+
+drop policy if exists "Admins insert their own stripe override" on public.admin_stripe_overrides;
+create policy "Admins insert their own stripe override"
+  on public.admin_stripe_overrides for insert
+  with check (public.is_admin() and user_id = auth.uid());
+
+drop policy if exists "Admins update their own stripe override" on public.admin_stripe_overrides;
+create policy "Admins update their own stripe override"
+  on public.admin_stripe_overrides for update
+  using (public.is_admin() and user_id = auth.uid());
+
+drop policy if exists "Admins delete their own stripe override" on public.admin_stripe_overrides;
+create policy "Admins delete their own stripe override"
+  on public.admin_stripe_overrides for delete
+  using (public.is_admin() and user_id = auth.uid());
 
 -- Referral program — each user's own shareable code, who referred them (set
 -- once at signup by handle_new_user() above, never changed after), and when

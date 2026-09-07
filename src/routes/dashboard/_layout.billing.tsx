@@ -16,6 +16,7 @@ import {
   type MySubscription,
 } from "@/lib/billing";
 import { listProperties, type PropertyRecord } from "@/lib/properties";
+import { PaymentsModeChip } from "@/components/PaymentsModeChip";
 
 export const Route = createFileRoute("/dashboard/_layout/billing")({
   component: Billing,
@@ -166,7 +167,10 @@ function Billing() {
 
   return (
     <div>
-      <h1 className="font-serif text-2xl font-semibold">Billing</h1>
+      <div className="flex flex-wrap items-center gap-2">
+        <h1 className="font-serif text-2xl font-semibold">Billing</h1>
+        <PaymentsModeChip />
+      </div>
       <p className="text-muted-foreground text-sm">Your CorvusPT subscriptions, by property.</p>
 
       {loading ? (

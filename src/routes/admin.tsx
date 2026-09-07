@@ -38,6 +38,15 @@ import {
 import type { ProtestRecord, ProtestStatus } from "@/lib/protests";
 import { listProperties, addProperty, deleteProperty, type PropertyRecord } from "@/lib/properties";
 import { currency } from "@/lib/intake-store";
+import {
+  getGlobalStripeMode,
+  setGlobalStripeMode,
+  getMyStripeOverride,
+  setMyStripeOverride,
+  getLiveReadiness,
+  type StripeMode,
+  type LiveReadiness,
+} from "@/lib/app-settings";
 import { AddressAutocomplete } from "@/components/AddressAutocomplete";
 import { AdminCaseProgressModal } from "@/components/AdminCaseProgressModal";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -51,7 +60,14 @@ export const Route = createFileRoute("/admin")({
 });
 
 type AdminTab =
-  "users" | "owner_managed" | "corvus_managed" | "admins" | "invited" | "beta" | "activity";
+  | "users"
+  | "owner_managed"
+  | "corvus_managed"
+  | "admins"
+  | "invited"
+  | "beta"
+  | "activity"
+  | "settings";
 
 function AdminPanel() {
   const nav = useNavigate();
@@ -473,6 +489,7 @@ function AdminPanel() {
     },
     { key: "beta", label: "Beta Signups", count: betaLeadsLoading ? null : betaLeads.length },
     { key: "activity", label: "Activity Log", count: auditLogLoading ? null : auditLog.length },
+    { key: "settings", label: "Settings", count: null },
   ];
 
   return (
@@ -711,6 +728,14 @@ function AdminPanel() {
         </section>
       )}
 
+      {activeTab === "settings" && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl font-semibold">Settings</h2>
+          <p className="text-sm text-muted-foreground">Account-wide switches.</p>
+          <StripeModePanel />
+        </section>
+      )}
+
       {caseRecord && (
         <AdminCaseProgressModal
           userId={caseRecord.userId}
@@ -720,6 +745,194 @@ function AdminPanel() {
           onClose={() => setCaseRecord(null)}
         />
       )}
+    </div>
+  );
+}
+
+// The runtime Stripe environment controls. app_settings.stripe_mode is the
+// GLOBAL default (what every user's payments use); admin_stripe_overrides puts
+// just this admin somewhere else. Every payment edge function + the client
+// resolve override-then-global (see supabase/functions/_shared/stripe-mode.ts
+// and src/lib/stripe.ts). Both writes hit admin_audit_log.
+function StripeModePanel() {
+  const [globalMode, setGlobalMode] = useState<StripeMode | null>(null);
+  const [override, setOverride] = useState<StripeMode | null>(null);
+  const [readiness, setReadiness] = useState<LiveReadiness | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  function reload() {
+    Promise.all([getGlobalStripeMode(), getMyStripeOverride()])
+      .then(([g, o]) => {
+        setGlobalMode(g);
+        setOverride(o);
+      })
+      .catch((err) => {
+        console.error(err);
+        toast.error("Could not load payment settings.");
+      })
+      .finally(() => setLoaded(true));
+    getLiveReadiness()
+      .then(setReadiness)
+      .catch((err) => console.error("Could not check live readiness:", err));
+  }
+  useEffect(reload, []);
+
+  const effective = override ?? globalMode;
+
+  async function saveOverride(next: StripeMode | null) {
+    if (saving || next === override) return;
+    setSaving(true);
+    try {
+      await setMyStripeOverride(next);
+      setOverride(next);
+      toast.success(
+        next === null
+          ? "Your payments now follow the global default."
+          : `Your payments are now in ${next.toUpperCase()} mode.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not update your override.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveGlobal(next: StripeMode) {
+    if (saving || next === globalMode) return;
+    if (next === "live") {
+      if (readiness && !readiness.ready) {
+        toast.error("Live config isn't complete yet — see the checklist below.");
+        return;
+      }
+      const typed = window.prompt(
+        "Setting the GLOBAL default to LIVE means every user's next checkout charges a real card.\n\n" +
+          "Confirm STRIPE_SECRET_KEY_LIVE, the live webhook secret, and the live publishable key " +
+          "are all configured first.\n\nType LIVE to confirm:",
+      );
+      if (typed !== "LIVE") {
+        toast("Global default unchanged.");
+        return;
+      }
+    } else if (
+      !window.confirm(
+        "Set the GLOBAL default to TEST? No user will be able to make a real payment.",
+      )
+    ) {
+      return;
+    }
+    setSaving(true);
+    try {
+      await setGlobalStripeMode(next);
+      setGlobalMode(next);
+      toast.success(`Global default set to ${next.toUpperCase()} mode.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not change the global default.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const Badge = ({ m }: { m: StripeMode }) => (
+    <span className={m === "live" ? "badge-soft text-destructive" : "badge-soft-warning"}>
+      {m === "live" ? "LIVE — real charges" : "TEST — no real charges"}
+    </span>
+  );
+
+  if (!loaded) return <p className="text-muted-foreground mt-4 text-sm">Loading…</p>;
+
+  return (
+    <div className="mt-4 grid max-w-xl gap-4">
+      {/* Personal override */}
+      <div className="card-elev p-6">
+        <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+          My payments mode
+          {effective && <Badge m={effective} />}
+        </div>
+        <p className="text-muted-foreground mt-1.5 text-xs">
+          Overrides the global default for your account only — use TEST to exercise checkout and
+          subscribe flows on production without real charges. Everyone else is unaffected.
+        </p>
+        <div className="mt-4 grid gap-2 sm:flex sm:flex-wrap">
+          <button
+            type="button"
+            disabled={saving || override === "test"}
+            onClick={() => saveOverride("test")}
+            className="btn-outline text-sm disabled:opacity-50"
+          >
+            {override === "test" ? "✓ Test (override)" : "Set myself to Test"}
+          </button>
+          <button
+            type="button"
+            disabled={saving || override === null}
+            onClick={() => saveOverride(null)}
+            className="btn-outline text-sm disabled:opacity-50"
+          >
+            {override === null
+              ? `✓ Following global (${globalMode?.toUpperCase()})`
+              : "Follow global default"}
+          </button>
+        </div>
+        {override && (
+          <p className="text-warning-foreground mt-3 text-xs">
+            Your override is active — while it's set, your own Stripe customer/subscriptions live in
+            the {override} environment, separate from real users'.
+          </p>
+        )}
+      </div>
+
+      {/* Global default */}
+      <div className="card-elev p-6">
+        <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+          Global default
+          {globalMode && <Badge m={globalMode} />}
+        </div>
+        <p className="text-muted-foreground mt-1.5 text-xs">
+          What every user without an override pays with. This is the launch switch — instant across
+          the app, no redeploy.
+        </p>
+        <div className="mt-4 grid gap-2 sm:flex sm:flex-wrap">
+          <button
+            type="button"
+            disabled={saving || globalMode === "test"}
+            onClick={() => saveGlobal("test")}
+            className="btn-outline text-sm disabled:opacity-50"
+          >
+            {globalMode === "test" ? "✓ Test" : "Set global to Test"}
+          </button>
+          <button
+            type="button"
+            disabled={saving || globalMode === "live" || (!!readiness && !readiness.ready)}
+            onClick={() => saveGlobal("live")}
+            className="btn-outline text-destructive text-sm disabled:opacity-50"
+          >
+            {globalMode === "live" ? "✓ Live" : "Set global to Live…"}
+          </button>
+        </div>
+        {readiness && !readiness.ready && globalMode !== "live" && (
+          <div className="text-muted-foreground mt-3 text-xs">
+            <p className="font-medium">Before Live can be enabled:</p>
+            <ul className="mt-1 grid gap-0.5">
+              <li>
+                {readiness.liveSecretKey ? "✓" : "○"} STRIPE_SECRET_KEY_LIVE (Supabase secret)
+              </li>
+              <li>
+                {readiness.liveWebhookSecret ? "✓" : "○"} STRIPE_WEBHOOK_SECRET_LIVE (Supabase
+                secret)
+              </li>
+              <li>
+                {readiness.livePublishableKey ? "✓" : "○"} VITE_STRIPE_PUBLISHABLE_KEY_LIVE (build
+                env — needs a redeploy)
+              </li>
+            </ul>
+          </div>
+        )}
+        {globalMode === "live" && (
+          <p className="text-destructive mt-3 text-xs font-medium">
+            Live — every user's subscription actions charge a real card.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
