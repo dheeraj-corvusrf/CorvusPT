@@ -65,10 +65,24 @@ Deno.serve(async (req: Request) => {
     const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
     const origin = req.headers.get("origin") ?? new URL(req.url).origin;
 
-    const session = await stripe.billingPortal.sessions.create({
-      customer: profile.stripe_customer_id,
-      return_url: `${origin}${safePath}`,
-    });
+    let session: Stripe.BillingPortal.Session;
+    try {
+      session = await stripe.billingPortal.sessions.create({
+        customer: profile.stripe_customer_id,
+        return_url: `${origin}${safePath}`,
+      });
+    } catch (e) {
+      if (e && typeof e === "object" && (e as { code?: string }).code === "resource_missing") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "No billing account in this Stripe environment. If you switched your test/live override, switch it back.",
+          }),
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      throw e;
+    }
 
     return new Response(JSON.stringify({ url: session.url }), {
       status: 200,

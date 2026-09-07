@@ -63,11 +63,30 @@ Deno.serve(async (req: Request) => {
         name,
         metadata: { supabase_user_id: user.id },
       });
-      customerId = customer.id;
-      await adminClient
+      // Conditional write so two near-simultaneous opens of the modal can't
+      // each create a customer and leave one orphaned: only claim the row if
+      // it's still empty. If it isn't, someone else won the race — use theirs
+      // and discard the one we just made.
+      const { data: claimed } = await adminClient
         .from("profiles")
-        .update({ stripe_customer_id: customerId })
-        .eq("id", user.id);
+        .update({ stripe_customer_id: customer.id })
+        .eq("id", user.id)
+        .is("stripe_customer_id", null)
+        .select("stripe_customer_id")
+        .maybeSingle();
+      if (claimed?.stripe_customer_id === customer.id) {
+        customerId = customer.id;
+      } else {
+        const { data: current } = await adminClient
+          .from("profiles")
+          .select("stripe_customer_id")
+          .eq("id", user.id)
+          .maybeSingle();
+        customerId = (current?.stripe_customer_id as string | undefined) ?? customer.id;
+        if (customerId !== customer.id) {
+          await stripe.customers.del(customer.id).catch(() => {});
+        }
+      }
     }
 
     const setupIntent = await stripe.setupIntents.create({

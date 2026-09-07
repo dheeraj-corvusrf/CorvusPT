@@ -157,7 +157,7 @@ Deno.serve(async (req: Request) => {
     const ids = items.map((i) => i.propertyId);
     const { data: propRows } = await adminClient
       .from("properties")
-      .select("id, address, total_value, subscription_status")
+      .select("id, address, total_value, subscription_status, stripe_subscription_id")
       .eq("user_id", user.id)
       .in("id", ids);
     const propById = new Map(
@@ -189,8 +189,19 @@ Deno.serve(async (req: Request) => {
         results.push({ propertyId, status: "error", message: "Property not found." });
         continue;
       }
-      if (prop.subscription_status === "active") {
-        results.push({ propertyId, status: "error", message: "Already subscribed." });
+      // Skip if this property already has a live-ish subscription. Covers a
+      // double-submit / retry of this same call: the first run may have left
+      // subs 'incomplete' (not 'active'), so a status-only "active" check
+      // isn't enough to stop a second run creating a DUPLICATE paid
+      // subscription. A 'canceled' status with a stale id is fine to
+      // re-subscribe over.
+      const existingStatus = prop.subscription_status as string | null;
+      if (
+        prop.stripe_subscription_id &&
+        existingStatus &&
+        ["active", "trialing", "incomplete", "past_due", "unpaid"].includes(existingStatus)
+      ) {
+        results.push({ propertyId, status: "error", message: "Already has a subscription." });
         continue;
       }
 

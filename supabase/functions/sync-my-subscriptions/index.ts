@@ -112,11 +112,21 @@ Deno.serve(async (req: Request) => {
     }
 
     const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
-    const list = await stripe.subscriptions.list({
-      customer: profile.stripe_customer_id,
-      status: "all",
-      limit: 100,
-    });
+    let list: Stripe.ApiList<Stripe.Subscription>;
+    try {
+      list = await stripe.subscriptions.list({
+        customer: profile.stripe_customer_id,
+        status: "all",
+        limit: 100,
+      });
+    } catch (e) {
+      // Stored customer id belongs to the other Stripe environment (an admin
+      // flipped their test/live override) — nothing to reconcile here.
+      if (e && typeof e === "object" && (e as { code?: string }).code === "resource_missing") {
+        return new Response(JSON.stringify({ updated: 0 }), { status: 200, headers: corsHeaders });
+      }
+      throw e;
+    }
 
     // Best Stripe subscription for a given property: a LIVE one beats a dead
     // one; between two of the same liveness, the more recently created wins.

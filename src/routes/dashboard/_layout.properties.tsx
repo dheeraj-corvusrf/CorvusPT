@@ -255,12 +255,13 @@ function Properties() {
     navigate({ to: "/ai-report" });
   }
 
-  // A property can be added to a bulk subscribe only if it has no active
-  // subscription and the account isn't beta (beta bypasses per-property
+  // A property can be added to a bulk subscribe only if it has no live-ish
+  // subscription already and the account isn't beta (beta bypasses per-property
   // billing). Also gated on stripeConfigured — the modal's inline card form
-  // needs the publishable key.
+  // needs the publishable key. Mirrors bulk-subscribe's own server-side guard.
+  const LIVEISH_SUB = new Set(["active", "trialing", "incomplete", "past_due", "unpaid"]);
   const bulkEligible = (p: PropertyRecord) =>
-    !isBeta && p.subscriptionStatus !== "active" && stripeConfigured;
+    !isBeta && !LIVEISH_SUB.has(p.subscriptionStatus ?? "") && stripeConfigured;
   const selectedProperties = sortedProperties.filter((p) => selectedIds.has(p.id));
 
   function toggleSelected(id: string) {
@@ -649,8 +650,8 @@ function PaymentStatusBadge({ property }: { property: PropertyRecord }) {
   if (status === "canceled") {
     return <span className="badge-soft text-destructive">Canceled</span>;
   }
-  if (status === "past_due" || status === "unpaid") {
-    return <span className="badge-soft-warning">Payment due</span>;
+  if (status === "past_due" || status === "unpaid" || status === "incomplete") {
+    return <span className="badge-soft-warning">Payment pending</span>;
   }
   return <span className="badge-soft-warning">Not Paid</span>;
 }

@@ -270,7 +270,14 @@ Deno.serve(async (req: Request) => {
           })
           .eq("id", property.id);
         await syncProfilePlan(adminClient, property.user_id as string);
-        await grantReferralRewardIfDue(stripe, adminClient, property.user_id as string);
+        // Only for a subscription that's actually valid/paying — a
+        // bulk-subscribe sub can be created 'incomplete' (payment pending or
+        // failed), and the referrer must not be paid out for that. If it
+        // later becomes active, the 'updated' handler below grants it then
+        // (the referral_reward_granted_at guard keeps it one-time).
+        if (subscription.status === "active" || subscription.status === "trialing") {
+          await grantReferralRewardIfDue(stripe, adminClient, property.user_id as string);
+        }
       }
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object as Stripe.Subscription;
@@ -291,6 +298,13 @@ Deno.serve(async (req: Request) => {
           })
           .eq("id", property.id);
         await syncProfilePlan(adminClient, property.user_id as string);
+        // Catches an API-created (bulk-subscribe) subscription that was
+        // created 'incomplete' and has now cleared to active — the 'created'
+        // handler skipped the referral grant then. One-time via the guard in
+        // grantReferralRewardIfDue.
+        if (subscription.status === "active" || subscription.status === "trialing") {
+          await grantReferralRewardIfDue(stripe, adminClient, property.user_id as string);
+        }
       }
     } else if (event.type === "customer.subscription.deleted") {
       const subscription = event.data.object as Stripe.Subscription;
