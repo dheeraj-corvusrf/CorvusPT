@@ -218,6 +218,24 @@ Deno.serve(async (req: Request) => {
       throw new Error(`Resend error ${res.status}: ${text.slice(0, 300)}`);
     }
 
+    // Record the pending invite so /dashboard/referrals can show it right
+    // away (the referral itself only exists once the person signs up). Email
+    // stored lowercased; re-inviting the same address bumps sent_at on the
+    // existing row (unique index on referrer_id+email). Best-effort — the
+    // email already went out, so a write hiccup here shouldn't 500 the call.
+    try {
+      await adminClient.from("referral_invites").upsert(
+        {
+          referrer_id: user.id,
+          email: toEmail.trim().toLowerCase(),
+          sent_at: new Date().toISOString(),
+        },
+        { onConflict: "referrer_id,email" },
+      );
+    } catch (e) {
+      console.error("referral_invites upsert failed (email still sent):", e);
+    }
+
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: corsHeaders });
   } catch (err) {
     return new Response(

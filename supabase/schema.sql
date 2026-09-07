@@ -1425,6 +1425,42 @@ as $$
   order by p.created_at desc;
 $$;
 
+-- One row per address a user has sent a REFERRAL invite email to (see
+-- send-referral-invite/index.ts). The referral flow, unlike the admin
+-- sign-up-invite flow (invited_users above), had no record of an invite at
+-- all until the person signed up — so a user who'd emailed a friend saw
+-- nothing on /dashboard/referrals and assumed it hadn't worked. This is that
+-- pending record. It is NOT auto-cleared on signup (get_my_referrals returns
+-- no email to match on, and the signup email may differ from the invited
+-- address anyway) — the user dismisses stale rows themselves via the delete
+-- policy below. email is stored already-lowercased; re-inviting the same
+-- address bumps sent_at on the existing row instead of duplicating.
+create table if not exists public.referral_invites (
+  id uuid primary key default gen_random_uuid(),
+  referrer_id uuid not null references public.profiles (id) on delete cascade,
+  email text not null,
+  sent_at timestamptz not null default now()
+);
+
+create unique index if not exists referral_invites_referrer_email_idx
+  on public.referral_invites (referrer_id, email);
+
+alter table public.referral_invites enable row level security;
+
+-- A referrer sees only their own pending invites. Writes are service-role
+-- only (send-referral-invite), so there's no insert/update policy.
+drop policy if exists "Users can view their own referral invites" on public.referral_invites;
+create policy "Users can view their own referral invites"
+  on public.referral_invites for select
+  using (referrer_id = auth.uid());
+
+-- Lets the user dismiss a pending invite (already signed up, wrong address,
+-- changed their mind) straight from the referrals page.
+drop policy if exists "Users can delete their own referral invites" on public.referral_invites;
+create policy "Users can delete their own referral invites"
+  on public.referral_invites for delete
+  using (referrer_id = auth.uid());
+
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
 -- by itself, substituting your real email, to make that account an admin:
