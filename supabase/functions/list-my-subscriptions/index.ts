@@ -76,17 +76,32 @@ Deno.serve(async (req: Request) => {
 
     // Customer-level default card, used as the fallback when a subscription
     // doesn't carry its own default_payment_method.
-    const customer = (await stripe.customers.retrieve(profile.stripe_customer_id, {
-      expand: ["invoice_settings.default_payment_method"],
-    })) as Stripe.Customer;
-    const customerCard = cardOf(customer.invoice_settings?.default_payment_method);
+    let customerCard: CardInfo = null;
+    let list: Stripe.ApiList<Stripe.Subscription>;
+    try {
+      const customer = (await stripe.customers.retrieve(profile.stripe_customer_id, {
+        expand: ["invoice_settings.default_payment_method"],
+      })) as Stripe.Customer;
+      customerCard = cardOf(customer.invoice_settings?.default_payment_method);
 
-    const list = await stripe.subscriptions.list({
-      customer: profile.stripe_customer_id,
-      status: "all",
-      expand: ["data.default_payment_method"],
-      limit: 100,
-    });
+      list = await stripe.subscriptions.list({
+        customer: profile.stripe_customer_id,
+        status: "all",
+        expand: ["data.default_payment_method"],
+        limit: 100,
+      });
+    } catch (e) {
+      // The stored customer id belongs to the OTHER Stripe environment (an
+      // admin flipped their test/live override after subscribing) — Stripe
+      // 404s it. That just means "no subscriptions in this mode", not an error.
+      if (e && typeof e === "object" && (e as { code?: string }).code === "resource_missing") {
+        return new Response(JSON.stringify({ subscriptions: [] }), {
+          status: 200,
+          headers: corsHeaders,
+        });
+      }
+      throw e;
+    }
 
     // "canceled"/"incomplete_expired" are dead subscriptions — nothing to show
     // or act on. Everything else (active, trialing, past_due, unpaid, and
