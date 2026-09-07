@@ -77,6 +77,7 @@ function Properties() {
   const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -243,6 +244,50 @@ function Properties() {
     }
   }
 
+  // Bulk delete for the current selection. Same guard as the single delete —
+  // a property with a live Stripe subscription can't go (it'd keep billing
+  // with no way left to cancel it); those are skipped and reported. Beta
+  // accounts have no real subscription so nothing blocks there.
+  async function handleDeleteSelected() {
+    const chosen = properties.filter((p) => selectedIds.has(p.id));
+    const blocked = chosen.filter((p) => !isBeta && p.subscriptionStatus === "active");
+    const deletable = chosen.filter((p) => isBeta || p.subscriptionStatus !== "active");
+    if (deletable.length === 0) {
+      toast.error("Every selected property has an active subscription — cancel those first.");
+      return;
+    }
+    const n = deletable.length;
+    if (
+      !window.confirm(
+        `Remove ${n} propert${n === 1 ? "y" : "ies"} from your dashboard?` +
+          (blocked.length
+            ? `\n\n${blocked.length} with an active subscription will be skipped.`
+            : ""),
+      )
+    ) {
+      return;
+    }
+    setBulkDeleting(true);
+    const results = await Promise.allSettled(deletable.map((p) => deleteProperty(p.id)));
+    const okIds = new Set(
+      deletable.filter((_, i) => results[i].status === "fulfilled").map((p) => p.id),
+    );
+    const failed = results.filter((r) => r.status === "rejected").length;
+    setProperties((prev) => prev.filter((x) => !okIds.has(x.id)));
+    setSelectedIds((prev) => new Set([...prev].filter((id) => !okIds.has(id))));
+    if (okIds.size > 0) {
+      resetIntake();
+      toast.success(`${okIds.size} propert${okIds.size === 1 ? "y" : "ies"} removed.`);
+    }
+    if (failed > 0) toast.error(`${failed} could not be removed. Please try again.`);
+    if (blocked.length > 0) {
+      toast.warning(
+        `${blocked.length} skipped — cancel the subscription before deleting${blocked.length === 1 ? "" : " those"}.`,
+      );
+    }
+    setBulkDeleting(false);
+  }
+
   // Most recently added first, per explicit request — the property you just
   // added/imported should be the first thing you see, not wherever its own
   // protest deadline happens to rank it.
@@ -255,14 +300,18 @@ function Properties() {
     navigate({ to: "/ai-report" });
   }
 
-  // A property can be added to a bulk subscribe only if it has no live-ish
-  // subscription already and the account isn't beta (beta bypasses per-property
-  // billing). Also gated on stripeConfigured — the modal's inline card form
-  // needs the publishable key. Mirrors bulk-subscribe's own server-side guard.
+  // Live-ish = a Stripe subscription that already exists / is pending, so
+  // bulk-subscribe would refuse it (mirrors bulk-subscribe's server guard).
   const LIVEISH_SUB = new Set(["active", "trialing", "incomplete", "past_due", "unpaid"]);
-  const bulkEligible = (p: PropertyRecord) =>
-    !isBeta && !LIVEISH_SUB.has(p.subscriptionStatus ?? "") && stripeConfigured;
+  // A property gets a selection checkbox unless it's fully subscribed — an
+  // "active" property can be neither bulk-subscribed (already is) nor
+  // bulk-deleted (would strand a billing subscription).
+  const bulkEligible = (p: PropertyRecord) => p.subscriptionStatus !== "active";
   const selectedProperties = sortedProperties.filter((p) => selectedIds.has(p.id));
+  // Of the selection, the ones bulk-subscribe can actually take.
+  const subscribableSelected = selectedProperties.filter(
+    (p) => !isBeta && !LIVEISH_SUB.has(p.subscriptionStatus ?? ""),
+  );
 
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -356,16 +405,32 @@ function Properties() {
             >
               Clear
             </button>
-            <button type="button" onClick={() => setBulkOpen(true)} className="btn-accent text-sm">
-              Subscribe selected
+            <button
+              type="button"
+              disabled={bulkDeleting}
+              onClick={handleDeleteSelected}
+              className="btn-outline text-destructive text-sm disabled:opacity-60"
+            >
+              {bulkDeleting ? "Deleting…" : "Delete selected"}
             </button>
+            {stripeConfigured && subscribableSelected.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setBulkOpen(true)}
+                className="btn-accent text-sm"
+              >
+                Subscribe selected
+                {subscribableSelected.length !== selectedIds.size &&
+                  ` (${subscribableSelected.length})`}
+              </button>
+            )}
           </div>
         </div>
       )}
 
       <BulkSubscribeModal
-        properties={selectedProperties}
-        open={bulkOpen && selectedProperties.length > 0}
+        properties={subscribableSelected}
+        open={bulkOpen && subscribableSelected.length > 0}
         onOpenChange={setBulkOpen}
         onDone={handleBulkDone}
       />
