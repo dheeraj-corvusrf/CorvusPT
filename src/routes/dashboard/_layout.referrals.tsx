@@ -10,6 +10,7 @@ import {
   UserPlus,
   BadgeCheck,
   Link2,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -17,9 +18,12 @@ import { useAuth } from "@/lib/auth";
 import {
   getMyReferralCode,
   getMyReferrals,
+  getMyReferralInvites,
+  dismissReferralInvite,
   buildReferralLink,
   sendReferralInvite,
   type ReferralRecord,
+  type ReferralInvite,
 } from "@/lib/referrals";
 import { CopyButton } from "@/components/CopyButton";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -43,16 +47,28 @@ function Referrals() {
   const { user } = useAuth();
   const [code, setCode] = useState<string | null>(null);
   const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
+  const [invites, setInvites] = useState<ReferralInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [inviteEmail, setInviteEmail] = useState("");
   const [sendingInvite, setSendingInvite] = useState(false);
+  const [dismissingId, setDismissingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
-    Promise.all([getMyReferralCode(user.id), getMyReferrals()])
-      .then(([c, list]) => {
+    Promise.all([
+      getMyReferralCode(user.id),
+      getMyReferrals(),
+      // Resilient on its own: a pending-invites read failing shouldn't block
+      // the referral list from rendering.
+      getMyReferralInvites().catch((err) => {
+        console.error("Could not load pending invites:", err);
+        return [] as ReferralInvite[];
+      }),
+    ])
+      .then(([c, list, inv]) => {
         setCode(c);
         setReferrals(list);
+        setInvites(inv);
       })
       .catch((err) => console.error("Could not load referral info:", err))
       .finally(() => setLoading(false));
@@ -70,10 +86,27 @@ function Referrals() {
       await sendReferralInvite(inviteEmail.trim());
       toast.success(`Invite sent to ${inviteEmail.trim()}.`);
       setInviteEmail("");
+      // send-referral-invite records the pending invite server-side — pull the
+      // fresh list so it shows up right away.
+      getMyReferralInvites()
+        .then(setInvites)
+        .catch((err) => console.error(err));
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not send this invite. Please try again."));
     } finally {
       setSendingInvite(false);
+    }
+  }
+
+  async function handleDismiss(id: string) {
+    setDismissingId(id);
+    try {
+      await dismissReferralInvite(id);
+      setInvites((prev) => prev.filter((x) => x.id !== id));
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not remove this invite."));
+    } finally {
+      setDismissingId(null);
     }
   }
 
@@ -196,21 +229,63 @@ function Referrals() {
                     Your referrals
                   </div>
                   <div className="flex flex-wrap gap-1.5">
+                    {invites.length > 0 && <StatChip label="Invited" value={invites.length} />}
                     <StatChip label="Referred" value={referrals.length} />
                     <StatChip label="Subscribed" value={convertedCount} />
                     <StatChip label="Free months" value={rewardedCount} />
                   </div>
                 </div>
 
+                {invites.length > 0 && (
+                  <div className="mt-4">
+                    <div className="text-muted-foreground text-xs font-medium">
+                      Pending invites — these move to your referrals once the person signs up
+                    </div>
+                    <ul className="mt-2 grid gap-2">
+                      {invites.map((iv) => (
+                        <li
+                          key={iv.id}
+                          className="border-border flex items-center justify-between gap-3 rounded-lg border border-dashed p-3 text-sm"
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <div className="bg-secondary text-muted-foreground grid h-8 w-8 shrink-0 place-items-center rounded-full">
+                              <Mail className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">{iv.email}</div>
+                              <div className="text-muted-foreground text-xs">
+                                Invited {new Date(iv.sentAt).toLocaleDateString()} · awaiting
+                                sign-up
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDismiss(iv.id)}
+                            disabled={dismissingId === iv.id}
+                            aria-label={`Dismiss invite to ${iv.email}`}
+                            className="text-muted-foreground hover:text-foreground shrink-0 rounded p-1 transition-colors disabled:opacity-50"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {referrals.length === 0 ? (
                   <div className="border-border mt-4 flex flex-col items-center gap-2 rounded-xl border border-dashed py-10 text-center">
                     <div className="bg-secondary text-muted-foreground grid h-10 w-10 place-items-center rounded-full">
                       <Users className="h-5 w-5" />
                     </div>
-                    <p className="text-sm font-medium">No referrals yet</p>
+                    <p className="text-sm font-medium">
+                      {invites.length > 0 ? "No sign-ups yet" : "No referrals yet"}
+                    </p>
                     <p className="text-muted-foreground max-w-xs text-xs">
-                      Share your link above — everyone who signs up shows up here, along with how
-                      close each one is to earning you a free month.
+                      {invites.length > 0
+                        ? "None of your invites have created an account yet. When one does, they'll show up here with how close they are to earning you a free month."
+                        : "Share your link above — everyone who signs up shows up here, along with how close each one is to earning you a free month."}
                     </p>
                   </div>
                 ) : (

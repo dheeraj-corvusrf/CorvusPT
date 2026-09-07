@@ -50,6 +50,35 @@ export async function getMyReferrals(): Promise<ReferralRecord[]> {
   }));
 }
 
+// A referral email that's been sent but hasn't turned into a signup yet.
+// Written by send-referral-invite; read here via RLS ("referrer_id =
+// auth.uid()"). Not auto-cleared when the person signs up — the user
+// dismisses stale ones (see dismissReferralInvite). Distinct from a
+// ReferralRecord, which only exists once there's a real account.
+export type ReferralInvite = {
+  id: string;
+  email: string;
+  sentAt: string;
+};
+
+export async function getMyReferralInvites(): Promise<ReferralInvite[]> {
+  const { data, error } = await supabase
+    .from("referral_invites")
+    .select("id, email, sent_at")
+    .order("sent_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((r) => ({
+    id: r.id as string,
+    email: r.email as string,
+    sentAt: r.sent_at as string,
+  }));
+}
+
+export async function dismissReferralInvite(id: string): Promise<void> {
+  const { error } = await supabase.from("referral_invites").delete().eq("id", id);
+  if (error) throw error;
+}
+
 // A real, working sign-up link, built as a clean path — .../join/CODE, no
 // "?" — rather than /join?ref=CODE directly, since a raw query string reads
 // as a tracking link to a friend deciding whether to click it. This app is a
