@@ -24,6 +24,7 @@ import {
 } from "@/lib/billing";
 import { stripeConfigured } from "@/lib/stripe";
 import { BulkSubscribeModal } from "@/components/BulkSubscribeModal";
+import { PaymentsModeChip } from "@/components/PaymentsModeChip";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
@@ -299,6 +300,7 @@ function Properties() {
               {properties.length} propert{properties.length === 1 ? "y" : "ies"}
             </span>
           )}
+          <PaymentsModeChip />
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => setImportOpen(true)} className="btn-outline">

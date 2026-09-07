@@ -38,6 +38,7 @@ import {
 import type { ProtestRecord, ProtestStatus } from "@/lib/protests";
 import { listProperties, addProperty, deleteProperty, type PropertyRecord } from "@/lib/properties";
 import { currency } from "@/lib/intake-store";
+import { getAppSettings, setStripeMode, type StripeMode } from "@/lib/app-settings";
 import { AddressAutocomplete } from "@/components/AddressAutocomplete";
 import { AdminCaseProgressModal } from "@/components/AdminCaseProgressModal";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -51,7 +52,14 @@ export const Route = createFileRoute("/admin")({
 });
 
 type AdminTab =
-  "users" | "owner_managed" | "corvus_managed" | "admins" | "invited" | "beta" | "activity";
+  | "users"
+  | "owner_managed"
+  | "corvus_managed"
+  | "admins"
+  | "invited"
+  | "beta"
+  | "activity"
+  | "settings";
 
 function AdminPanel() {
   const nav = useNavigate();
@@ -473,6 +481,7 @@ function AdminPanel() {
     },
     { key: "beta", label: "Beta Signups", count: betaLeadsLoading ? null : betaLeads.length },
     { key: "activity", label: "Activity Log", count: auditLogLoading ? null : auditLog.length },
+    { key: "settings", label: "Settings", count: null },
   ];
 
   return (
@@ -711,6 +720,14 @@ function AdminPanel() {
         </section>
       )}
 
+      {activeTab === "settings" && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl font-semibold">Settings</h2>
+          <p className="text-sm text-muted-foreground">Account-wide switches.</p>
+          <StripeModePanel />
+        </section>
+      )}
+
       {caseRecord && (
         <AdminCaseProgressModal
           userId={caseRecord.userId}
@@ -719,6 +736,100 @@ function AdminPanel() {
           onUpdate={(patch) => handleCaseProgressUpdate(caseRecord.id, patch)}
           onClose={() => setCaseRecord(null)}
         />
+      )}
+    </div>
+  );
+}
+
+// The runtime Stripe test/live switch. Reads/writes app_settings.stripe_mode;
+// every payment edge function and the client both honour it (see
+// supabase/functions/_shared/stripe-mode.ts and src/lib/stripe.ts). Flipping
+// to live means real cards get charged, so it takes a typed confirmation and
+// writes an admin_audit_log row.
+function StripeModePanel() {
+  const [mode, setMode] = useState<StripeMode | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getAppSettings()
+      .then((s) => setMode(s.stripeMode))
+      .catch((err) => {
+        console.error(err);
+        toast.error("Could not load payment settings.");
+      });
+  }, []);
+
+  async function switchTo(next: StripeMode) {
+    if (next === mode || saving) return;
+    if (next === "live") {
+      const typed = window.prompt(
+        "Switching to LIVE means real customer cards will be charged.\n\n" +
+          "Make sure STRIPE_SECRET_KEY_LIVE, the live webhook secret, and the live " +
+          "publishable key are all configured first.\n\nType LIVE to confirm:",
+      );
+      if (typed !== "LIVE") {
+        toast("Left in test mode.");
+        return;
+      }
+    } else if (
+      !window.confirm("Switch payments back to TEST mode? No real charges will be made.")
+    ) {
+      return;
+    }
+    setSaving(true);
+    try {
+      await setStripeMode(next);
+      setMode(next);
+      toast.success(`Payments switched to ${next.toUpperCase()} mode.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not change payment mode.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card-elev mt-4 max-w-xl p-6">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        Payments environment
+        {mode && (
+          <span className={mode === "live" ? "badge-soft text-destructive" : "badge-soft-warning"}>
+            {mode === "live" ? "LIVE — real charges" : "TEST — no real charges"}
+          </span>
+        )}
+      </div>
+      <p className="text-muted-foreground mt-1.5 text-xs">
+        Which Stripe environment every checkout, subscription, and billing-portal action uses. The
+        change is instant across the app — no redeploy.
+      </p>
+
+      {mode === null ? (
+        <p className="text-muted-foreground mt-4 text-sm">Loading…</p>
+      ) : (
+        <div className="mt-4 grid gap-2 sm:flex sm:flex-wrap">
+          <button
+            type="button"
+            disabled={saving || mode === "test"}
+            onClick={() => switchTo("test")}
+            className="btn-outline text-sm disabled:opacity-50"
+          >
+            {mode === "test" ? "✓ Test mode" : "Switch to Test"}
+          </button>
+          <button
+            type="button"
+            disabled={saving || mode === "live"}
+            onClick={() => switchTo("live")}
+            className="btn-outline text-warning-foreground text-sm disabled:opacity-50"
+          >
+            {mode === "live" ? "✓ Live mode" : "Switch to Live…"}
+          </button>
+        </div>
+      )}
+
+      {mode === "live" && (
+        <p className="text-destructive mt-3 text-xs font-medium">
+          Live mode is active — every subscription action charges a real card.
+        </p>
       )}
     </div>
   );

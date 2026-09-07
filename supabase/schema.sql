@@ -1355,8 +1355,16 @@ create policy "Admins can view all settlement agreements"
 create table if not exists public.app_settings (
   id boolean primary key default true,
   enforce_per_property_entitlement boolean not null default false,
+  -- Which Stripe environment every payment edge function talks to. Flipped
+  -- from the admin panel's Settings tab (never a code change) so a launch —
+  -- or an emergency fall-back to test — doesn't need a redeploy. Every Stripe
+  -- function reads this per request and picks STRIPE_SECRET_KEY_TEST vs
+  -- STRIPE_SECRET_KEY_LIVE; the client reads it to pick which pk_ to hand
+  -- loadStripe. See ../functions/_shared/stripe-mode.ts and src/lib/stripe.ts.
+  stripe_mode text not null default 'test',
   updated_at timestamptz not null default now(),
-  constraint app_settings_singleton check (id = true)
+  constraint app_settings_singleton check (id = true),
+  constraint app_settings_stripe_mode_chk check (stripe_mode in ('test', 'live'))
 );
 insert into public.app_settings (id) values (true) on conflict (id) do nothing;
 

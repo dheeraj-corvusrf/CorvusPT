@@ -12,6 +12,7 @@
 // value_bracket on the properties row itself).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
+import { getStripeMode, stripeSecretKey } from "../_shared/stripe-mode.ts";
 import {
   bracketForValue,
   isTier,
@@ -56,8 +57,8 @@ Deno.serve(async (req: Request) => {
     const safePath = (p: string | undefined, fallback: string) =>
       p && p.startsWith("/") && !p.startsWith("//") ? p : fallback;
 
-    const secretKey = Deno.env.get("STRIPE_SECRET_KEY");
-    if (!secretKey) throw new Error("Missing STRIPE_SECRET_KEY");
+    // Test vs live Stripe environment — flipped from the admin Settings tab.
+    const secretKey = stripeSecretKey(await getStripeMode());
 
     const callerClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
