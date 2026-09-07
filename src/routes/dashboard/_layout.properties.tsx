@@ -19,8 +19,11 @@ import {
   formatMoney,
   TIER_BRACKET_PRICES,
   type BillingInfo,
+  type BulkSubResult,
   type Tier,
 } from "@/lib/billing";
+import { stripeConfigured } from "@/lib/stripe";
+import { BulkSubscribeModal } from "@/components/BulkSubscribeModal";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
@@ -71,6 +74,8 @@ function Properties() {
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -249,6 +254,41 @@ function Properties() {
     navigate({ to: "/ai-report" });
   }
 
+  // A property can be added to a bulk subscribe only if it has no active
+  // subscription and the account isn't beta (beta bypasses per-property
+  // billing). Also gated on stripeConfigured — the modal's inline card form
+  // needs the publishable key.
+  const bulkEligible = (p: PropertyRecord) =>
+    !isBeta && p.subscriptionStatus !== "active" && stripeConfigured;
+  const selectedProperties = sortedProperties.filter((p) => selectedIds.has(p.id));
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleBulkDone(results: BulkSubResult[]) {
+    const active = results.filter((r) => r.status === "active").length;
+    const needs = results.filter((r) => r.status === "needs_action");
+    const errors = results.filter((r) => r.status === "error");
+    if (active > 0) toast.success(`${active} propert${active === 1 ? "y" : "ies"} subscribed.`);
+    if (needs.length > 0) {
+      toast.warning(
+        `${needs.length} subscription${needs.length === 1 ? "" : "s"} need payment confirmation — check your email or the billing portal.`,
+      );
+    }
+    errors.forEach((r) => toast.error(r.message ?? "A subscription could not be created."));
+    setSelectedIds(new Set());
+    if (user) {
+      listProperties(user.id).then(setProperties).catch(console.error);
+      getMyBilling(user.id).then(setBilling).catch(console.error);
+    }
+  }
+
   return (
     <div>
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -300,6 +340,33 @@ function Properties() {
         />
       )}
 
+      {selectedIds.size > 0 && (
+        <div className="card-elev mt-4 flex flex-wrap items-center justify-between gap-3 p-3">
+          <span className="text-sm font-medium">
+            {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="btn-outline text-sm"
+            >
+              Clear
+            </button>
+            <button type="button" onClick={() => setBulkOpen(true)} className="btn-accent text-sm">
+              Subscribe selected
+            </button>
+          </div>
+        </div>
+      )}
+
+      <BulkSubscribeModal
+        properties={selectedProperties}
+        open={bulkOpen && selectedProperties.length > 0}
+        onOpenChange={setBulkOpen}
+        onDone={handleBulkDone}
+      />
+
       <div className="mt-6">
         {listError && <p className="mb-4 text-sm text-destructive">{listError}</p>}
         {propertiesLoading ? (
@@ -335,6 +402,15 @@ function Properties() {
                   <div className="flex items-start justify-between gap-4 flex-wrap">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
+                        {bulkEligible(p) && (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${p.address} for bulk subscribe`}
+                            checked={selectedIds.has(p.id)}
+                            onChange={() => toggleSelected(p.id)}
+                            className="h-4 w-4 shrink-0"
+                          />
+                        )}
                         <span className="text-xs text-muted-foreground">{p.cad}</span>
                         <ActionStatusBadge property={p} protests={protests} />
                         {!isBeta && <PaymentStatusBadge property={p} />}

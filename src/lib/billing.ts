@@ -229,3 +229,33 @@ export async function listMySubscriptions(): Promise<MySubscription[]> {
 export async function syncMySubscriptions(): Promise<{ updated: number }> {
   return invokeEdgeFunction<{ updated: number }>("sync-my-subscriptions", {});
 }
+
+// ── Bulk subscribe (many properties, one card, no hosted Checkout) ──
+// Step 1: ensure a Stripe customer and get a SetupIntent client secret for the
+// inline PaymentElement to collect + save a card.
+export async function bulkSubscribeSetup(): Promise<{ clientSecret: string; customerId: string }> {
+  return invokeEdgeFunction<{ clientSecret: string; customerId: string }>(
+    "bulk-subscribe-setup",
+    {},
+  );
+}
+
+export type BulkSubItem = { propertyId: string; tier: Tier };
+export type BulkSubResult = {
+  propertyId: string;
+  status: "active" | "needs_action" | "error";
+  message?: string;
+  hostedInvoiceUrl?: string;
+};
+
+// Step 2: after the client has confirmed the SetupIntent and has a
+// paymentMethodId, create one subscription per property off-session.
+export async function bulkSubscribe(
+  items: BulkSubItem[],
+  paymentMethodId: string,
+): Promise<{ results: BulkSubResult[] }> {
+  return invokeEdgeFunction<{ results: BulkSubResult[] }>("bulk-subscribe", {
+    items,
+    paymentMethodId,
+  });
+}

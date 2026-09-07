@@ -1,8 +1,8 @@
 // Deploy via CLI: `supabase functions deploy stripe-webhook`.
 // Requires STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET secrets. After deploying, add
 // this function's URL as a webhook endpoint in the Stripe Dashboard, subscribed to
-// checkout.session.completed, customer.subscription.updated, and
-// customer.subscription.deleted.
+// checkout.session.completed, customer.subscription.created,
+// customer.subscription.updated, and customer.subscription.deleted.
 //
 // No Supabase auth here — Stripe calls this directly and authenticates via an HMAC
 // signature (verified below) instead of a Supabase JWT. The service-role client is
@@ -205,6 +205,40 @@ Deno.serve(async (req: Request) => {
 
         await syncProfilePlan(adminClient, userId);
         await grantReferralRewardIfDue(stripe, adminClient, userId);
+      }
+    } else if (event.type === "customer.subscription.created") {
+      // bulk-subscribe creates subscriptions via the API (no Checkout, so no
+      // checkout.session.completed) — this is where a referral reward gets
+      // granted for that path, and a belt-and-suspenders row write in case
+      // bulk-subscribe's own direct write was lost. Matched by
+      // metadata.propertyId (bulk-subscribe and create-checkout-session both
+      // set it), falling back to the subscription id.
+      const subscription = event.data.object as Stripe.Subscription;
+      const propertyId = subscription.metadata?.propertyId;
+      const tier =
+        subscription.metadata?.tier === "corvusrf_managed" ? "corvusrf_managed" : "owner_managed";
+      const bracket = subscription.metadata?.bracket ?? null;
+      let query = adminClient.from("properties").select("id, user_id");
+      query = propertyId
+        ? query.eq("id", propertyId)
+        : query.eq("stripe_subscription_id", subscription.id);
+      const { data: property } = await query.maybeSingle();
+      if (property) {
+        await adminClient
+          .from("properties")
+          .update({
+            stripe_subscription_id: subscription.id,
+            subscription_status: subscription.status,
+            plan_tier: tier,
+            value_bracket: bracket,
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            cancel_at: subscription.cancel_at
+              ? new Date(subscription.cancel_at * 1000).toISOString()
+              : null,
+          })
+          .eq("id", property.id);
+        await syncProfilePlan(adminClient, property.user_id as string);
+        await grantReferralRewardIfDue(stripe, adminClient, property.user_id as string);
       }
     } else if (event.type === "customer.subscription.updated") {
       const subscription = event.data.object as Stripe.Subscription;

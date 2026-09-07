@@ -1,11 +1,9 @@
 // Deploy via CLI: `supabase functions deploy create-checkout-session`.
 // Requires only STRIPE_SECRET_KEY — no per-bracket Stripe Price id secrets.
-// Price is computed here and passed to Stripe as price_data (ad hoc, no
-// pre-created Price/Product needed), so the 15%-off-2nd-property discount can
-// be applied without a separate fixed Price per case. Mirrors
-// bracketForValue/TIER_BRACKET_PRICES/ADDITIONAL_PROPERTY_DISCOUNT in
-// src/lib/billing.ts, which a Deno function can't import directly — keep
-// both in sync by hand.
+// Price is computed via ../_shared/pricing.ts and passed to Stripe as
+// price_data (ad hoc, no pre-created Price/Product needed), so the
+// 15%-off-2nd-property discount can be applied without a separate fixed Price
+// per case. bulk-subscribe uses the same helper.
 //
 // One real, independent Stripe subscription per PROPERTY (not one shared
 // subscription with bracket quantities, as before) — see the property-level
@@ -14,6 +12,13 @@
 // value_bracket on the properties row itself).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
+import {
+  bracketForValue,
+  isTier,
+  subscriptionProductName,
+  unitAmountCents,
+  type Tier,
+} from "../_shared/pricing.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -22,36 +27,6 @@ const corsHeaders = {
   // (a JSON string) instead of a parsed object, based on the response Content-Type.
   "Content-Type": "application/json",
 };
-
-type Tier = "owner_managed" | "corvusrf_managed";
-type Bracket = "under2m" | "mid2m10m" | "over10m";
-
-const TIER_LABEL: Record<Tier, string> = {
-  owner_managed: "Owner-Managed",
-  corvusrf_managed: "CorvusPT-Managed",
-};
-
-// "over10m" is the capped $10M-$25M bracket — see billing.ts.
-const BRACKET_LABEL: Record<Bracket, string> = {
-  under2m: "$0 - $2M",
-  mid2m10m: "$2M - $10M",
-  over10m: "$10M - $25M",
-};
-
-const TIER_BRACKET_PRICES: Record<Tier, Record<Bracket, number>> = {
-  owner_managed: { under2m: 99, mid2m10m: 299, over10m: 499 },
-  corvusrf_managed: { under2m: 199, mid2m10m: 499, over10m: 799 },
-};
-
-const ADDITIONAL_PROPERTY_DISCOUNT = 0.15;
-
-// Same $2M/$10M boundaries as src/lib/billing.ts's bracketForValue.
-function bracketForValue(value: number | null): Bracket {
-  if (value == null) return "under2m";
-  if (value < 2_000_000) return "under2m";
-  if (value < 10_000_000) return "mid2m10m";
-  return "over10m";
-}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -63,7 +38,7 @@ Deno.serve(async (req: Request) => {
       successPath?: string;
       cancelPath?: string;
     };
-    if (tier !== "owner_managed" && tier !== "corvusrf_managed") {
+    if (!isTier(tier)) {
       return new Response(
         JSON.stringify({ error: "tier must be owner_managed or corvusrf_managed" }),
         { status: 400, headers: corsHeaders },
@@ -141,23 +116,12 @@ Deno.serve(async (req: Request) => {
       .neq("id", propertyId);
     const isAdditionalInBracket = (count ?? 0) > 0;
 
-    const basePrice = TIER_BRACKET_PRICES[tier][bracket];
-    const baseCents = Math.round(basePrice * 100);
-    const unitAmount = isAdditionalInBracket
-      ? Math.round(baseCents * (1 - ADDITIONAL_PROPERTY_DISCOUNT))
-      : baseCents;
-    // Lead with the property address so each line is identifiable in Stripe's
-    // hosted billing portal (which only shows the product name) when a
-    // customer has several property subscriptions — otherwise two rows like
-    // "Owner-Managed — $2M - $10M" are indistinguishable. Stripe's product
-    // name limit is 250 chars; a situs address is well under that, but trim
-    // defensively. Also set the subscription description to the bare address
-    // for portals/emails that surface it.
+    // Address leads the product name so the line is identifiable in Stripe's
+    // hosted billing portal (product name only); also set as the subscription
+    // description for portals/emails that surface it. See ../_shared/pricing.ts.
     const address = ((property.address as string | null) ?? "").trim();
-    const planLabel = `${TIER_LABEL[tier]} (${BRACKET_LABEL[bracket]})${
-      isAdditionalInBracket ? ", 2nd+ property 15% off" : ""
-    }`;
-    const name = (address ? `${address} — ${planLabel}` : planLabel).slice(0, 240);
+    const unitAmount = unitAmountCents(tier, bracket, isAdditionalInBracket);
+    const name = subscriptionProductName(tier, bracket, address, isAdditionalInBracket);
 
     const { data: profile } = await adminClient
       .from("profiles")

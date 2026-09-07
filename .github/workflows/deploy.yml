@@ -52,6 +52,7 @@ jobs:
           VITE_SUPABASE_URL: https://iotzuhuajbsxxuccuihn.supabase.co
           VITE_SUPABASE_ANON_KEY: sb_publishable_RpyqtM6EeGiT7qc3FyN5Iw_vm0aiuM3
           VITE_WEB3FORMS_ACCESS_KEY: 5a66f800-1264-49a2-9696-2839afd02485
+          VITE_STRIPE_PUBLISHABLE_KEY: pk_test_51TwDPUCrbRfnYZRW05z9Huz1UlghIXZZUrR9nMF82t1Ym89ID6ZXbnGcT1Lcqdb9fFbU6z1W8e11xezYbrPSNqbj00kOMSJnE2
 
       # E2E (Playwright, authenticated subset) — protest authorization and the
       # Stripe checkout redirect. Runs against a dedicated, permanent test
@@ -67,6 +68,7 @@ jobs:
           VITE_SUPABASE_URL: https://iotzuhuajbsxxuccuihn.supabase.co
           VITE_SUPABASE_ANON_KEY: sb_publishable_RpyqtM6EeGiT7qc3FyN5Iw_vm0aiuM3
           VITE_WEB3FORMS_ACCESS_KEY: 5a66f800-1264-49a2-9696-2839afd02485
+          VITE_STRIPE_PUBLISHABLE_KEY: pk_test_51TwDPUCrbRfnYZRW05z9Huz1UlghIXZZUrR9nMF82t1Ym89ID6ZXbnGcT1Lcqdb9fFbU6z1W8e11xezYbrPSNqbj00kOMSJnE2
           E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
 
@@ -84,6 +86,11 @@ jobs:
           VITE_SUPABASE_ANON_KEY: sb_publishable_RpyqtM6EeGiT7qc3FyN5Iw_vm0aiuM3
           # Web3Forms access keys are meant to be public/client-side by design.
           VITE_WEB3FORMS_ACCESS_KEY: 5a66f800-1264-49a2-9696-2839afd02485
+          # Stripe PUBLISHABLE key — designed to ship in the client bundle (the
+          # secret key is the STRIPE_SECRET_KEY Supabase function secret, never
+          # here). Used by the bulk-subscribe inline card form. Swap for the
+          # pk_live_… key when the app moves off the sandbox.
+          VITE_STRIPE_PUBLISHABLE_KEY: pk_test_51TwDPUCrbRfnYZRW05z9Huz1UlghIXZZUrR9nMF82t1Ym89ID6ZXbnGcT1Lcqdb9fFbU6z1W8e11xezYbrPSNqbj00kOMSJnE2
           # Same story as the two keys above — this runs client-side and is
           # protected by the key's own Website (referrer) restrictions in
           # Google Cloud Console, not by being kept secret. Without this line,
