@@ -3120,6 +3120,150 @@ function CompsWorkflowRibbon({
   );
 }
 
+// "Add a comparable" — a comp the user knows about that the CAD feed didn't
+// surface (or a real sale from a document). Address is geocoded on submit so
+// it lands on the map relative to the subject; sale figures are optional and
+// stay unverified until backed by an uploaded document (Phase C).
+function AddCompForm({ onAdd }: { onAdd: (input: CompSelectionInput) => void }) {
+  const [open, setOpen] = useState(false);
+  const [address, setAddress] = useState("");
+  const [salePrice, setSalePrice] = useState("");
+  const [saleDate, setSaleDate] = useState("");
+  const [buildingSqft, setBuildingSqft] = useState("");
+  const [landSqft, setLandSqft] = useState("");
+  const [source, setSource] = useState("");
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const num = (s: string) => {
+    const n = Number(s.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  async function submit() {
+    if (!address.trim()) {
+      setError("Enter the comparable's address.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const point = await geocodeAddress(address.trim());
+      if (!point) {
+        setError("Couldn't locate that address. Check the spelling or add city + ZIP.");
+        return;
+      }
+      onAdd({
+        compKey: `user:${crypto.randomUUID()}`,
+        action: "include",
+        address: address.trim(),
+        latitude: point.lat,
+        longitude: point.lng,
+        salePrice: num(salePrice),
+        saleDate: saleDate || null,
+        buildingSqft: num(buildingSqft),
+        landSqft: num(landSqft),
+        source: source.trim() || null,
+        notes: notes.trim() || null,
+        saleVerified: false,
+      });
+      setOpen(false);
+      setAddress("");
+      setSalePrice("");
+      setSaleDate("");
+      setBuildingSqft("");
+      setLandSqft("");
+      setSource("");
+      setNotes("");
+    } catch {
+      setError("Couldn't add that comp. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="inline-flex w-fit items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/10"
+      >
+        <Upload className="h-3.5 w-3.5" /> Add a comparable
+      </button>
+    );
+  }
+
+  const field = "rounded-md border border-input bg-background px-2.5 py-1.5 text-xs";
+  return (
+    <div className="grid gap-2 rounded-lg border border-border p-3">
+      <div className="text-xs font-semibold">Add a comparable</div>
+      <input
+        className={field}
+        placeholder="Address (required) — street, city, ZIP"
+        value={address}
+        onChange={(e) => setAddress(e.target.value)}
+      />
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input
+          className={field}
+          placeholder="Sale price (optional)"
+          value={salePrice}
+          onChange={(e) => setSalePrice(e.target.value)}
+        />
+        <input
+          className={field}
+          type="date"
+          placeholder="Sale date"
+          value={saleDate}
+          onChange={(e) => setSaleDate(e.target.value)}
+        />
+        <input
+          className={field}
+          placeholder="Building SF (optional)"
+          value={buildingSqft}
+          onChange={(e) => setBuildingSqft(e.target.value)}
+        />
+        <input
+          className={field}
+          placeholder="Land SF (optional)"
+          value={landSqft}
+          onChange={(e) => setLandSqft(e.target.value)}
+        />
+      </div>
+      <input
+        className={field}
+        placeholder="Source (broker, appraisal, listing…) — optional"
+        value={source}
+        onChange={(e) => setSource(e.target.value)}
+      />
+      <input
+        className={field}
+        placeholder="Notes (optional)"
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+      />
+      <p className="text-[11px] text-muted-foreground">
+        Sale price stays marked “Not Verified” until backed by an uploaded closing statement or
+        appraisal.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          onClick={submit}
+          disabled={busy}
+          className="btn-primary btn-primary-hover text-xs disabled:opacity-60"
+        >
+          {busy ? "Locating…" : "Add comp"}
+        </button>
+        <button onClick={() => setOpen(false)} className="btn-outline text-xs">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MiniMeter({ value, label }: { value: number; label: string }) {
   const color = scoreColor(value);
   return (
@@ -5139,6 +5283,8 @@ function ModulePreviewContent({
             <CompsMap subject={mapSubject} comps={mapComps} />
           </div>
         )}
+
+        {compsInteractive && <AddCompForm onAdd={onSaveCompSelection} />}
 
         {hasAnyComp && (
           <>
