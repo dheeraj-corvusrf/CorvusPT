@@ -5031,7 +5031,7 @@ function ModulePreviewContent({
               <div className="rounded-lg bg-success/10 p-3">
                 <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-success">
                   <TrendingUp className="h-3.5 w-3.5" />
-                  Factors Increasing Opportunity
+                  Factors Increasing Protest Opportunity
                 </div>
                 <ul className="grid gap-1 text-xs text-foreground/90">
                   {data.factorsIncreasing.map((f, i) => (
@@ -5044,7 +5044,7 @@ function ModulePreviewContent({
               <div className="rounded-lg bg-destructive/10 p-3">
                 <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-destructive">
                   <TrendingDown className="h-3.5 w-3.5" />
-                  Factors Reducing Opportunity
+                  Factors Reducing Protest Opportunity
                 </div>
                 <ul className="grid gap-1 text-xs text-foreground/90">
                   {data.factorsReducing.map((f, i) => (
