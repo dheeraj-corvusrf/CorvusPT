@@ -1656,10 +1656,9 @@ function Report() {
             onStartProtest={startProtest}
             onViewCase={() => {
               if (!resolvedProperty) return;
-              // New tab, not nav() — View Case shouldn't navigate the report
-              // itself away from whatever module the user was just looking at.
-              const url = `${window.location.origin}${import.meta.env.BASE_URL}dashboard/case?propertyId=${encodeURIComponent(resolvedProperty.id)}`;
-              window.open(url, "_blank", "noopener,noreferrer");
+              // Same-window navigation (per product direction) — opening it
+              // in a new tab left two tabs that each reloaded on focus.
+              nav({ to: "/dashboard/case", search: { propertyId: resolvedProperty.id } });
             }}
             overrides={overrides}
             onMarkNotApplicable={markNotApplicable}

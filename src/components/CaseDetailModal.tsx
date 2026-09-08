@@ -169,6 +169,18 @@ export function CaseDetailView({
 
   useEffect(load, [protest.id]);
 
+  // If a fresher protest prop arrives with the filing notice already
+  // accepted (e.g. this view stayed mounted while the parent refetched),
+  // carry that in so the one-time notice doesn't reappear. Only ever fills
+  // the ack — never clobbers a locally-edited field.
+  useEffect(() => {
+    if (protest.corvusGuidanceAckAt) {
+      setCurrent((c) =>
+        c.corvusGuidanceAckAt ? c : { ...c, corvusGuidanceAckAt: protest.corvusGuidanceAckAt },
+      );
+    }
+  }, [protest.corvusGuidanceAckAt]);
+
   async function handleAcknowledgeGuidance() {
     setAcknowledging(true);
     try {
