@@ -462,7 +462,7 @@ function Report() {
     const dependents =
       moduleId === "income"
         ? ["strategy", "executive"]
-        : moduleId === "site" || moduleId === "improvement"
+        : moduleId === "site" || moduleId === "improvement" || moduleId === "zoning"
           ? [moduleId, "strategy", "evidence", "executive"]
           : [moduleId];
     for (const id of dependents) {
@@ -743,6 +743,23 @@ function Report() {
       if (improvementNA.length > 0) {
         context.push(`Improvement Condition: no photo available for ${improvementNA.join(", ")}.`);
       }
+      // Module 6's finding flows downstream — comps selection, strategy
+      // ranking, evidence needs, and the executive recommendation should all
+      // be aware of a zoning/classification discrepancy and, separately,
+      // whether it has valuation relevance.
+      const zoningData = moduleData.zoning?.data as ModuleResultMap["zoning"] | undefined;
+      if (zoningData) {
+        const disc = zoningData.discrepancies[0]?.detail ?? "none detected";
+        const exempt =
+          zoningData.possibleExemptions.length > 0
+            ? zoningData.possibleExemptions.join("; ")
+            : "none";
+        context.push(
+          `Zoning & Classification (Module 6): classification looks ${zoningData.matches}. ` +
+            `Detected discrepancy: ${disc}. Valuation relevance (separate): ${zoningData.valuationRelevance} ` +
+            `Possible exemptions to raise with the ARB: ${exempt}.`,
+        );
+      }
       if (context.length > 0) input.notApplicableContext = context;
     }
 
@@ -807,6 +824,27 @@ function Report() {
       // this gates every factor's status server-side, not just here.
       if (id === "site" && siteGisMap.data) {
         input.siteGis = siteGisMap.data;
+      }
+
+      // Module 6 — the real classification/zoning data this app has (the
+      // comps subject carries a zoning string for the TrueProdigy counties),
+      // the comps' own classifications, and any docs the user uploaded onto
+      // a zoning aspect. enforceZoningRealData gates each aspect on these.
+      if (id === "zoning") {
+        const subj = compsMap.data?.subject ?? null;
+        input.zoningData = {
+          cadClassification: state.propertyType ?? null,
+          cadZoning: subj?.zoning ?? null,
+          legalDescription: state.legalDescription ?? null,
+          subdivision: state.subdivision ?? null,
+          comps: (compsMap.data?.comps ?? []).slice(0, 15).map((c) => ({
+            classification: c.propType ?? null,
+            zoning: c.zoning ?? null,
+          })),
+          uploadedDocs: evidenceDocs
+            .filter((d) => d.documentType?.startsWith("Zoning: "))
+            .map((d) => d.fileName),
+        };
       }
 
       // Module 10 reconciles Modules 2/3/8/9's already-real outputs — see the
@@ -2226,13 +2264,7 @@ function ModuleVisual({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      return (
-        <ZoningFlow
-          matches={d.matches}
-          stated={propertyType}
-          typical={d.typicalClassification || undefined}
-        />
-      );
+      return <ZoningAspectTiles aspects={d.aspects} matches={d.matches} />;
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
@@ -4559,32 +4591,160 @@ function StrategyDetail({
   );
 }
 
-// Two-node "stated vs. typical" flow for Zoning & Classification — only 2
-// real data points exist (the property's stated type and the AI's typical-
-// classification guess), so this stays 2 boxes + a match/mismatch badge on
-// the connecting arrow, not a fabricated 4-box CAD/Actual/Zoning/Permitted
-// tree the underlying data doesn't actually have.
-function ZoningFlow({
-  matches,
-  stated,
-  typical,
+// A small "how the analysis flows" ribbon — User Input → AI Processing →
+// Logic/Decision → AI Output → Next Step. Purely a process cue; the labels
+// are passed by the module so each can name its own steps.
+function AnalysisPipeline({
+  steps,
 }: {
-  matches: keyof typeof ZONING_STATUS;
-  stated?: string;
-  typical?: string;
+  steps: { label: string; done?: boolean; current?: boolean }[];
 }) {
-  const { Icon, color } = ZONING_STATUS[matches];
   return (
-    <div className="flex items-center gap-2">
-      <div className="min-w-0 flex-1 rounded-lg bg-secondary/50 p-2.5 text-center">
-        <div className="text-[9px] uppercase tracking-wide text-muted-foreground">Stated</div>
-        <div className="truncate text-xs font-semibold">{stated || "—"}</div>
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1 text-[10px]">
+      {steps.map((s, i) => (
+        <Fragment key={s.label}>
+          <div
+            className={`flex shrink-0 items-center rounded-md px-2 py-1 font-medium ${
+              s.current
+                ? "bg-accent/15 text-accent"
+                : s.done
+                  ? "bg-secondary/70 text-foreground"
+                  : "bg-secondary/40 text-muted-foreground"
+            }`}
+          >
+            {s.label}
+          </div>
+          {i < steps.length - 1 && (
+            <ArrowRight className="h-3 w-3 shrink-0 self-center text-muted-foreground" />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+const ZONING_ASPECT_STATUS: Record<
+  ModuleResultMap["zoning"]["aspects"][number]["status"],
+  { label: string; cls: string }
+> = {
+  Confirmed: { label: "Confirmed", cls: "bg-success/15 text-success" },
+  "Partial Data": { label: "Partial", cls: "bg-warning/20 text-warning-foreground" },
+  "Additional Data Needed": { label: "Needs data", cls: "bg-secondary text-muted-foreground" },
+};
+
+function ZoningClassificationTable({
+  aspects,
+  onUpload,
+  uploading,
+}: {
+  aspects: ModuleResultMap["zoning"]["aspects"];
+  onUpload?: (aspectLabel: string, files: File[]) => void;
+  uploading?: boolean;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full min-w-[520px] text-left text-xs">
+        <thead className="bg-secondary/60 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <tr>
+            <th className="px-3 py-2 font-semibold">Aspect</th>
+            <th className="px-3 py-2 font-semibold">Value</th>
+            <th className="px-3 py-2 font-semibold">Status</th>
+            <th className="px-3 py-2 font-semibold">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {aspects.map((a) => {
+            const st = ZONING_ASPECT_STATUS[a.status];
+            return (
+              <tr key={a.label} className="border-t border-border/60 align-top">
+                <td className="px-3 py-2 font-medium">{a.label}</td>
+                <td className="px-3 py-2">{a.value}</td>
+                <td className="px-3 py-2">
+                  <span
+                    className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${st.cls}`}
+                  >
+                    {st.label}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {a.source || "—"}
+                  {onUpload && a.status === "Additional Data Needed" && (
+                    <label className="ml-2 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/10">
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        multiple
+                        disabled={uploading}
+                        className="hidden"
+                        onChange={(e) => {
+                          const sel = Array.from(e.target.files ?? []);
+                          if (sel.length > 0) onUpload(a.label, sel);
+                          e.target.value = "";
+                        }}
+                      />
+                      <Upload className="h-3 w-3" />
+                      {uploading ? "Uploading…" : "Upload"}
+                    </label>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Compact card visual — the 4 classification aspects as small status tiles,
+// then a Matches / Mismatch pill.
+function ZoningAspectTiles({
+  aspects,
+  matches,
+}: {
+  aspects: ModuleResultMap["zoning"]["aspects"];
+  matches: keyof typeof ZONING_STATUS;
+}) {
+  const { color, label } = ZONING_STATUS[matches];
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        {aspects.map((a) => {
+          const st = ZONING_ASPECT_STATUS[a.status];
+          return (
+            <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
+              <div className="text-[9px] uppercase leading-tight tracking-wide text-muted-foreground">
+                {a.label}
+              </div>
+              <div className="mt-1 truncate text-[11px] font-semibold">{a.value}</div>
+              <span
+                className={`mt-1 inline-block rounded-full px-1.5 py-0.5 text-[8px] font-semibold ${st.cls}`}
+              >
+                {st.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
-      <Icon className={`h-5 w-5 shrink-0 ${color}`} />
-      <div className="min-w-0 flex-1 rounded-lg bg-secondary/50 p-2.5 text-center">
-        <div className="text-[9px] uppercase tracking-wide text-muted-foreground">Typical</div>
-        <div className="truncate text-xs font-semibold">{typical || "—"}</div>
+      <div className={`mt-2 text-center text-xs font-semibold ${color}`}>{label}</div>
+    </div>
+  );
+}
+
+function ZoningImpactCol({
+  title,
+  children,
+}: {
+  title: string;
+  tone?: "success";
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-success">
+        {title}
       </div>
+      <div className="text-xs text-muted-foreground">{children}</div>
     </div>
   );
 }
@@ -6228,14 +6388,103 @@ function ModulePreviewContent({
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
       return (
-        <div className="mt-4 grid gap-3">
-          <ZoningBadge matches={d.matches} />
-          <ZoningFlow
-            matches={d.matches}
-            stated={state.propertyType}
-            typical={d.typicalClassification || undefined}
+        <div className="mt-4 grid gap-4">
+          <AnalysisPipeline
+            steps={[
+              { label: "Property & zoning data", done: true },
+              { label: "Zoning & use analyzer", done: true },
+              { label: "Alignment & impact model", done: true },
+              { label: "Zoning analysis report", current: true },
+              { label: "Apply to valuation", done: false },
+            ]}
           />
+
+          <ZoningBadge matches={d.matches} />
           <AiVerdictLine icon={m.icon} text={d.assessment} color={m.color} />
+
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-muted-foreground">Category:</span>
+            <span className="badge-soft">{d.category}</span>
+            <span className="text-muted-foreground">· Typical CAD class:</span>
+            <span className="font-medium">{d.typicalClassification || "—"}</span>
+          </div>
+
+          <ZoningClassificationTable
+            aspects={d.aspects}
+            onUpload={
+              allowEvidenceUpload
+                ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
+                : undefined
+            }
+            uploading={uploadingEvidence}
+          />
+
+          {d.discrepancies.length > 0 && (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-3">
+              <div className="text-xs font-semibold text-warning-foreground">
+                Detected discrepancies
+              </div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                A classification or zoning mismatch is a fact to explain — not, by itself, proof the
+                property is overvalued.
+              </p>
+              <ul className="mt-2 grid gap-1.5 text-xs">
+                {d.discrepancies.map((dc, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{dc.between}</span>
+                    <span className="ml-1.5 rounded-full bg-secondary px-1.5 py-0.5 text-[9px] font-semibold text-muted-foreground">
+                      {dc.confidence} confidence
+                    </span>
+                    <div className="text-muted-foreground">{dc.detail}</div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              AI Analysis &amp; Impact
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <ZoningImpactCol title="Valuation relevance" tone="success">
+                <p>{d.valuationRelevance}</p>
+              </ZoningImpactCol>
+              <ZoningImpactCol title="Possible exemptions" tone="success">
+                {d.possibleExemptions.length > 0 ? (
+                  <ul className="grid gap-1 pl-4 list-disc">
+                    {d.possibleExemptions.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>None identified from the data on file.</p>
+                )}
+              </ZoningImpactCol>
+              <ZoningImpactCol title="Evidence required" tone="success">
+                {d.evidenceRequired.length > 0 ? (
+                  <ul className="grid gap-1 pl-4 list-disc">
+                    {d.evidenceRequired.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>—</p>
+                )}
+              </ZoningImpactCol>
+            </div>
+          </div>
+
+          <div className="grid gap-2 rounded-lg bg-secondary/40 p-3 text-xs sm:grid-cols-2">
+            <div>
+              <div className="font-semibold text-foreground">Restrictions</div>
+              <p className="text-muted-foreground">{d.restrictions || "—"}</p>
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">Comparable classifications</div>
+              <p className="text-muted-foreground">{d.comparableClassifications || "—"}</p>
+            </div>
+          </div>
         </div>
       );
     }

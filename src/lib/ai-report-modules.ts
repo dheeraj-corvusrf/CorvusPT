@@ -44,6 +44,20 @@ export type ModuleAnalysisInput = {
     saleVerified?: boolean;
   }[];
   compsSubjectValue?: number | null;
+  // Only for "zoning" (Module 6) — the real CAD classification / zoning
+  // string / legal description this app actually has, plus the comps'
+  // classifications and the file names of any zoning docs the user
+  // uploaded. enforceZoningRealData in the edge function gates each of the
+  // four aspects on whether real data for it is present here. See
+  // loadModule()'s zoning branch in ai-report.tsx.
+  zoningData?: {
+    cadClassification: string | null;
+    cadZoning: string | null;
+    legalDescription: string | null;
+    subdivision: string | null;
+    comps: { classification: string | null; zoning: string | null }[];
+    uploadedDocs: string[];
+  };
   // Everything below is only for "executive" — real outputs Modules 2/3/8/9
   // already computed (never regenerated), so Module 10 can actually
   // reconcile them instead of writing a recommendation blind to the rest of
@@ -216,9 +230,42 @@ export type ModuleResultMap = {
     keyFinding: string;
     priorityScore: number;
   };
+  // Module 6 — the property's CAD Classification / Actual Use / Zoning
+  // District / Permitted Use lined up, with discrepancies kept SEPARATE from
+  // valuation relevance kept separate from the evidence that would
+  // substantiate either. Each aspect's status is server-enforced against the
+  // real data in ModuleAnalysisInput.zoningData (see enforceZoningRealData)
+  // — a mismatch the app can't actually see is never asserted.
   zoning: {
     matches: "consistent" | "inconsistent" | "uncertain";
     assessment: string;
+    category:
+      | "Office"
+      | "Retail"
+      | "Neighborhood Services"
+      | "Commercial"
+      | "Agricultural"
+      | "Rural"
+      | "Non-profit"
+      | "Other";
+    aspects: {
+      label: "CAD Classification" | "Actual Use" | "Zoning District" | "Permitted Use";
+      value: string;
+      status: "Confirmed" | "Partial Data" | "Additional Data Needed";
+      source: string;
+    }[];
+    discrepancies: {
+      between: string;
+      detail: string;
+      confidence: "High" | "Moderate" | "Low";
+    }[];
+    valuationRelevance: string;
+    possibleExemptions: string[];
+    evidenceRequired: string[];
+    restrictions: string;
+    comparableClassifications: string;
+    // Kept for backward-compat with the compact card's "Stated → Typical"
+    // flow; the AI still returns it.
     typicalClassification: string;
   };
   evidence: {

@@ -121,6 +121,20 @@ type ModulesInput = {
   // gated on anything (unlike evidenceImages) — always sent for this
   // module.
   economicLifeYears?: { min: number; max: number; typical: number } | null;
+  // Only for moduleId "zoning" (Module 6) — the real CAD classification /
+  // zoning string / legal description this app has, the comps'
+  // classifications, and the file names of any zoning docs the user
+  // uploaded. enforceZoningRealData gates each of the four aspects on
+  // whether real data for it is present here — the AI can't claim an aspect
+  // is "Confirmed" without the underlying value existing.
+  zoningData?: {
+    cadClassification: string | null;
+    cadZoning: string | null;
+    legalDescription: string | null;
+    subdivision: string | null;
+    comps: { classification: string | null; zoning: string | null }[];
+    uploadedDocs: string[];
+  };
   // Question-mode fields (see Deno.serve below) — when `question` is set, this
   // request is a Q&A follow-up, not a module-analysis request.
   question?: string;
@@ -495,6 +509,87 @@ function enforceSiteFactorRealData(
   });
 }
 
+// Module 6 (zoning) — the same honest-data enforcement as Module 4. The app
+// only really has the CAD classification (property type) and, for the
+// TrueProdigy/BIS counties, a zoning string; it can't observe actual use or
+// read a zoning ordinance. So:
+//   - CAD Classification -> "Confirmed" only if the real value exists.
+//   - Zoning District -> "Confirmed" only if a real zoning string exists.
+//   - Actual Use / Permitted Use -> never better than "Partial Data", and
+//     only that when the user uploaded a doc for it; else "Additional Data
+//     Needed".
+// If nothing real is present for any aspect, the module must not assert a
+// mismatch it can't see: force matches -> "uncertain", clear discrepancies,
+// and replace valuationRelevance with an honest "not enough data" line.
+type ZoningResult = {
+  matches: "consistent" | "inconsistent" | "uncertain";
+  aspects: {
+    label: "CAD Classification" | "Actual Use" | "Zoning District" | "Permitted Use";
+    value: string;
+    status: "Confirmed" | "Partial Data" | "Additional Data Needed";
+    source: string;
+  }[];
+  discrepancies: unknown[];
+  valuationRelevance: string;
+};
+
+function enforceZoningRealData(
+  result: ZoningResult,
+  zoningData: ModulesInput["zoningData"],
+): ZoningResult {
+  const hasClass = !!zoningData?.cadClassification?.trim();
+  const hasZoning = !!zoningData?.cadZoning?.trim();
+  const docs = (zoningData?.uploadedDocs ?? []).join(" ").toLowerCase();
+  const uploadedFor = (label: string) => {
+    if (docs.length === 0) return false;
+    if (label === "Actual Use") return /use|lease|photo|occup/.test(docs);
+    if (label === "Permitted Use") return /zon|ordinance|permit|land.?use/.test(docs);
+    return true;
+  };
+
+  const aspects = result.aspects.map((a) => {
+    if (a.label === "CAD Classification") {
+      return hasClass
+        ? { ...a, status: "Confirmed" as const, value: zoningData!.cadClassification!.trim() }
+        : { ...a, status: "Additional Data Needed" as const, source: "Upload your CAD notice" };
+    }
+    if (a.label === "Zoning District") {
+      return hasZoning
+        ? { ...a, status: "Confirmed" as const, value: zoningData!.cadZoning!.trim() }
+        : {
+            ...a,
+            status: "Additional Data Needed" as const,
+            source: "Upload a zoning letter or GIS map",
+          };
+    }
+    // Actual Use / Permitted Use
+    if (uploadedFor(a.label)) {
+      return { ...a, status: a.status === "Confirmed" ? ("Partial Data" as const) : a.status };
+    }
+    return {
+      ...a,
+      status: "Additional Data Needed" as const,
+      source:
+        a.label === "Actual Use"
+          ? "Upload photos, a lease, or use records"
+          : "Upload zoning / land-use documents",
+    };
+  });
+
+  const anyReal = aspects.some((a) => a.status !== "Additional Data Needed");
+  if (!anyReal) {
+    return {
+      ...result,
+      aspects,
+      matches: "uncertain",
+      discrepancies: [],
+      valuationRelevance:
+        "Not enough classification, zoning, or use data on file yet to judge whether there is a discrepancy or any valuation impact.",
+    };
+  }
+  return { ...result, aspects };
+}
+
 // Module 5 (improvement) — the 4 fixed building components, in a fixed
 // order. Same allow-list discipline as SITE_FACTORS: the AI can't omit or
 // invent a row, so the UI's 4-row layout is always stable.
@@ -765,18 +860,103 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
   },
   zoning: {
     instruction:
-      "Assess whether the stated property type and typical CAD classification appear consistent. " +
-      "Also state, in 2-4 words, what CAD classification would typically be expected for a property " +
-      'like this (e.g. "Commercial - Retail").',
-    schema: `{"matches": "<one of: consistent | inconsistent | uncertain>", "assessment": "<ONE short sentence, max ~18 words>", "typicalClassification": "<2-4 words>"}`,
+      "Line up this property's CAD Classification, Actual Use, Zoning District, and Permitted Use " +
+      "from the real data given (zoningData). Then, keeping THREE things strictly separate: " +
+      "(1) DETECTED DISCREPANCY — describe any mismatch BETWEEN two of the four aspects, factually, " +
+      "with a confidence level; a discrepancy is descriptive only. " +
+      "(2) VALUATION RELEVANCE — a SEPARATE judgement: does the mismatch plausibly bear on value or " +
+      "exemptions? If the impact is unclear or none, say so plainly. A zoning/classification " +
+      "mismatch is NOT by itself evidence of overvaluation — never phrase it as if it were. " +
+      "(3) EVIDENCE REQUIRED — what documents would substantiate the discrepancy or the valuation " +
+      "point (site photos, use/lease records, a zoning verification letter, permit history, etc.). " +
+      "Also: list any exemptions or special-use valuations the owner could raise with the ARB IF " +
+      "requirements are met (agricultural / open-space 1-d-1, special appraisal, non-profit, " +
+      "Freeport, pollution-control) — only where plausibly applicable, empty array otherwise; " +
+      "note any deed / easement / CC&R / development restrictions visible in the data (else say " +
+      "none were found in the data given); comment in one sentence on whether the comparable " +
+      "properties' classifications look consistent with this one; and classify this property into " +
+      "exactly one category. Never invent a zoning code, ordinance, restriction, or use not present " +
+      "in the data. For an aspect with no real value in zoningData, use \"—\" and status " +
+      '"Additional Data Needed".',
+    schema:
+      `{"matches": "<consistent | inconsistent | uncertain>", ` +
+      `"assessment": "<ONE short sentence, max ~18 words — the headline verdict>", ` +
+      `"typicalClassification": "<2-4 words, the CAD classification typically expected>", ` +
+      `"category": "<one of: Office | Retail | Neighborhood Services | Commercial | Agricultural | Rural | Non-profit | Other>", ` +
+      `"aspects": [{"label": "<CAD Classification | Actual Use | Zoning District | Permitted Use>", ` +
+      `"value": "<the real value or '—'>", "status": "<Confirmed | Partial Data | Additional Data Needed>", ` +
+      `"source": "<max ~8 words — where this came from, or what to upload>"}] (exactly these 4, in this order), ` +
+      `"discrepancies": [{"between": "<Aspect A ↔ Aspect B>", "detail": "<max ~22 words, factual, no 'therefore overvalued'>", ` +
+      `"confidence": "<High | Moderate | Low>"}] (empty array if none), ` +
+      `"valuationRelevance": "<ONE to two sentences — the SEPARATE value/exemption judgement, or 'No clear valuation impact from classification alone.'>", ` +
+      `"possibleExemptions": ["<short phrase>", ...] (empty if none), ` +
+      `"evidenceRequired": ["<short phrase>", ...], ` +
+      `"restrictions": "<one sentence on deed/easement/CC&R/development restrictions in the data, or 'None found in the data given.'>", ` +
+      `"comparableClassifications": "<ONE sentence on comp classification consistency>"}`,
     parse: (p) => {
-      const matches = typeof p.matches === "string" ? p.matches : "";
+      const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fb: T): T =>
+        typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fb;
+      const ASPECT_LABELS = [
+        "CAD Classification",
+        "Actual Use",
+        "Zoning District",
+        "Permitted Use",
+      ] as const;
+      const rawAspects = Array.isArray(p.aspects) ? p.aspects : [];
+      const aspects = ASPECT_LABELS.map((label) => {
+        const found = rawAspects.find(
+          (a): a is Record<string, unknown> =>
+            typeof a === "object" && a !== null && a.label === label,
+        );
+        return {
+          label,
+          value: str(found?.value, 80) || "—",
+          status: oneOf(
+            found?.status,
+            ["Confirmed", "Partial Data", "Additional Data Needed"] as const,
+            "Additional Data Needed",
+          ),
+          source: str(found?.source, 80),
+        };
+      });
+      const discrepancies = (Array.isArray(p.discrepancies) ? p.discrepancies : [])
+        .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
+        .map((d) => ({
+          between: str(d.between, 60),
+          detail: str(d.detail, 200),
+          confidence: oneOf(d.confidence, ["High", "Moderate", "Low"] as const, "Low"),
+        }))
+        .filter((d) => d.between.length > 0)
+        .slice(0, 4);
       return {
-        matches: (["consistent", "inconsistent", "uncertain"].includes(matches)
-          ? matches
-          : "uncertain") as "consistent" | "inconsistent" | "uncertain",
+        matches: oneOf(
+          p.matches,
+          ["consistent", "inconsistent", "uncertain"] as const,
+          "uncertain",
+        ),
         assessment: str(p.assessment, 160),
         typicalClassification: str(p.typicalClassification, 40),
+        category: oneOf(
+          p.category,
+          [
+            "Office",
+            "Retail",
+            "Neighborhood Services",
+            "Commercial",
+            "Agricultural",
+            "Rural",
+            "Non-profit",
+            "Other",
+          ] as const,
+          "Other",
+        ),
+        aspects,
+        discrepancies,
+        valuationRelevance: str(p.valuationRelevance, 400),
+        possibleExemptions: strList(p.possibleExemptions, 5, 120),
+        evidenceRequired: strList(p.evidenceRequired, 6, 120),
+        restrictions: str(p.restrictions, 300),
+        comparableClassifications: str(p.comparableClassifications, 240),
       };
     },
   },
@@ -1281,6 +1461,15 @@ Deno.serve(async (req: Request) => {
           evidenceParts.length > 0,
           Array.isArray(input.notApplicableComponents) ? input.notApplicableComponents : [],
         );
+    }
+    // Real-data enforcement for Module 6 — see enforceZoningRealData. Runs
+    // here (not in spec.parse) because only the handler has input.zoningData.
+    if (input.moduleId === "zoning") {
+      const z = enforceZoningRealData(result as ZoningResult, input.zoningData);
+      (result as ZoningResult).aspects = z.aspects;
+      (result as ZoningResult).matches = z.matches;
+      (result as ZoningResult).discrepancies = z.discrepancies;
+      (result as ZoningResult).valuationRelevance = z.valuationRelevance;
     }
     // Real-data enforcement for Module 3 — the model can only ever recommend
     // or judge a comp that was actually sent to it. Clamp every key it
