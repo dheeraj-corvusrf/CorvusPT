@@ -152,6 +152,7 @@ function Documents() {
       setUploads((prev) => prev.map((u) => (u.id === result.id ? result : u)));
       if (result.status === "done" && result.document) {
         setDocuments((prev) => [result.document!, ...prev]);
+        void handleAnalyze(result.document); // auto AI-check every new upload
       }
     }
   }
@@ -165,6 +166,7 @@ function Documents() {
     setUploads((prev) => prev.map((u) => (u.id === result.id ? result : u)));
     if (result.status === "done" && result.document) {
       setDocuments((prev) => [result.document!, ...prev]);
+      void handleAnalyze(result.document);
     }
   }
 
@@ -187,6 +189,7 @@ function Documents() {
       const result = await classifyAndUploadToProperty(user.id, property, file);
       if (result.status === "done" && result.document) {
         setDocuments((prev) => [result.document!, ...prev]);
+        void handleAnalyze(result.document);
         succeeded++;
       } else {
         failures.push(result.error ?? `${file.name} — failed`);
@@ -298,7 +301,6 @@ function Documents() {
                 onView={setViewDoc}
                 onDownload={handleDownload}
                 onDelete={handleDelete}
-                onAnalyze={handleAnalyze}
                 onAnalyzeAll={handleAnalyzeAll}
                 onRename={handleRename}
                 deletingId={deletingId}
@@ -562,7 +564,6 @@ function PropertyDocGroup({
   onView,
   onDownload,
   onDelete,
-  onAnalyze,
   onAnalyzeAll,
   onRename,
   deletingId,
@@ -575,7 +576,6 @@ function PropertyDocGroup({
   onView: (doc: DocumentRecord) => void;
   onDownload: (doc: DocumentRecord) => void;
   onDelete: (doc: DocumentRecord) => void;
-  onAnalyze: (doc: DocumentRecord) => void;
   onAnalyzeAll: (docs: DocumentRecord[]) => void;
   onRename: (doc: DocumentRecord, name: string) => void;
   deletingId: string | null;
@@ -629,7 +629,7 @@ function PropertyDocGroup({
               disabled={anyAnalyzing}
               className="btn-outline text-xs disabled:opacity-60"
             >
-              {anyAnalyzing ? "Checking…" : `Check ${unchecked.length}`}
+              {anyAnalyzing ? "Checking…" : `Check ${unchecked.length} older`}
             </button>
           )}
           {group.property && (
@@ -688,7 +688,11 @@ function PropertyDocGroup({
                         Feeds: {cat.feeds}
                       </span>
                     )}
-                    <VerdictBadge doc={doc} />
+                    {analyzing ? (
+                      <span className="badge-soft-warning">AI: checking…</span>
+                    ) : (
+                      <VerdictBadge doc={doc} />
+                    )}
                   </div>
                   {doc.aiVerdict && doc.aiVerdict !== "valid" && doc.aiNotes && (
                     <p className="text-muted-foreground mt-1 text-xs">{doc.aiNotes}</p>
@@ -707,14 +711,6 @@ function PropertyDocGroup({
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  <button
-                    onClick={() => onAnalyze(doc)}
-                    disabled={analyzing}
-                    className="btn-outline text-sm disabled:opacity-60"
-                    aria-label={`AI check ${doc.fileName}`}
-                  >
-                    {analyzing ? "Checking…" : doc.aiCheckedAt ? "Re-check" : "Check"}
-                  </button>
                   <button
                     onClick={() => onView(doc)}
                     className="btn-outline text-sm"
