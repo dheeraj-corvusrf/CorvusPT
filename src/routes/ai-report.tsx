@@ -46,6 +46,7 @@ import {
   ScatterChart,
   Scatter,
   ReferenceLine,
+  CartesianGrid,
 } from "recharts";
 import {
   readIntake,
@@ -2240,15 +2241,7 @@ function ModuleVisual({
       );
     }
     if (!incomeComputed.dataComplete) {
-      return (
-        <div>
-          <IncomeWaterfallPreview />
-          <div className="mt-2 flex items-center gap-2 text-muted-foreground">
-            <FileWarning className="h-4 w-4 shrink-0" />
-            <span className="text-xs">Upload financials to run this analysis</span>
-          </div>
-        </div>
-      );
+      return <IncomeLadderPreview cadValue={incomeComputed.cadValue ?? totalValue ?? null} />;
     }
     const aiSupports = (moduleData.income?.data as ModuleResultMap["income"] | undefined)
       ?.supportsCadValue;
@@ -5091,150 +5084,142 @@ const INCOME_DOC_KINDS = ["P&L", "Operating Statement", "Rent Roll", "Appraisal"
 // A recharts waterfall: Potential Income → −Vacancy → −Operating Expenses →
 // NOI → (÷ Cap Rate) → Indicated Value. Two stacked bars — a transparent
 // spacer that lifts each step to its running total, then the visible delta.
-function IncomeWaterfall({ c, height = 180 }: { c: IncomeApproach; height?: number }) {
-  if (!c.dataComplete || c.gpi == null || c.egi == null || c.noi == null) {
-    return (
-      <div
-        className="flex items-center justify-center rounded-lg border border-dashed border-border bg-secondary/30 px-4 text-center text-xs text-muted-foreground"
-        style={{ height }}
-      >
-        Provide the figures below to see the income waterfall.
-      </div>
-    );
-  }
+function IncomeWaterfall({
+  c,
+  height = 210,
+  compact = false,
+}: {
+  c: IncomeApproach;
+  height?: number;
+  compact?: boolean;
+}) {
+  // Caller renders the ladder preview / table for the incomplete state.
+  if (!c.dataComplete || c.gpi == null || c.egi == null || c.noi == null) return null;
   const potential = c.gpi + c.otherIncome;
   const vac = c.vacancyLoss ?? 0;
   const opex = c.operatingExpenses ?? 0;
   const indicated = c.indicatedValue;
-  const steps: { name: string; spacer: number; delta: number; fill: string; show: string }[] = [
+  // name = short axis label; base = transparent lift to the running total;
+  // delta = the visible change; show = the number printed on the bar.
+  const steps: { name: string; base: number; delta: number; fill: string; show: string }[] = [
     {
-      name: "Potential Income",
-      spacer: 0,
+      name: "Potential",
+      base: 0,
       delta: potential,
       fill: "#3b82f6",
       show: compactCurrency(potential),
     },
     {
       name: "Vacancy",
-      spacer: potential - vac,
+      base: potential - vac,
       delta: vac,
       fill: "#f87171",
       show: `−${compactCurrency(vac)}`,
     },
     {
-      name: "Operating Expenses",
-      spacer: c.noi,
+      name: "Op. Exp.",
+      base: c.noi,
       delta: opex,
       fill: "#fb923c",
       show: `−${compactCurrency(opex)}`,
     },
-    { name: "NOI", spacer: 0, delta: c.noi, fill: "#3b82f6", show: compactCurrency(c.noi) },
+    { name: "NOI", base: 0, delta: c.noi, fill: "#1d4ed8", show: compactCurrency(c.noi) },
     {
-      name: "Cap Rate",
-      spacer: 0,
+      name: `Cap ${c.capRatePct != null ? `${c.capRatePct}%` : ""}`.trim(),
+      base: 0,
       delta: 0,
       fill: "#2dd4bf",
-      show: c.capRatePct != null ? `${c.capRatePct}%` : "—",
+      show: "",
     },
     indicated != null
       ? {
-          name: "Value Indicated",
-          spacer: 0,
+          name: "Value",
+          base: 0,
           delta: indicated,
           fill: "#22c55e",
           show: compactCurrency(indicated),
         }
-      : {
-          name: "Value Indicated",
-          spacer: 0,
-          delta: 0,
-          fill: "#94a3b8",
-          show: "cap rate needed",
-        },
+      : { name: "Value", base: 0, delta: 0, fill: "#94a3b8", show: "cap rate needed" },
   ];
+  const yMax = Math.ceil(Math.max(potential, indicated ?? 0) * 1.18);
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart
         data={steps}
-        margin={{ top: 16, right: 8, left: 8, bottom: 4 }}
-        barCategoryGap="18%"
+        margin={{ top: 18, right: 8, left: 8, bottom: 4 }}
+        barCategoryGap="22%"
       >
+        <CartesianGrid vertical={false} stroke="currentColor" strokeOpacity={0.08} />
         <XAxis
           dataKey="name"
-          tick={{ fontSize: 9 }}
+          tick={{ fontSize: compact ? 9 : 10 }}
           interval={0}
           axisLine={false}
           tickLine={false}
         />
-        <YAxis hide domain={[0, Math.ceil(potential * 1.15)]} />
-        <Bar dataKey="spacer" stackId="w" fill="transparent" isAnimationActive={false} />
+        <YAxis
+          hide={compact}
+          width={compact ? 0 : 44}
+          domain={[0, yMax]}
+          tick={{ fontSize: 9 }}
+          tickFormatter={compactCurrency}
+          axisLine={false}
+          tickLine={false}
+        />
+        <Bar dataKey="base" stackId="w" fill="transparent" isAnimationActive={false} />
         <Bar dataKey="delta" stackId="w" isAnimationActive={false} radius={[2, 2, 0, 0]}>
           {steps.map((s, i) => (
             <Cell key={i} fill={s.fill} />
           ))}
-          <LabelList dataKey="show" position="top" fontSize={9} />
+          <LabelList dataKey="show" position="top" fontSize={compact ? 9 : 10} fontWeight={600} />
         </Bar>
       </BarChart>
     </ResponsiveContainer>
   );
 }
 
-// The same waterfall shape as a muted, number-free preview — shown on the
-// card before the owner has entered any figures, so the card looks like the
-// finished analysis rather than a blank. Clearly a placeholder: low opacity,
-// no values, dashed connectors.
-const INCOME_WATERFALL_PREVIEW = [
-  { label: "Potential Income", y: 6, h: 62, fill: "#3b82f6" },
-  { label: "Vacancy", y: 6, h: 9, fill: "#f87171" },
-  { label: "Operating Expenses", y: 15, h: 21, fill: "#fb923c" },
-  { label: "NOI", y: 36, h: 32, fill: "#3b82f6" },
-  { label: "Cap Rate", y: 32, h: 5, fill: "#2dd4bf" },
-  { label: "Value Indicated", y: 26, h: 42, fill: "#22c55e" },
-];
-
-function IncomeWaterfallPreview() {
-  const colW = 34;
-  const gap = 6;
-  const step = colW + gap;
-  const width = INCOME_WATERFALL_PREVIEW.length * step - gap;
+// Card empty state — before the owner has entered any figures. A readable
+// preview of the exact ladder the module computes (labels only, values
+// dashed), so it's obvious what data is needed and what comes out. The real
+// CAD value is shown for context; nothing here is estimated.
+function IncomeLadderPreview({ cadValue }: { cadValue: number | null }) {
+  const rows = [
+    "Gross Potential Income",
+    "(−) Vacancy",
+    "Effective Gross Income",
+    "(−) Operating Expenses",
+    "Net Operating Income",
+    "÷ Market Cap Rate",
+  ];
   return (
-    <svg
-      viewBox={`0 0 ${width} 84`}
-      className="w-full"
-      role="img"
-      aria-label="Income waterfall preview — provide figures to populate it"
-    >
-      {INCOME_WATERFALL_PREVIEW.map((b, i) => {
-        const x = i * step;
-        const prev = INCOME_WATERFALL_PREVIEW[i - 1];
-        return (
-          <g key={b.label} opacity={0.35}>
-            {prev && (
-              <line
-                x1={x - gap}
-                y1={prev.y}
-                x2={x}
-                y2={b.y}
-                stroke="currentColor"
-                strokeWidth={1}
-                strokeDasharray="2 2"
-                className="text-muted-foreground"
-              />
-            )}
-            <rect x={x} y={b.y} width={colW} height={b.h} rx={2} fill={b.fill} />
-            <text
-              x={x + colW / 2}
-              y={80}
-              textAnchor="middle"
-              className="fill-muted-foreground"
-              style={{ fontSize: 6 }}
-            >
-              {b.label}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+    <div className="grid gap-2">
+      <div className="rounded-lg border border-dashed border-border p-3">
+        <div className="grid gap-1 text-xs text-muted-foreground">
+          {rows.map((r) => (
+            <div key={r} className="flex items-center justify-between">
+              <span>{r}</span>
+              <span className="tabular-nums">—</span>
+            </div>
+          ))}
+          <div className="mt-1 flex items-center justify-between border-t border-border/60 pt-1.5 text-sm font-semibold text-foreground">
+            <span>Indicated Value</span>
+            <span className="tabular-nums">—</span>
+          </div>
+        </div>
+        {cadValue != null && (
+          <div className="mt-2 flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Current CAD value</span>
+            <span className="font-semibold tabular-nums text-foreground">
+              {compactCurrency(cadValue)}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <FileWarning className="h-4 w-4 shrink-0" />
+        <span className="text-xs">Add a P&amp;L, rent roll, or appraisal to run this</span>
+      </div>
+    </div>
   );
 }
 
@@ -5297,7 +5282,7 @@ function IncomeCardVisual({
 }) {
   return (
     <div>
-      <IncomeWaterfall c={computed} height={120} />
+      <IncomeWaterfall c={computed} height={130} compact />
       <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
         <div className="rounded-lg bg-accent/10 p-2 text-center">
           <div className="text-[9px] font-semibold uppercase tracking-wide text-accent">
@@ -5800,7 +5785,14 @@ function IncomeWorkspace({
       />
 
       <IncomeApproachTable c={computed} />
-      <IncomeWaterfall c={computed} />
+      {computed.dataComplete && (
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Income Waterfall
+          </div>
+          <IncomeWaterfall c={computed} />
+        </div>
+      )}
       <IncomeValueComparison computed={computed} compsRange={compsRange} supports={supports} />
 
       {aiLoading && <LoadingLine text="Modeling the income approach…" className="text-sm" />}
