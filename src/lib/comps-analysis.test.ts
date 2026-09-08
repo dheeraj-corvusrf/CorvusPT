@@ -92,4 +92,60 @@ describe("computeComparableStats", () => {
     expect(stats.ranked).toEqual([]);
     expect(stats.indicated).toBeNull();
   });
+
+  it("gives every ranked comp a stable key", () => {
+    const stats = computeComparableStats(
+      subject,
+      [comp({ pid: 2, marketValue: 480000 }), comp({ pid: 3, marketValue: 470000 })],
+      500000,
+    );
+    expect(stats.ranked.map((r) => r.key).sort()).toEqual(["2", "3"]);
+  });
+
+  it("drops an excluded comp from the indicated value but keeps it in ranked (flagged)", () => {
+    const comps = [
+      comp({ pid: 2, marketValue: 480000, legalAcreage: 0.3 }),
+      comp({ pid: 3, marketValue: 470000, legalAcreage: 0.3 }),
+      comp({ pid: 4, marketValue: 460000, legalAcreage: 0.3 }),
+      comp({ pid: 5, marketValue: 200000, legalAcreage: 0.3 }),
+    ];
+    const withOutlier = computeComparableStats(subject, comps, 500000);
+    const withoutOutlier = computeComparableStats(subject, comps, 500000, {
+      excludedKeys: new Set(["5"]),
+    });
+    expect(withoutOutlier.indicated?.min).toBeGreaterThan(withOutlier.indicated!.min);
+    // still present in ranked, marked excluded, and out of `usable`-driven math
+    const excludedRow = withoutOutlier.ranked.find((r) => r.key === "5");
+    expect(excludedRow?.excluded).toBe(true);
+  });
+
+  it("merges a user-added comp into the pool and ranks it", () => {
+    const stats = computeComparableStats(
+      subject,
+      [comp({ pid: 2, marketValue: 480000, legalAcreage: 0.3 })],
+      500000,
+      {
+        extraComps: [
+          {
+            key: "user:abc",
+            address: "9 Added Ln",
+            latitude: 33.05,
+            longitude: -96.75,
+            salePrice: 490000,
+            saleDate: "2026-01-01",
+            landSqft: 13068, // ~0.3 acre
+            buildingSqft: 2000,
+            source: "Closing statement",
+            saleVerified: true,
+          },
+        ],
+      },
+    );
+    const added = stats.ranked.find((r) => r.key === "user:abc");
+    expect(added).toBeDefined();
+    expect(added?.userAdded).toBe(true);
+    expect(added?.pricePerSqft).toBe(245); // 490000 / 2000
+    // the added comp counts toward the usable pool (2 of 3 needed here)
+    expect(stats.ranked.filter((r) => r.marketValue != null && !r.excluded)).toHaveLength(2);
+  });
 });

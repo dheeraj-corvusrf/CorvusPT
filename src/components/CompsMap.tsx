@@ -16,7 +16,14 @@ export type CompProperty = {
   // presentational map.
   distanceMi?: number;
   similarity?: number;
+  // Marker styling for Module 3: an assessed-value CAD comp, a user-added
+  // comp with a verified sale (from an uploaded document), or a user-added
+  // comp whose sale price is unverified. Defaults to "assessed".
+  kind?: CompMarkerKind;
+  excluded?: boolean;
 };
+
+export type CompMarkerKind = "assessed" | "sale-verified" | "sale-unverified";
 
 // Leaflet touches `window` as soon as its module is evaluated (confirmed live via
 // a prerender crash: "ReferenceError: window is not defined" inside
@@ -100,7 +107,16 @@ function CompsMapInner({
 }) {
   const { L, MapContainer, TileLayer, Marker, Popup, useMap } = mods;
   const subjectIcon = dotIcon(L, "var(--accent)", 20);
-  const compIcon = dotIcon(L, "var(--success)", 12);
+  // assessed = CAD value comp (neutral), sale-verified = real uploaded sale
+  // (success green), sale-unverified = user-added, price not confirmed (amber).
+  const MARKER_COLOR: Record<CompMarkerKind, string> = {
+    assessed: "var(--muted-foreground)",
+    "sale-verified": "var(--success)",
+    "sale-unverified": "var(--warning)",
+  };
+  const iconFor = (kind: CompMarkerKind | undefined, excluded: boolean | undefined) =>
+    dotIcon(L, excluded ? "var(--border)" : MARKER_COLOR[kind ?? "assessed"], excluded ? 9 : 12);
+  const hasSaleData = comps.some((c) => c.kind === "sale-verified" || c.kind === "sale-unverified");
 
   function FitBounds({ points }: { points: Array<[number, number]> }) {
     const map = useMap();
@@ -118,61 +134,99 @@ function CompsMapInner({
   ];
 
   return (
-    <div className="mt-3 overflow-hidden rounded-lg border border-border" style={{ height: 280 }}>
-      <MapContainer
-        center={center}
-        zoom={16}
-        scrollWheelZoom={false}
-        style={{ height: "100%", width: "100%" }}
-      >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-        <FitBounds points={allPoints} />
-        <Marker position={center} icon={subjectIcon}>
-          <Popup>
-            <strong>Subject Property</strong>
-            <br />
-            {subject.address}
-            {subject.marketValue != null && (
-              <>
-                <br />
-                {currency(subject.marketValue)}
-              </>
-            )}
-          </Popup>
-        </Marker>
-        {comps.map((c) => (
-          <Marker key={c.pid} position={[c.latitude, c.longitude]} icon={compIcon}>
+    <div className="mt-3">
+      <div className="overflow-hidden rounded-lg border border-border" style={{ height: 280 }}>
+        <MapContainer
+          center={center}
+          zoom={16}
+          scrollWheelZoom={false}
+          style={{ height: "100%", width: "100%" }}
+        >
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+          <FitBounds points={allPoints} />
+          <Marker position={center} icon={subjectIcon}>
             <Popup>
-              {c.address}
-              {c.marketValue != null && (
+              <strong>Subject Property</strong>
+              <br />
+              {subject.address}
+              {subject.marketValue != null && (
                 <>
                   <br />
-                  {currency(c.marketValue)}
-                </>
-              )}
-              {(c.distanceMi != null || c.similarity != null) && (
-                <>
-                  <br />
-                  <span className="text-xs text-muted-foreground">
-                    {c.distanceMi != null && `${c.distanceMi.toFixed(2)} mi`}
-                    {c.distanceMi != null && c.similarity != null && " · "}
-                    {c.similarity != null && `${c.similarity}/100 relevance`}
-                  </span>
-                </>
-              )}
-              {c.ownerName && (
-                <>
-                  <br />
-                  <span className="text-xs text-muted-foreground">{c.ownerName}</span>
+                  {currency(subject.marketValue)}
                 </>
               )}
             </Popup>
           </Marker>
-        ))}
-      </MapContainer>
+          {comps.map((c, i) => (
+            <Marker
+              key={c.pid || `comp-${i}`}
+              position={[c.latitude, c.longitude]}
+              icon={iconFor(c.kind, c.excluded)}
+            >
+              <Popup>
+                {c.address}
+                {c.kind === "sale-unverified" && (
+                  <>
+                    <br />
+                    <span className="text-xs text-muted-foreground">Sale Price Not Verified</span>
+                  </>
+                )}
+                {c.marketValue != null && (
+                  <>
+                    <br />
+                    {currency(c.marketValue)}
+                    {c.kind === "assessed" && (
+                      <span className="text-xs text-muted-foreground"> assessed</span>
+                    )}
+                  </>
+                )}
+                {(c.distanceMi != null || c.similarity != null) && (
+                  <>
+                    <br />
+                    <span className="text-xs text-muted-foreground">
+                      {c.distanceMi != null && `${c.distanceMi.toFixed(2)} mi`}
+                      {c.distanceMi != null && c.similarity != null && " · "}
+                      {c.similarity != null && `${c.similarity}/100 relevance`}
+                    </span>
+                  </>
+                )}
+                {c.ownerName && (
+                  <>
+                    <br />
+                    <span className="text-xs text-muted-foreground">{c.ownerName}</span>
+                  </>
+                )}
+              </Popup>
+            </Marker>
+          ))}
+        </MapContainer>
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        <LegendDot color="var(--accent)" /> Subject
+        {hasSaleData ? (
+          <>
+            <LegendDot color="var(--success)" /> Verified sale
+            <LegendDot color="var(--warning)" /> Sale not verified
+            <LegendDot color="var(--muted-foreground)" /> Assessed value
+          </>
+        ) : (
+          <>
+            <LegendDot color="var(--muted-foreground)" /> Comparable (assessed value)
+          </>
+        )}
+      </div>
     </div>
+  );
+}
+
+function LegendDot({ color }: { color: string }) {
+  return (
+    <span
+      className="inline-block h-2 w-2 shrink-0 rounded-full"
+      style={{ backgroundColor: color, border: "1px solid white" }}
+    />
   );
 }

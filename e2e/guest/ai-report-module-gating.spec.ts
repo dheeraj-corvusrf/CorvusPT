@@ -55,6 +55,11 @@ test("unsubscribed guest sees free preview on modules 1-3 and a subscription gat
   // clickable colored insight band). One "Open" per free-preview module.
   await expect(page.getByRole("button", { name: "View preview" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Open", exact: true })).toHaveCount(3);
+
+  // …and that link opens the module's preview modal. Wait for the eager
+  // module loads to settle first — the cards re-render as each resolves, and
+  // clicking mid-re-render detaches the node (flaky otherwise).
+  await page.waitForLoadState("networkidle");
   await page.getByRole("button", { name: "Open", exact: true }).first().click();
   await expect(page.getByRole("button", { name: "Close" })).toBeVisible();
 });

@@ -1,4 +1,5 @@
 import { invokeEdgeFunction } from "./edge-functions";
+import { supabase } from "./supabase";
 
 // Display copy of the CorvusPT Service Agreement. The STORED text on
 // acceptance comes from the server (supabase/functions/_shared/service-
@@ -106,4 +107,28 @@ export async function recordServiceAgreement(input: {
   protestId?: string | null;
 }): Promise<ServiceAgreementAcceptance> {
   return invokeEdgeFunction<ServiceAgreementAcceptance>("record-service-agreement", input);
+}
+
+// The most recent Service Agreement the signed-in owner has already accepted
+// for this property, or null. Used by ProtestAuthorizationFlow to show the
+// agreement step ONCE per property — once it's on file, the flow skips
+// straight to owner details on every later visit (RLS restricts this to the
+// caller's own rows).
+export async function getServiceAgreementAcceptance(
+  propertyId: string,
+): Promise<ServiceAgreementAcceptance | null> {
+  const { data, error } = await supabase
+    .from("service_agreement_acceptances")
+    .select("id, agreement_version, accepted_at, document_id")
+    .eq("property_id", propertyId)
+    .order("accepted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    id: data.id as string,
+    version: data.agreement_version as string,
+    acceptedAt: data.accepted_at as string,
+    documentId: (data.document_id as string | null) ?? null,
+  };
 }

@@ -125,6 +125,17 @@ import {
   WHOLE_MODULE_KEY,
   type ModuleOverride,
 } from "@/lib/module-overrides";
+import {
+  listCompSelections,
+  upsertCompSelection,
+  deleteCompSelection,
+  excludedCompKeys,
+  compSelectionsToExtraComps,
+  extractCompSale,
+  type CompSelection,
+  type CompSelectionInput,
+  type CompSaleExtraction,
+} from "@/lib/comp-selections";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { ValueHistorySection } from "@/components/ValueHistorySection";
@@ -284,6 +295,11 @@ function Report() {
   // exists (same gate as the evidence-docs effect below, since overrides
   // are keyed by property id too).
   const [overrides, setOverrides] = useState<ModuleOverride[]>([]);
+  // Module 3 (Market Value) — the user's include/exclude/add decisions for
+  // comparable sales. Loaded once per property; every mutation is optimistic
+  // (same pattern as `overrides` above) and re-runs the comps AI so its
+  // per-comp verdicts stay consistent with the set the user actually kept.
+  const [compSelections, setCompSelections] = useState<CompSelection[]>([]);
 
   useEffect(() => {
     const s = readIntake();
@@ -316,7 +332,12 @@ function Report() {
         });
       })
       .catch((err) => console.error("Could not resolve this property for protest filing:", err));
-  }, [user, state.address, state.cad, state.accountNumber]);
+    // user?.id, not the user object — a background TOKEN_REFRESHED hands us a
+    // fresh user object and would otherwise re-run this (and everything keyed
+    // on resolvedProperty) on every tab focus, briefly nulling the resolved
+    // property and remounting the protest-authorization modal mid-flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, state.address, state.cad, state.accountNumber]);
 
   useEffect(() => {
     if (!user || !resolvedProperty) return;
@@ -333,7 +354,8 @@ function Report() {
         ),
       )
       .catch((err) => console.error("Could not load uploaded evidence for this property:", err));
-  }, [user, resolvedProperty]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, resolvedProperty]);
 
   useEffect(() => {
     if (!resolvedProperty) return;
@@ -341,6 +363,61 @@ function Report() {
       .then(setOverrides)
       .catch((err) => console.error("Could not load module overrides for this property:", err));
   }, [resolvedProperty]);
+
+  useEffect(() => {
+    if (!resolvedProperty) return;
+    listCompSelections(resolvedProperty.id)
+      .then(setCompSelections)
+      .catch((err) => console.error("Could not load comp selections for this property:", err));
+  }, [resolvedProperty]);
+
+  // Include/exclude a comp, or save a hand-added / document-extracted comp.
+  // Optimistic local update, then re-run Module 3's AI so recommendedKeys /
+  // perComp / protestRecommendation reflect the new set.
+  async function saveCompSelection(sel: CompSelectionInput) {
+    if (!user || !resolvedProperty) return;
+    setCompSelections((prev) => [
+      ...prev.filter((s) => s.compKey !== sel.compKey),
+      {
+        compKey: sel.compKey,
+        action: sel.action,
+        address: sel.address ?? null,
+        latitude: sel.latitude ?? null,
+        longitude: sel.longitude ?? null,
+        salePrice: sel.salePrice ?? null,
+        saleDate: sel.saleDate ?? null,
+        landSqft: sel.landSqft ?? null,
+        buildingSqft: sel.buildingSqft ?? null,
+        source: sel.source ?? null,
+        notes: sel.notes ?? null,
+        saleVerified: sel.saleVerified ?? false,
+        sourceDocumentId: sel.sourceDocumentId ?? null,
+      },
+    ]);
+    try {
+      await upsertCompSelection(user.id, resolvedProperty.id, sel);
+      loadModule("comps", { force: true });
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      listCompSelections(resolvedProperty.id)
+        .then(setCompSelections)
+        .catch(() => {});
+    }
+  }
+
+  async function removeCompSelection(compKey: string) {
+    if (!resolvedProperty) return;
+    setCompSelections((prev) => prev.filter((s) => s.compKey !== compKey));
+    try {
+      await deleteCompSelection(resolvedProperty.id, compKey);
+      loadModule("comps", { force: true });
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      listCompSelections(resolvedProperty.id)
+        .then(setCompSelections)
+        .catch(() => {});
+    }
+  }
 
   // Marks a module (itemKey omitted) or a specific site-factor/building-
   // component (itemKey set) as not applicable — persists it, updates local
@@ -552,6 +629,29 @@ function Report() {
     }
   }
 
+  // Module 3 — upload one sale document (closing statement / appraisal /
+  // contract), read it with extract-comp-sale, and hand the pulled figures
+  // back to AddCompForm so the user can confirm them before the comp is
+  // saved as verified. Tagged "Comp Sale Evidence" so it's filterable in
+  // Documents but kept out of the protest-evidence packet.
+  async function extractCompSaleFromFile(file: File): Promise<CompSaleExtraction | null> {
+    if (!user) return null;
+    const property = await ensureProperty();
+    if (!property) {
+      toast.error("Could not save this property. Please try again.");
+      return null;
+    }
+    if (file.size > UPLOAD_LIMITS.maxFileBytes) {
+      toast.error(
+        `${file.name} exceeds ${Math.round(UPLOAD_LIMITS.maxFileBytes / (1024 * 1024))} MB.`,
+      );
+      return null;
+    }
+    const doc = await uploadDocument(user.id, property.id, file, "Comp Sale Evidence");
+    setEvidenceDocs((prev) => [...prev, doc]);
+    return await extractCompSale(doc.id);
+  }
+
   // Free-text fallback for Module 2's per-strategy evidence gate (see
   // StrategyDetail) — persisted the same way the rest of intake state is, via
   // sessionStorage, so it survives a refresh but never leaves the browser.
@@ -668,25 +768,34 @@ function Report() {
       // Grounds the Market Value module's guidance in the real comps already
       // fetched for this property (median/range/count) instead of generic
       // advice — same real signal, same helper, as the Strategy module above.
-      // Also sends the real top-5-by-similarity comps (same computation the
-      // modal itself renders — see computeComparableStats in
-      // comps-analysis.ts) so recommendedUse can name specific real
-      // properties instead of speaking only in generalities.
+      // Sends every ranked comp (same computation the modal renders — see
+      // computeComparableStats) with a stable key + the user's own
+      // exclude marks and any hand-added comps, so the model can recommend
+      // the strongest 3-5 and judge each one against the real numbers.
       if (id === "comps") {
         input.compsSummary = buildCompsSummary(compsMap.data);
         const stats = computeComparableStats(
           compsMap.data?.subject ?? null,
           compsMap.data?.comps ?? [],
           state.totalValue,
+          {
+            excludedKeys: excludedCompKeys(compSelections),
+            extraComps: compSelectionsToExtraComps(compSelections),
+          },
         );
         if (stats.ranked.length > 0) {
-          input.topComps = stats.ranked.slice(0, 5).map((c) => ({
+          input.topComps = stats.ranked.slice(0, 25).map((c) => ({
+            key: c.key,
             address: c.address || `Property #${c.pid}`,
             distanceMi: c.distanceMi,
             marketValue: c.marketValue,
             similarity: c.similarity,
+            excluded: c.excluded,
+            userAdded: c.userAdded,
+            saleVerified: c.saleVerified ?? undefined,
           }));
         }
+        input.compsSubjectValue = stats.subjectValue;
       }
 
       // Module 4's real point GIS facts, when the sequencing effect above
@@ -965,7 +1074,8 @@ function Report() {
       })
       .catch(() => setHasFullAccess(false))
       .finally(() => setBillingChecked(true));
-  }, [user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Per-property access for owner_managed/corvusrf_managed — confirmed live
   // bug this replaces: the previous version only ever set hasFullAccess to
@@ -1498,6 +1608,10 @@ function Report() {
                 overrides={overrides}
                 onMarkNotApplicable={() => {}}
                 onClearNotApplicable={() => {}}
+                compSelections={compSelections}
+                onSaveCompSelection={() => {}}
+                onRemoveCompSelection={() => {}}
+                onExtractCompSale={async () => null}
               />
             </div>
           ));
@@ -1548,6 +1662,10 @@ function Report() {
             overrides={overrides}
             onMarkNotApplicable={markNotApplicable}
             onClearNotApplicable={clearNotApplicable}
+            compSelections={compSelections}
+            onSaveCompSelection={saveCompSelection}
+            onRemoveCompSelection={removeCompSelection}
+            onExtractCompSale={extractCompSaleFromFile}
           />
           <div className="mt-6 flex gap-2 justify-end">
             <button onClick={() => setOpenId(null)} className="btn-outline">
@@ -2778,16 +2896,39 @@ function valuePerAcre(marketValue?: number | null, acreage?: number | null): num
 // Real per-comp comparison table — Property / Last Transfer / Land Size /
 // Assessed Value / $ per Acre / Distance / Similarity, all real fields (see
 // comps-analysis.ts). Each row expands on click (not hover, so it works on
-// touch too) rather than a tooltip, same pattern as Module 2's StrategyDetail.
-function ComparableTable({ ranked, cad }: { ranked: RankedComp[]; cad?: string }) {
-  const [expandedPid, setExpandedPid] = useState<number | null>(null);
+// touch too). When `onToggleExclude` is passed (the live modal, not the
+// printable report) each row gets a Keep checkbox and the AI's per-comp
+// verdict; excluded comps render struck through and are already out of the
+// value math (computeComparableStats drops them).
+type PerCompVerdict = { key: string; verdict: "use" | "exclude"; reason: string };
+function ComparableTable({
+  ranked,
+  cad,
+  perComp,
+  recommendedKeys,
+  onToggleExclude,
+  onRemove,
+}: {
+  ranked: RankedComp[];
+  cad?: string;
+  perComp?: Map<string, PerCompVerdict>;
+  recommendedKeys?: Set<string>;
+  onToggleExclude?: (comp: RankedComp, exclude: boolean) => void;
+  onRemove?: (comp: RankedComp) => void;
+}) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
   if (ranked.length === 0) return null;
+  const interactive = !!onToggleExclude;
+  const showAi = !!perComp && perComp.size > 0;
+  const colCount = 7 + (interactive ? 1 : 0) + (showAi ? 1 : 0);
   return (
     <div className="mt-3 overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[640px] text-left text-xs">
         <thead className="bg-secondary/60 text-[10px] uppercase tracking-wide text-muted-foreground">
           <tr>
+            {interactive && <th className="px-3 py-2 font-semibold">Keep</th>}
             <th className="px-3 py-2 font-semibold">Property</th>
+            {showAi && <th className="px-3 py-2 font-semibold">AI</th>}
             <th className="px-3 py-2 font-semibold">Last Transfer</th>
             <th className="px-3 py-2 font-semibold">Land Size</th>
             <th className="px-3 py-2 font-semibold">Assessed Value</th>
@@ -2798,25 +2939,67 @@ function ComparableTable({ ranked, cad }: { ranked: RankedComp[]; cad?: string }
         </thead>
         <tbody>
           {ranked.map((c) => {
-            const expanded = expandedPid === c.pid;
+            const expanded = expandedKey === c.key;
             const perAcre = valuePerAcre(c.marketValue, c.legalAcreage);
+            const pc = perComp?.get(c.key);
+            const recommended = recommendedKeys?.has(c.key);
             return (
-              <Fragment key={c.pid}>
+              <Fragment key={c.key}>
                 <tr
-                  onClick={() => setExpandedPid(expanded ? null : c.pid)}
-                  className="cursor-pointer border-t border-border/60 hover:bg-secondary/40"
+                  onClick={() => setExpandedKey(expanded ? null : c.key)}
+                  className={`cursor-pointer border-t border-border/60 hover:bg-secondary/40 ${
+                    c.excluded ? "text-muted-foreground line-through" : ""
+                  }`}
                 >
+                  {interactive && (
+                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={!c.excluded}
+                        onChange={(e) => onToggleExclude!(c, !e.target.checked)}
+                        aria-label={c.excluded ? "Include this comp" : "Exclude this comp"}
+                      />
+                    </td>
+                  )}
                   <td className="max-w-[10rem] truncate px-3 py-2">
                     {c.address || `Property #${c.pid}`}
+                    {c.userAdded && (
+                      <span className="ml-1 rounded bg-secondary px-1 py-0.5 text-[9px] font-semibold text-muted-foreground no-underline">
+                        Added by you
+                      </span>
+                    )}
                   </td>
+                  {showAi && (
+                    <td className="px-3 py-2">
+                      {recommended ? (
+                        <span className="whitespace-nowrap rounded-full bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold text-success no-underline">
+                          Recommended
+                        </span>
+                      ) : pc?.verdict === "exclude" ? (
+                        <span className="whitespace-nowrap rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground no-underline">
+                          Exclude
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground">—</span>
+                      )}
+                    </td>
+                  )}
                   <td className="px-3 py-2 text-muted-foreground">
-                    {formatTransferDate(c.lastTransferDt) ?? "—"}
+                    {c.userAdded && c.saleDate
+                      ? c.saleDate
+                      : (formatTransferDate(c.lastTransferDt) ?? "—")}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">
                     {formatAcres(c.legalAcreage) ?? "—"}
                   </td>
                   <td className="px-3 py-2">
-                    {c.marketValue != null ? compactCurrency(c.marketValue) : "—"}
+                    {c.userAdded
+                      ? c.salePrice != null
+                        ? compactCurrency(c.salePrice)
+                        : "Not verified"
+                      : c.marketValue != null
+                        ? compactCurrency(c.marketValue)
+                        : "—"}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">
                     {perAcre != null ? compactCurrency(perAcre) : "—"}
@@ -2831,41 +3014,89 @@ function ComparableTable({ ranked, cad }: { ranked: RankedComp[]; cad?: string }
                 </tr>
                 {expanded && (
                   <tr className="border-t border-border/60 bg-secondary/30">
-                    <td colSpan={7} className="px-3 py-3">
+                    <td colSpan={colCount} className="px-3 py-3">
                       <div className="grid gap-1.5 text-xs text-muted-foreground sm:grid-cols-2">
-                        <div>Owner: {c.ownerName ?? "Not on file"}</div>
-                        <div>Land value: {c.landValue != null ? currency(c.landValue) : "—"}</div>
-                        <div>
-                          Improvement value:{" "}
-                          {c.improvementValue != null ? currency(c.improvementValue) : "—"}
-                        </div>
-                        <div>
-                          Appraised value:{" "}
-                          {c.appraisedValue != null ? currency(c.appraisedValue) : "—"}
-                        </div>
-                        {c.zoning && <div>Zoning: {c.zoning}</div>}
-                        <div>
-                          Source:{" "}
-                          {(() => {
-                            const url = cad
-                              ? getCadRecordUrl({ cad, accountNumber: String(c.pid) })
-                              : null;
-                            if (!url) return c.pid ? `CAD record #${c.pid}` : "CAD public record";
-                            return (
-                              <a
-                                href={url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="text-accent underline underline-offset-2"
-                              >
-                                {isDirectCadRecordUrl(cad!)
-                                  ? `View CAD record #${c.pid}`
-                                  : `Search ${cad} for #${c.pid}`}
-                              </a>
-                            );
-                          })()}
-                        </div>
+                        {pc?.reason && (
+                          <div className="sm:col-span-2">
+                            <span className="font-semibold text-foreground">AI: </span>
+                            {pc.verdict === "exclude" ? "Suggest excluding — " : "Suggest using — "}
+                            {pc.reason}
+                          </div>
+                        )}
+                        {c.userAdded ? (
+                          <>
+                            <div>
+                              Sale price:{" "}
+                              {c.salePrice != null
+                                ? currency(c.salePrice)
+                                : "Sale Price Not Verified"}
+                            </div>
+                            <div>Sale date: {c.saleDate ?? "—"}</div>
+                            <div>
+                              Building SF:{" "}
+                              {c.buildingSqft != null ? c.buildingSqft.toLocaleString() : "—"}
+                            </div>
+                            <div>
+                              $/SF: {c.pricePerSqft != null ? currency(c.pricePerSqft) : "—"}
+                            </div>
+                            <div>
+                              Verified: {c.saleVerified ? "Yes — from uploaded document" : "No"}
+                            </div>
+                            {onRemove && (
+                              <div className="sm:col-span-2">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onRemove(c);
+                                  }}
+                                  className="text-destructive underline underline-offset-2"
+                                >
+                                  Remove this comp
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div>Owner: {c.ownerName ?? "Not on file"}</div>
+                            <div>
+                              Land value: {c.landValue != null ? currency(c.landValue) : "—"}
+                            </div>
+                            <div>
+                              Improvement value:{" "}
+                              {c.improvementValue != null ? currency(c.improvementValue) : "—"}
+                            </div>
+                            <div>
+                              Appraised value:{" "}
+                              {c.appraisedValue != null ? currency(c.appraisedValue) : "—"}
+                            </div>
+                            <div>Sale price: Sale Price Not Verified (assessed-value comp)</div>
+                            {c.zoning && <div>Zoning: {c.zoning}</div>}
+                            <div>
+                              Source:{" "}
+                              {(() => {
+                                const url = cad
+                                  ? getCadRecordUrl({ cad, accountNumber: String(c.pid) })
+                                  : null;
+                                if (!url)
+                                  return c.pid ? `CAD record #${c.pid}` : "CAD public record";
+                                return (
+                                  <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-accent underline underline-offset-2"
+                                  >
+                                    {isDirectCadRecordUrl(cad!)
+                                      ? `View CAD record #${c.pid}`
+                                      : `Search ${cad} for #${c.pid}`}
+                                  </a>
+                                );
+                              })()}
+                            </div>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -2875,6 +3106,263 @@ function ComparableTable({ ranked, cad }: { ranked: RankedComp[]; cad?: string }
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// The 10-step workflow ribbon at the top of Module 3 — purely a progress
+// cue for the sequence the user described (Find -> Verify -> Rank -> Select
+// -> Compare -> Adjust -> Calculate -> vs CAD -> Confidence -> Recommendation).
+function CompsWorkflowRibbon({
+  hasComps,
+  hasSelection,
+  hasIndicated,
+  hasRecommendation,
+}: {
+  hasComps: boolean;
+  hasSelection: boolean;
+  hasIndicated: boolean;
+  hasRecommendation: boolean;
+}) {
+  const steps = [
+    "Find data",
+    "Verify",
+    "Rank",
+    "Select",
+    "Compare",
+    "Adjust",
+    "Calculate value",
+    "vs CAD",
+    "Confidence",
+    "Recommendation",
+  ];
+  // Furthest step reached — a coarse cue, not a strict state machine.
+  const reached = !hasComps ? 0 : hasRecommendation ? 9 : hasIndicated ? 7 : hasSelection ? 3 : 2;
+  return (
+    <div className="flex gap-1 overflow-x-auto pb-1 text-[10px]">
+      {steps.map((s, i) => (
+        <div
+          key={s}
+          className={`shrink-0 rounded-full px-2 py-0.5 font-medium ${
+            i <= reached ? "bg-accent/15 text-accent" : "bg-secondary/60 text-muted-foreground"
+          }`}
+        >
+          {i + 1}. {s}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// "Add a comparable" — a comp the user knows about that the CAD feed didn't
+// surface (or a real sale from a document). Address is geocoded on submit so
+// it lands on the map relative to the subject; sale figures are optional and
+// stay unverified until backed by an uploaded document (Phase C).
+function AddCompForm({
+  onAdd,
+  onExtractSale,
+}: {
+  onAdd: (input: CompSelectionInput) => void;
+  onExtractSale: (file: File) => Promise<CompSaleExtraction | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [address, setAddress] = useState("");
+  const [salePrice, setSalePrice] = useState("");
+  const [saleDate, setSaleDate] = useState("");
+  const [buildingSqft, setBuildingSqft] = useState("");
+  const [landSqft, setLandSqft] = useState("");
+  const [source, setSource] = useState("");
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Set once a sale document has been read — the comp then saves as verified
+  // and links back to that document.
+  const [sourceDocumentId, setSourceDocumentId] = useState<string | null>(null);
+  const [extractNote, setExtractNote] = useState<string | null>(null);
+
+  const num = (s: string) => {
+    const n = Number(s.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  function reset() {
+    setAddress("");
+    setSalePrice("");
+    setSaleDate("");
+    setBuildingSqft("");
+    setLandSqft("");
+    setSource("");
+    setNotes("");
+    setSourceDocumentId(null);
+    setExtractNote(null);
+    setError(null);
+  }
+
+  async function handleDoc(file: File) {
+    setExtracting(true);
+    setError(null);
+    setExtractNote(null);
+    try {
+      const r = await onExtractSale(file);
+      if (!r) {
+        setError("Couldn't read that document. Enter the details by hand instead.");
+        return;
+      }
+      if (r.address) setAddress((prev) => prev || r.address!);
+      if (r.salePrice != null) setSalePrice(String(r.salePrice));
+      if (r.saleDate) setSaleDate(r.saleDate);
+      if (r.buildingSqft != null) setBuildingSqft(String(r.buildingSqft));
+      if (r.landSqft != null) setLandSqft(String(r.landSqft));
+      if (r.source) setSource((prev) => prev || r.source!);
+      if (r.salePrice != null) {
+        setSourceDocumentId(r.documentId);
+        setExtractNote(
+          `Read from your document${r.notes ? ` — ${r.notes}` : ""}. Review, then add.`,
+        );
+      } else {
+        setSourceDocumentId(null);
+        setExtractNote(
+          `No sale price found in that document${r.notes ? ` — ${r.notes}` : ""}. Enter it by hand.`,
+        );
+      }
+    } catch {
+      setError("Couldn't read that document. Enter the details by hand instead.");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  async function submit() {
+    if (!address.trim()) {
+      setError("Enter the comparable's address.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const point = await geocodeAddress(address.trim());
+      if (!point) {
+        setError("Couldn't locate that address. Check the spelling or add city + ZIP.");
+        return;
+      }
+      onAdd({
+        compKey: `user:${crypto.randomUUID()}`,
+        action: "include",
+        address: address.trim(),
+        latitude: point.lat,
+        longitude: point.lng,
+        salePrice: num(salePrice),
+        saleDate: saleDate || null,
+        buildingSqft: num(buildingSqft),
+        landSqft: num(landSqft),
+        source: source.trim() || null,
+        notes: notes.trim() || null,
+        saleVerified: !!sourceDocumentId && num(salePrice) != null,
+        sourceDocumentId,
+      });
+      setOpen(false);
+      reset();
+    } catch {
+      setError("Couldn't add that comp. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="inline-flex w-fit items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/10"
+      >
+        <Upload className="h-3.5 w-3.5" /> Add a comparable
+      </button>
+    );
+  }
+
+  const field = "rounded-md border border-input bg-background px-2.5 py-1.5 text-xs";
+  return (
+    <div className="grid gap-2 rounded-lg border border-border p-3">
+      <div className="text-xs font-semibold">Add a comparable</div>
+      <label className="inline-flex w-fit cursor-pointer items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/10">
+        <input
+          type="file"
+          accept="image/*,.pdf"
+          disabled={extracting}
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) handleDoc(f);
+            e.target.value = "";
+          }}
+        />
+        <Upload className="h-3.5 w-3.5" />
+        {extracting ? "Reading document…" : "Upload a sale document (AI reads it)"}
+      </label>
+      {extractNote && <p className="text-[11px] text-accent">{extractNote}</p>}
+      <input
+        className={field}
+        placeholder="Address (required) — street, city, ZIP"
+        value={address}
+        onChange={(e) => setAddress(e.target.value)}
+      />
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input
+          className={field}
+          placeholder="Sale price (optional)"
+          value={salePrice}
+          onChange={(e) => setSalePrice(e.target.value)}
+        />
+        <input
+          className={field}
+          type="date"
+          placeholder="Sale date"
+          value={saleDate}
+          onChange={(e) => setSaleDate(e.target.value)}
+        />
+        <input
+          className={field}
+          placeholder="Building SF (optional)"
+          value={buildingSqft}
+          onChange={(e) => setBuildingSqft(e.target.value)}
+        />
+        <input
+          className={field}
+          placeholder="Land SF (optional)"
+          value={landSqft}
+          onChange={(e) => setLandSqft(e.target.value)}
+        />
+      </div>
+      <input
+        className={field}
+        placeholder="Source (broker, appraisal, listing…) — optional"
+        value={source}
+        onChange={(e) => setSource(e.target.value)}
+      />
+      <input
+        className={field}
+        placeholder="Notes (optional)"
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+      />
+      <p className="text-[11px] text-muted-foreground">
+        Sale price stays marked “Not Verified” until backed by an uploaded closing statement or
+        appraisal.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          onClick={submit}
+          disabled={busy}
+          className="btn-primary btn-primary-hover text-xs disabled:opacity-60"
+        >
+          {busy ? "Locating…" : "Add comp"}
+        </button>
+        <button onClick={() => setOpen(false)} className="btn-outline text-xs">
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -4638,6 +5126,10 @@ function ModulePreviewContent({
   overrides,
   onMarkNotApplicable,
   onClearNotApplicable,
+  compSelections,
+  onSaveCompSelection,
+  onRemoveCompSelection,
+  onExtractCompSale,
 }: {
   m: Module;
   estimated: {
@@ -4674,6 +5166,15 @@ function ModulePreviewContent({
   overrides: ModuleOverride[];
   onMarkNotApplicable: (moduleId: string, itemKey?: string) => void;
   onClearNotApplicable: (moduleId: string, itemKey?: string) => void;
+  // Module 3 (Market Value) — the user's comp include/exclude/add decisions
+  // (see comp-selections.ts). The two callbacks are no-ops in the printable
+  // report view (allowEvidenceUpload false); interactive only in the modal.
+  compSelections: CompSelection[];
+  onSaveCompSelection: (sel: CompSelectionInput) => void;
+  onRemoveCompSelection: (compKey: string) => void;
+  // Uploads one sale document and returns the AI-extracted figures, or null
+  // (no-op in the printable report view).
+  onExtractCompSale: (file: File) => Promise<CompSaleExtraction | null>;
 }) {
   // Real AI analysis of the customer's own uploaded evidence — see Module
   // 8's "evidence" case below and analyzeEvidence() in protest-reason.ts.
@@ -4793,50 +5294,136 @@ function ModulePreviewContent({
   if (m.id === "comps") {
     const d = moduleState?.data as ModuleResultMap["comps"] | undefined;
     const map = compsMap.data;
-    const stats = computeComparableStats(map?.subject ?? null, map?.comps ?? [], state.totalValue);
+    // Interactive comp picking only in the live modal — the printable report
+    // (allowEvidenceUpload false) shows the same data read-only.
+    const compsInteractive = allowEvidenceUpload;
+    const stats = computeComparableStats(map?.subject ?? null, map?.comps ?? [], state.totalValue, {
+      excludedKeys: excludedCompKeys(compSelections),
+      extraComps: compSelectionsToExtraComps(compSelections),
+    });
     // Same real top-5-by-similarity subset used for the indicated value
     // itself (see TOP_N_FOR_INDICATED_VALUE in comps-analysis.ts) — reused
     // for the adjustments panel and value chart too, so every "top comps"
-    // view in this module means the same actual properties.
-    const usable = stats.ranked.filter((c) => c.marketValue != null);
+    // view in this module means the same actual properties. Excluded comps
+    // are already gone from computeComparableStats' `usable`.
+    const usable = stats.ranked.filter((c) => c.marketValue != null && !c.excluded);
     const topRanked = usable.slice(0, 5);
     const confidenceReasoning = comparableConfidenceReasoning(stats);
+    const perCompMap = new Map((d?.perComp ?? []).map((p) => [p.key, p]));
+    const recommendedKeys = new Set(d?.recommendedKeys ?? []);
+    const excludedCount = compSelections.filter((s) => s.action === "exclude").length;
+    // The map renders for EVERY county, not just the 4 with a comps feed —
+    // a synthetic subject from the property's own geocoded point when there
+    // are no CAD comps, so the user can still see (and, in Phase B, place)
+    // comps relative to it.
+    const mapSubject =
+      map?.subject ??
+      (siteCoords
+        ? {
+            pid: -1,
+            address: state.address ?? "This property",
+            latitude: siteCoords.lat,
+            longitude: siteCoords.lng,
+            marketValue: state.totalValue ?? null,
+            ownerName: null,
+          }
+        : null);
+    const mapComps = stats.ranked
+      .filter((c) => Number.isFinite(c.latitude) && Number.isFinite(c.longitude))
+      .map((c) => ({
+        pid: c.pid,
+        address: c.address || `Property #${c.pid}`,
+        latitude: c.latitude,
+        longitude: c.longitude,
+        marketValue: c.userAdded ? (c.salePrice ?? null) : c.marketValue,
+        ownerName: c.ownerName ?? null,
+        distanceMi: c.distanceMi,
+        similarity: c.similarity,
+        kind: c.userAdded
+          ? c.saleVerified
+            ? ("sale-verified" as const)
+            : ("sale-unverified" as const)
+          : ("assessed" as const),
+        excluded: c.excluded,
+      }));
+    const hasAnyComp = stats.ranked.length > 0;
+
+    function handleToggleExclude(comp: RankedComp, exclude: boolean) {
+      if (comp.userAdded) {
+        // A hand-added comp has no "kept but excluded" state — un-checking it
+        // removes it entirely (its data would otherwise be orphaned).
+        if (exclude) onRemoveCompSelection(comp.key);
+        return;
+      }
+      if (exclude) onSaveCompSelection({ compKey: comp.key, action: "exclude" });
+      else onRemoveCompSelection(comp.key);
+    }
     return (
       <div className="mt-4 grid gap-4">
+        <CompsWorkflowRibbon
+          hasComps={hasAnyComp}
+          hasSelection={compSelections.length > 0}
+          hasIndicated={stats.indicated != null}
+          hasRecommendation={!!d?.protestRecommendation}
+        />
+
         {stats.limitedData && (
           <div className="rounded-lg bg-warning/15 p-3 text-sm text-warning-foreground">
-            <span className="font-semibold">Limited Comparable Data.</span> Fewer than 3 comparable
-            properties with a usable assessed value were found in this subdivision — the system may
-            continue using other appraisal methods (see Protest Strategy) rather than relying on
-            this alone.
+            <span className="font-semibold">Limited Comparable Sales Data.</span> Fewer than 3
+            reliable recent commercial sales were found. The system may use alternative market
+            evidence, but will clearly distinguish it from actual sale data.
           </div>
         )}
         {compsMap.loading && (
           <div className="h-[280px] animate-pulse rounded-lg border border-border bg-secondary/40" />
         )}
-        {map?.subject && map.comps.length > 0 && (
+
+        {/* Map — every county, not just the 4 with a comps feed. Shows the
+            subject's own point even when no comps have been located yet. */}
+        {mapSubject && (
+          <div>
+            <div className="mb-1.5 text-sm font-medium">
+              {hasAnyComp
+                ? `${mapComps.length} comparable${mapComps.length === 1 ? "" : "s"} located near this property`
+                : "No comparable sales located yet"}
+            </div>
+            <CompsMap subject={mapSubject} comps={mapComps} />
+          </div>
+        )}
+
+        {compsInteractive && (
+          <AddCompForm onAdd={onSaveCompSelection} onExtractSale={onExtractCompSale} />
+        )}
+
+        {hasAnyComp && (
           <>
-            {/* 1. How AI selected these comps — real counts only. */}
+            {/* How the comp set was narrowed — real counts only. */}
             <ComparableSelectionFunnel
-              reviewed={map.comps.length}
+              reviewed={stats.ranked.length}
               qualified={usable.length}
               selected={topRanked.length}
             />
 
-            {/* 2. Map — richer popups (distance + relevance) via the same
-                ranked comps everything else here uses. */}
-            <div>
-              <div className="mb-1.5 text-sm font-medium">
-                {map.comps.length} nearby properties in the same subdivision
-              </div>
-              <CompsMap subject={map.subject} comps={stats.ranked} />
-            </div>
+            {/* Comparable table — interactive Keep toggle + AI verdict in the
+                live modal, read-only in the printable report. */}
+            <ComparableTable
+              ranked={stats.ranked}
+              cad={state.cad}
+              perComp={perCompMap}
+              recommendedKeys={recommendedKeys}
+              onToggleExclude={compsInteractive ? handleToggleExclude : undefined}
+              onRemove={compsInteractive ? (c) => onRemoveCompSelection(c.key) : undefined}
+            />
+            {excludedCount > 0 && (
+              <p className="-mt-2 text-[11px] text-muted-foreground">
+                {excludedCount} comp{excludedCount === 1 ? "" : "s"} you excluded are left out of
+                the indicated value, gap and confidence below.
+              </p>
+            )}
 
-            {/* 3. Comparable table — every ranked comp, "View Source" per row. */}
-            <ComparableTable ranked={stats.ranked} cad={state.cad} />
-
-            {/* 4. Adjustments — real per-signal deltas for the top comps. */}
-            {topRanked.length > 0 && (
+            {/* 4. Adjustments — real per-signal deltas for the top comps
+                (CAD-record signals, so gated on a real CAD subject). */}
+            {map?.subject && topRanked.length > 0 && (
               <div>
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Adjustments — How the Top Comps Differ
@@ -4971,9 +5558,10 @@ function ModulePreviewContent({
           </>
         )}
 
-        {/* 9. AI guidance + checklist + Recommended Protest Use — the one
-            genuinely AI-generated part of this module, grounded in the
-            real topComps sent from loadModule() above. */}
+        {/* AI guidance + checklist + the strongest 3-5 comps + how to use
+            them — the genuinely AI-generated part of this module, grounded
+            in the real ranked comps sent from loadModule() above and
+            clamped server-side to that set. */}
         {loading ? (
           <p className="text-sm text-muted-foreground">AI is generating this analysis…</p>
         ) : error ? (
@@ -4982,12 +5570,72 @@ function ModulePreviewContent({
           <div className="grid gap-3">
             <AiVerdictLine icon={m.icon} text={d.guidance} color={m.color} />
             <ChecklistSteps items={d.checklist} color={m.color} />
-            {d.recommendedUse && (
+
+            {recommendedKeys.size > 0 && (
               <div>
                 <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Recommended Protest Use
+                  AI-Recommended Comps ({recommendedKeys.size})
                 </div>
-                <AiVerdictLine icon={ArrowRight} text={d.recommendedUse} color={m.color} />
+                <ul className="grid gap-1 text-xs">
+                  {stats.ranked
+                    .filter((c) => recommendedKeys.has(c.key))
+                    .map((c) => {
+                      const reason = perCompMap.get(c.key)?.reason;
+                      return (
+                        <li key={c.key} className="flex items-start gap-1.5">
+                          <span className="mt-0.5 text-success">✓</span>
+                          <span>
+                            <span className="font-medium">{c.address || `Property #${c.pid}`}</span>
+                            {" — "}
+                            {c.similarity}/100 similarity
+                            {reason ? `. ${reason}` : ""}
+                          </span>
+                        </li>
+                      );
+                    })}
+                </ul>
+              </div>
+            )}
+
+            {(() => {
+              const excludeSuggestions = (d.perComp ?? []).filter(
+                (p) => p.verdict === "exclude" && !recommendedKeys.has(p.key),
+              );
+              if (excludeSuggestions.length === 0) return null;
+              const addr = (key: string) => {
+                const c = stats.ranked.find((r) => r.key === key);
+                return c?.address || `Property #${c?.pid ?? "?"}`;
+              };
+              return (
+                <div>
+                  <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Suggested Exclusions
+                  </div>
+                  <ul className="grid gap-1 text-xs text-muted-foreground">
+                    {excludeSuggestions.map((p) => (
+                      <li key={p.key} className="flex items-start gap-1.5">
+                        <span className="mt-0.5 text-warning-foreground">✕</span>
+                        <span>
+                          <span className="font-medium text-foreground">{addr(p.key)}</span>
+                          {p.reason ? ` — ${p.reason}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
+
+            {(d.protestRecommendation || d.recommendedUse) && (
+              <div>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Protest Recommendation
+                </div>
+                <AiVerdictLine
+                  icon={ArrowRight}
+                  text={d.protestRecommendation || d.recommendedUse}
+                  color={m.color}
+                />
               </div>
             )}
           </div>

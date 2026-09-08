@@ -384,7 +384,17 @@ function goToGuidanceAnchor(anchor: string) {
     window.location.href = anchor;
     return;
   }
-  document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const el = document.getElementById(anchor);
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  // Target not in the DOM yet (a section that just conditionally mounted) —
+  // try once more next frame before giving up, so the click is never a
+  // silent no-op for a purely timing reason.
+  requestAnimationFrame(() => {
+    document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 // Ambient, ongoing guidance — purely additive, sits above the existing
@@ -577,7 +587,12 @@ function PreFilingGate({
 
   return (
     <>
-      <div className="mt-5 border-t border-border pt-5">
+      {/* While the readiness check is blocked the Documents section (and its
+          own id="case-documents") isn't rendered — so Corvus Guidance's
+          "Review Notice of Protest" link would scroll to nothing. Carry the
+          id here in that case so the link lands the user on exactly what's
+          blocking them. Exactly one element ever has the id. */}
+      <div id={blocked ? "case-documents" : undefined} className="mt-5 border-t border-border pt-5">
         <PreFilingCheckList
           items={items}
           blocked={blocked}
