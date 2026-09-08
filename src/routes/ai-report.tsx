@@ -25,6 +25,7 @@ import {
   RefreshCw,
   ArrowDown,
   ChevronDown,
+  Upload,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -4306,6 +4307,11 @@ type DataRequirementRow = {
   source: string;
   usedFor: string;
   status: "Available" | "Partial" | "Not integrated";
+  // Rows where a document the owner already has would genuinely move this
+  // analysis forward — the AI can't fetch these anywhere, so surface an
+  // upload control right on the row. `documentType` tags the file so
+  // ai-report-modules picks it up for the right module.
+  userUpload?: { hint: string; documentType: string };
 };
 
 const DATA_REQUIREMENTS: DataRequirementRow[] = [
@@ -4329,6 +4335,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "CAD (same-subdivision public records)",
     usedFor: "Compares this property's valuation against similar nearby ones",
     status: "Partial",
+    userUpload: {
+      hint: "Have an appraisal, broker price opinion, or your own comp list? Upload it.",
+      documentType: "Data: Comparable Valuation",
+    },
   },
   {
     category: "Market Information",
@@ -4336,6 +4346,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "County deed records + MLS",
     usedFor: "Would show whether CAD value looks disconnected from the market",
     status: "Not integrated",
+    userUpload: {
+      hint: "Upload a closing statement, purchase contract, listing sheet, or recent appraisal.",
+      documentType: "Data: Market Information",
+    },
   },
   {
     category: "Property Characteristics",
@@ -4343,6 +4357,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "CAD improvement records + GIS",
     usedFor: "Would ensure comparisons use the right physical characteristics",
     status: "Not integrated",
+    userUpload: {
+      hint: "Upload a survey, building plans, floor plan, or an appraisal listing square footage.",
+      documentType: "Data: Property Characteristics",
+    },
   },
   {
     category: "Site Conditions",
@@ -4350,6 +4368,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "FEMA NFHL (flood zone) + USGS (elevation) — real, point-level only",
     usedFor: "Flood zone and a single elevation point; every other factor still needs upload",
     status: "Partial",
+    userUpload: {
+      hint: "Upload a survey, plat, flood determination, or photos of drainage / access / easement issues.",
+      documentType: "Data: Site Conditions",
+    },
   },
   {
     category: "Improvement Condition",
@@ -4357,6 +4379,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "User-uploaded photos/documents",
     usedFor: "Whether the building's condition supports a lower valuation",
     status: "Partial",
+    userUpload: {
+      hint: "Upload photos, an inspection report, or repair estimates for deferred maintenance.",
+      documentType: "Data: Improvement Condition",
+    },
   },
   {
     category: "Zoning / Classification",
@@ -4364,6 +4390,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "CAD record (zoning field, where populated) + stated property type",
     usedFor: "Checks whether the CAD classification looks consistent",
     status: "Partial",
+    userUpload: {
+      hint: "Upload a zoning verification letter, plat, or the legal description from your deed.",
+      documentType: "Data: Zoning / Classification",
+    },
   },
   {
     category: "Income Indicators",
@@ -4371,6 +4401,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "User-provided P&L / rent roll",
     usedFor: "Income-based valuation indicator for applicable properties",
     status: "Partial",
+    userUpload: {
+      hint: "Upload a rent roll, profit & loss statement, or the current leases.",
+      documentType: "Data: Income Indicators",
+    },
   },
   {
     category: "Existing Evidence",
@@ -4378,6 +4412,10 @@ const DATA_REQUIREMENTS: DataRequirementRow[] = [
     source: "User uploads",
     usedFor: "Strengthens or weakens the identified opportunity",
     status: "Available",
+    userUpload: {
+      hint: "Upload prior protest results, the appraisal notice, photos, leases, or surveys.",
+      documentType: "Data: Existing Evidence",
+    },
   },
   {
     category: "Data Confidence",
@@ -4406,31 +4444,70 @@ const DATA_STATUS_STYLE: Record<DataRequirementRow["status"], string> = {
 // things worth scanning at a glance); tap a row to expand it in place and
 // reveal the three detail fields stacked below, same click-to-expand
 // convention as ComparableTable's rows above.
-function DataRequirementsTable() {
+function DataRequirementsTable({
+  onUpload,
+  uploading,
+}: {
+  // When present, rows whose data the owner could supply get an Upload
+  // control. Absent for a signed-out / no-access viewer — they still see
+  // what's needed, just can't act on it here.
+  onUpload?: (files: File[], documentType: string) => void;
+  uploading?: boolean;
+}) {
   const [expanded, setExpanded] = useState<string | null>(null);
   return (
     <div className="grid gap-1.5">
       {DATA_REQUIREMENTS.map((r) => {
         const isOpen = expanded === r.category;
+        const canUpload = !!(onUpload && r.userUpload);
         return (
           <div key={r.category} className="rounded-lg border border-border">
-            <button
-              type="button"
-              onClick={() => setExpanded(isOpen ? null : r.category)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
-            >
-              <span className="text-xs font-medium">{r.category}</span>
+            <div className="flex w-full items-center justify-between gap-2 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setExpanded(isOpen ? null : r.category)}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <span className="truncate text-xs font-medium">{r.category}</span>
+              </button>
               <span className="flex shrink-0 items-center gap-2">
+                {canUpload && (
+                  <label
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/10"
+                    title={r.userUpload!.hint}
+                  >
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const selected = Array.from(e.target.files ?? []);
+                        if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
+                        e.target.value = "";
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "Uploading…" : "Upload"}
+                  </label>
+                )}
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${DATA_STATUS_STYLE[r.status]}`}
                 >
                   {r.status}
                 </span>
-                <ArrowRight
-                  className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
-                />
+                <button
+                  type="button"
+                  onClick={() => setExpanded(isOpen ? null : r.category)}
+                  aria-label={isOpen ? "Collapse" : "Expand"}
+                >
+                  <ArrowRight
+                    className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                  />
+                </button>
               </span>
-            </button>
+            </div>
             {isOpen && (
               <div className="grid gap-2 border-t border-border/60 px-3 py-2 text-xs">
                 <div>
@@ -4451,6 +4528,30 @@ function DataRequirementsTable() {
                   </div>
                   <p className="text-muted-foreground">{r.usedFor}</p>
                 </div>
+                {canUpload && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+                      Provide This Data
+                    </div>
+                    <p className="text-muted-foreground">{r.userUpload!.hint}</p>
+                    <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
+                      <input
+                        type="file"
+                        accept="image/*,.pdf"
+                        multiple
+                        disabled={uploading}
+                        className="hidden"
+                        onChange={(e) => {
+                          const selected = Array.from(e.target.files ?? []);
+                          if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
+                          e.target.value = "";
+                        }}
+                      />
+                      <Upload className="h-3.5 w-3.5" />
+                      {uploading ? "Uploading…" : "Upload document"}
+                    </label>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -4876,7 +4977,14 @@ function ModulePreviewContent({
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             AI Analysis — Data Required &amp; Sources
           </div>
-          <DataRequirementsTable />
+          <DataRequirementsTable
+            onUpload={
+              allowEvidenceUpload
+                ? (files, documentType) => onUploadEvidence(files, undefined, documentType)
+                : undefined
+            }
+            uploading={uploadingEvidence}
+          />
         </div>
 
         <div className="grid gap-4 sm:grid-cols-[13rem_1fr] items-center">
