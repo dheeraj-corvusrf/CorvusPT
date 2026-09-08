@@ -3,7 +3,16 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { listProperties, type PropertyRecord } from "@/lib/properties";
-import { listDocuments, getDocumentUrl, type DocumentRecord } from "@/lib/documents";
+import {
+  listDocuments,
+  getDocumentUrl,
+  deleteDocument,
+  categorizeDocument,
+  sourceLabel,
+  standardDocName,
+  previewKind,
+  type DocumentRecord,
+} from "@/lib/documents";
 import {
   classifyAndUpload,
   classifyAndUploadToProperty,
@@ -11,7 +20,14 @@ import {
   type CategorizedUpload,
 } from "@/lib/document-categorize";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ChevronDown } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { ChevronDown, Eye, Download, Trash2 } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/documents")({
   component: Documents,
@@ -24,6 +40,8 @@ function Documents() {
   const [loading, setLoading] = useState(true);
   const [uploads, setUploads] = useState<CategorizedUpload[]>([]);
   const [uploadingPropertyId, setUploadingPropertyId] = useState<string | null>(null);
+  const [viewDoc, setViewDoc] = useState<DocumentRecord | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -42,6 +60,21 @@ function Documents() {
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not open this document.");
+    }
+  }
+
+  async function handleDelete(doc: DocumentRecord) {
+    if (!window.confirm(`Delete "${doc.fileName}"? This can't be undone.`)) return;
+    setDeletingId(doc.id);
+    try {
+      await deleteDocument(doc);
+      setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
+      if (viewDoc?.id === doc.id) setViewDoc(null);
+      toast.success("Document deleted.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not delete this document.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -209,7 +242,10 @@ function Documents() {
               <PropertyDocGroup
                 key={group.label}
                 group={group}
+                onView={setViewDoc}
                 onDownload={handleDownload}
+                onDelete={handleDelete}
+                deletingId={deletingId}
                 onUpload={(files) =>
                   group.property && handleUploadToProperty(group.property, files)
                 }
@@ -227,7 +263,95 @@ function Documents() {
           </div>
         )}
       </div>
+
+      <DocumentViewerModal
+        doc={viewDoc}
+        onClose={() => setViewDoc(null)}
+        onDownload={handleDownload}
+      />
     </div>
+  );
+}
+
+function DocumentViewerModal({
+  doc,
+  onClose,
+  onDownload,
+}: {
+  doc: DocumentRecord | null;
+  onClose: () => void;
+  onDownload: (doc: DocumentRecord) => void;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const kind = doc ? previewKind(doc.fileName) : "none";
+
+  useEffect(() => {
+    if (!doc) {
+      setUrl(null);
+      setError(false);
+      return;
+    }
+    let cancelled = false;
+    setUrl(null);
+    setError(false);
+    getDocumentUrl(doc.storagePath)
+      .then((u) => {
+        if (!cancelled) setUrl(u);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc]);
+
+  return (
+    <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[92vh] w-[92vw] sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="truncate">{doc?.fileName}</DialogTitle>
+          {doc && (
+            <DialogDescription>
+              {standardDocName(doc, null)} · uploaded{" "}
+              {new Date(doc.uploadedAt).toLocaleDateString()}
+            </DialogDescription>
+          )}
+        </DialogHeader>
+
+        <div className="bg-secondary/40 grid min-h-[55vh] place-items-center overflow-hidden rounded-lg">
+          {error ? (
+            <p className="text-destructive p-6 text-sm">Couldn't load this document.</p>
+          ) : !url ? (
+            <p className="text-muted-foreground p-6 text-sm">Loading…</p>
+          ) : kind === "pdf" ? (
+            <iframe title={doc?.fileName ?? "Document"} src={url} className="h-[70vh] w-full" />
+          ) : kind === "image" ? (
+            <img
+              src={url}
+              alt={doc?.fileName ?? "Document"}
+              className="max-h-[70vh] w-auto object-contain"
+            />
+          ) : (
+            <p className="text-muted-foreground p-6 text-sm">
+              No inline preview for this file type — use Download.
+            </p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2">
+          {doc && (
+            <button onClick={() => onDownload(doc)} className="btn-outline text-sm">
+              Download
+            </button>
+          )}
+          <button onClick={onClose} className="btn-primary btn-primary-hover text-sm">
+            Close
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -313,13 +437,19 @@ function UploadRow({
 
 function PropertyDocGroup({
   group,
+  onView,
   onDownload,
+  onDelete,
+  deletingId,
   onUpload,
   uploading,
   defaultExpanded,
 }: {
   group: { label: string; docs: DocumentRecord[]; property: PropertyRecord | null };
+  onView: (doc: DocumentRecord) => void;
   onDownload: (doc: DocumentRecord) => void;
+  onDelete: (doc: DocumentRecord) => void;
+  deletingId: string | null;
   onUpload: (files: File[]) => void;
   uploading: boolean;
   defaultExpanded: boolean;
@@ -372,23 +502,62 @@ function PropertyDocGroup({
       </div>
       {expanded && (
         <div className="mt-2 grid gap-2">
-          {group.docs.map((doc) => (
-            <div
-              key={doc.id}
-              className="row-hover flex items-center justify-between gap-2 rounded-md px-2 py-2 flex-wrap"
-            >
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{doc.fileName}</div>
-                <div className="text-xs text-muted-foreground">
-                  Uploaded {new Date(doc.uploadedAt).toLocaleDateString()}
-                  {doc.documentType ? ` • ${doc.documentType}` : ""}
+          {group.docs.map((doc) => {
+            const cat = categorizeDocument(doc.documentType);
+            return (
+              <div
+                key={doc.id}
+                className="row-hover flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-md px-2 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">
+                    {standardDocName(doc, group.property?.accountNumber ?? null)}
+                  </div>
+                  <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-1.5 text-xs">
+                    <span className="truncate">{doc.fileName}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{new Date(doc.uploadedAt).toLocaleDateString()}</span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    <span className="badge-soft">{cat.label}</span>
+                    <span className="badge-soft bg-secondary text-muted-foreground">
+                      {sourceLabel(cat.source)}
+                    </span>
+                    {cat.feeds && (
+                      <span className="badge-soft bg-secondary text-muted-foreground">
+                        Feeds: {cat.feeds}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => onView(doc)}
+                    className="btn-outline text-sm"
+                    aria-label={`View ${doc.fileName}`}
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                    View
+                  </button>
+                  <button
+                    onClick={() => onDownload(doc)}
+                    className="btn-outline text-sm"
+                    aria-label={`Download ${doc.fileName}`}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => onDelete(doc)}
+                    disabled={deletingId === doc.id}
+                    className="btn-outline text-destructive text-sm disabled:opacity-50"
+                    aria-label={`Delete ${doc.fileName}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
-              <button onClick={() => onDownload(doc)} className="btn-outline shrink-0 text-sm">
-                Download
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
