@@ -6450,7 +6450,7 @@ function ModulePreviewContent({
               </div>
               {!analysis && !analyzing && !analysisError && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Corvus reads your {protestEvidenceDocs.length} uploaded document
+                  Corvus AI reads your {protestEvidenceDocs.length} uploaded document
                   {protestEvidenceDocs.length === 1 ? "" : "s"} and tells you what it actually found
                   — including flagging anything that doesn't look like real supporting evidence.
                 </p>

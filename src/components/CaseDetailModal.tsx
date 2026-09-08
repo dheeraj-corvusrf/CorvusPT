@@ -336,20 +336,20 @@ function CorvusGuidanceGate({
         <h4 className="text-sm font-semibold">AI Guidance & Filing Notice</h4>
         <div className="mt-2 grid gap-2 text-sm text-muted-foreground">
           <p>
-            Corvus is an AI assistant designed to guide you through the property protest process and
+            Corvus AI is an assistant designed to guide you through the property protest process and
             help prepare and complete the required forms and documents.
           </p>
           <p>
-            By proceeding, you authorize Corvus to assist with completing forms and preparing filing
-            materials on your behalf.
+            By proceeding, you authorize Corvus AI to assist with completing forms and preparing
+            filing materials on your behalf.
           </p>
           <p>
             You are responsible for reviewing and verifying all information before signing, filing,
             or submitting any document.
           </p>
           <p>
-            Corvus does not replace your responsibility to verify the accuracy of the information or
-            comply with county requirements.
+            Corvus AI does not replace your responsibility to verify the accuracy of the information
+            or comply with county requirements.
           </p>
         </div>
       </div>
@@ -433,7 +433,7 @@ function CorvusGuidancePanel({
     <div className="mt-4 card-elev p-4">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Corvus Guidance
+          Corvus AI Guidance
         </span>
         <span className="badge-soft">{guidance.stageLabel}</span>
       </div>
@@ -606,9 +606,9 @@ function PreFilingGate({
         />
         {blocked && (
           <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-            Corvus can't confirm this case is ready to file — please correct or confirm the field(s)
-            marked "Missing" above before filing. Use "Confirm/edit" next to each one. Documents are
-            hidden until this is resolved.
+            Corvus AI can't confirm this case is ready to file — please correct or confirm the
+            field(s) marked "Missing" above before filing. Use "Confirm/edit" next to each one.
+            Documents are hidden until this is resolved.
           </div>
         )}
       </div>
