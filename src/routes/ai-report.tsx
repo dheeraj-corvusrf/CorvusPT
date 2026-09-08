@@ -1961,12 +1961,24 @@ function ModuleVisual({
             </div>
           )}
           {estimated.savings > 0 && (
-            <div className="mt-3 text-center">
-              <div className="font-serif text-lg font-bold text-success">
+            <div className="mt-3 rounded-lg bg-success/10 px-3 py-2.5 text-center">
+              <div className="font-serif text-2xl font-bold leading-none text-success">
                 {currency(estimated.savings)}
               </div>
-              <div className="text-[10px] text-muted-foreground">potential tax savings</div>
+              {totalValue ? (
+                <div className="mt-1 text-base font-bold text-success/90">
+                  {Math.round((estimated.reduction / totalValue) * 100)}% of assessed value
+                </div>
+              ) : null}
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                estimated savings if your protest succeeds
+              </div>
             </div>
+          )}
+          {d.executiveConclusion && (
+            <p className="mt-2 text-center text-[11px] leading-snug text-muted-foreground">
+              {d.executiveConclusion}
+            </p>
           )}
           <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-muted-foreground">
             <ShieldCheck className="h-3 w-3" />
