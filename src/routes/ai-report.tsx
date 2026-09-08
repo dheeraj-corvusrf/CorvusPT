@@ -140,8 +140,23 @@ import {
   type CompSelectionInput,
   type CompSaleExtraction,
 } from "@/lib/comp-selections";
+import {
+  computeIncomeApproach,
+  incomeSupportsCad,
+  type IncomeApproach,
+  type IncomeFigures,
+} from "@/lib/income-approach";
+import {
+  getIncomeAnalysis,
+  upsertIncomeAnalysis,
+  extractIncomeFinancials,
+  type IncomeAnalysis,
+  type IncomeAnalysisInput,
+  type IncomeExtraction,
+} from "@/lib/income-analysis";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { LoadingLine } from "@/components/LoadingLine";
 import { ValueHistorySection } from "@/components/ValueHistorySection";
 import { Modal } from "@/components/Modal";
 
@@ -304,6 +319,11 @@ function Report() {
   // (same pattern as `overrides` above) and re-runs the comps AI so its
   // per-comp verdicts stay consistent with the set the user actually kept.
   const [compSelections, setCompSelections] = useState<CompSelection[]>([]);
+  // Module 7 (Income Value) — the owner-confirmed income figures for this
+  // property (see income-analysis.ts). Loaded once per property; every save is
+  // optimistic and re-runs the income AI narrative + its dependents. null
+  // until the owner has provided anything.
+  const [incomeAnalysis, setIncomeAnalysis] = useState<IncomeAnalysis | null>(null);
 
   useEffect(() => {
     const s = readIntake();
@@ -355,7 +375,9 @@ function Report() {
               (d.useAsEvidence === true ||
                 d.documentType === EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
-                d.documentType?.startsWith("Strategy Evidence: ")),
+                d.documentType?.startsWith("Strategy Evidence: ") ||
+                d.documentType?.startsWith("Zoning: ") ||
+                d.documentType?.startsWith("Income: ")),
           ),
         ),
       )
@@ -376,6 +398,106 @@ function Report() {
       .then(setCompSelections)
       .catch((err) => console.error("Could not load comp selections for this property:", err));
   }, [resolvedProperty]);
+
+  useEffect(() => {
+    if (!resolvedProperty) {
+      setIncomeAnalysis(null);
+      return;
+    }
+    getIncomeAnalysis(resolvedProperty.id)
+      .then(setIncomeAnalysis)
+      .catch((err) => console.error("Could not load income analysis for this property:", err));
+  }, [resolvedProperty]);
+
+  // Which Module-7 source documents the owner has uploaded, by kind — drives
+  // the Data Availability panel and the deterministic confidence bump.
+  const incomeDocKinds = useMemo(() => {
+    const kinds = new Set<string>();
+    for (const d of evidenceDocs) {
+      const m = d.documentType?.match(/^Income:\s*(.+)$/);
+      if (m) kinds.add(m[1].trim());
+    }
+    return [...kinds];
+  }, [evidenceDocs]);
+
+  // Deterministic income-approach math (src/lib/income-approach.ts) — NEVER an
+  // AI value. The AI layer (moduleData.income) only explains these numbers.
+  const incomeFigures = useMemo<IncomeFigures>(
+    () => ({
+      grossPotentialIncome: incomeAnalysis?.grossPotentialIncome ?? null,
+      otherIncome: incomeAnalysis?.otherIncome ?? null,
+      vacancyPct: incomeAnalysis?.vacancyPct ?? null,
+      operatingExpenses: incomeAnalysis?.operatingExpenses ?? null,
+      noiStated: incomeAnalysis?.noiStated ?? null,
+      rentableSqft: incomeAnalysis?.rentableSqft ?? null,
+      capRatePct: incomeAnalysis?.capRatePct ?? null,
+      capRateSource: incomeAnalysis?.capRateSource ?? null,
+      documentKinds: incomeDocKinds,
+    }),
+    [incomeAnalysis, incomeDocKinds],
+  );
+  const incomeComputed = useMemo<IncomeApproach>(
+    () => computeIncomeApproach(incomeFigures, state.totalValue ?? null),
+    [incomeFigures, state.totalValue],
+  );
+
+  // Re-run Module 7's AI narrative (and its dependents) whenever the
+  // owner-confirmed figures change — keyed on a stable digest so this fires
+  // on the render AFTER the figures actually update, with a fresh
+  // incomeComputed, rather than from saveIncomeAnalysis's stale closure.
+  // Same "never a cold fetch" rule as everywhere else: only when the module
+  // is open or has already run.
+  const incomeReloadKey = incomeComputed.dataComplete
+    ? [
+        incomeComputed.gpi,
+        incomeComputed.otherIncome,
+        incomeComputed.vacancyPct,
+        incomeComputed.operatingExpenses,
+        incomeComputed.noiStated,
+        incomeComputed.capRatePct,
+        incomeComputed.capRateSource,
+        incomeDocKinds.join(","),
+      ].join("|")
+    : "";
+  const incomeLoadedKeyRef = useRef<string>("");
+  useEffect(() => {
+    if (!incomeReloadKey) return;
+    const alreadyRan = !!(moduleData.income?.data || moduleData.income?.error);
+    if (openId !== "income" && !alreadyRan) return; // never a cold fetch
+    if (incomeLoadedKeyRef.current === incomeReloadKey) return; // already loaded for these figures
+    incomeLoadedKeyRef.current = incomeReloadKey;
+    loadModule("income", { force: true });
+    reloadDependentModules("income");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomeReloadKey, openId]);
+
+  // Save owner-confirmed income figures. Optimistic; the effect above then
+  // re-runs Module 7 with the fresh numbers. The form always sends the
+  // complete field set (values or explicit null), so this is a passthrough.
+  async function saveIncomeAnalysis(input: IncomeAnalysisInput) {
+    if (!user || !resolvedProperty) return;
+    setIncomeAnalysis({
+      grossPotentialIncome: input.grossPotentialIncome ?? null,
+      otherIncome: input.otherIncome ?? null,
+      vacancyPct: input.vacancyPct ?? null,
+      operatingExpenses: input.operatingExpenses ?? null,
+      noiStated: input.noiStated ?? null,
+      rentableSqft: input.rentableSqft ?? null,
+      capRatePct: input.capRatePct ?? null,
+      capRateSource: input.capRateSource ?? null,
+      sourceDocumentIds: input.sourceDocumentIds ?? [],
+      notes: input.notes ?? null,
+      updatedAt: new Date().toISOString(),
+    });
+    try {
+      await upsertIncomeAnalysis(user.id, resolvedProperty.id, input);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      getIncomeAnalysis(resolvedProperty.id)
+        .then(setIncomeAnalysis)
+        .catch(() => {});
+    }
+  }
 
   // Include/exclude a comp, or save a hand-added / document-extracted comp.
   // Optimistic local update, then re-run Module 3's AI so recommendedKeys /
@@ -465,7 +587,7 @@ function Report() {
   function reloadDependentModules(moduleId: string) {
     const dependents =
       moduleId === "income"
-        ? ["strategy", "executive"]
+        ? ["strategy", "evidence", "executive"]
         : moduleId === "site" || moduleId === "improvement" || moduleId === "zoning"
           ? [moduleId, "strategy", "evidence", "executive"]
           : [moduleId];
@@ -658,6 +780,14 @@ function Report() {
     return await extractCompSale(doc.id);
   }
 
+  // Module 7 — read one already-uploaded income document (tagged "Income: …"
+  // via onUploadEvidence) with extract-income-financials and hand the pulled
+  // figures back to IncomeFiguresForm to pre-fill. Nothing is saved until the
+  // owner confirms the form.
+  async function extractIncome(documentId: string) {
+    return await extractIncomeFinancials(documentId);
+  }
+
   // Free-text fallback for Module 2's per-strategy evidence gate (see
   // StrategyDetail) — persisted the same way the rest of intake state is, via
   // sessionStorage, so it survives a refresh but never leaves the browser.
@@ -689,6 +819,11 @@ function Report() {
     // No AI call backs this module anymore — it renders straight from the
     // deterministic `estimated` value (see estimateSavings() above).
     if (id === "savings") return;
+    // Module 7 only runs its AI narrative once the owner has provided enough
+    // real figures to build the NOI ladder — before that there's nothing to
+    // explain, and the module stays "Additional Data Needed" (no token spend,
+    // and the eager-load effect already skips it via requiresUserData).
+    if (id === "income" && !incomeComputed.dataComplete) return;
     const existing = moduleData[id];
     if ((existing && (existing.loading || (existing.data && !opts?.force))) || !state.totalValue)
       return;
@@ -762,6 +897,20 @@ function Report() {
           `Zoning & Classification (Module 6): classification looks ${zoningData.matches}. ` +
             `Detected discrepancy: ${disc}. Valuation relevance (separate): ${zoningData.valuationRelevance} ` +
             `Possible exemptions to raise with the ARB: ${exempt}.`,
+        );
+      }
+      // Module 7's income indication flows downstream too — every figure here
+      // is the deterministic result from income-approach.ts, not an AI value.
+      if (incomeComputed.complete && incomeComputed.indicatedValue != null) {
+        const gap = incomeComputed.gapPct;
+        const dir =
+          gap == null ? "" : gap > 0 ? `${Math.abs(gap)}% below` : `${Math.abs(gap)}% above`;
+        context.push(
+          `Income Approach (Module 7): NOI $${Math.round(incomeComputed.noi ?? 0).toLocaleString()} ` +
+            `÷ cap rate ${incomeComputed.capRatePct}% = indicated value ` +
+            `$${incomeComputed.indicatedValue.toLocaleString()}` +
+            (dir ? `, which is ${dir} the CAD value` : "") +
+            `. Cap-rate source: ${incomeComputed.capRateSource === "appraisal" ? "an appraisal" : "owner-entered"}.`,
         );
       }
       if (context.length > 0) input.notApplicableContext = context;
@@ -851,6 +1000,38 @@ function Report() {
         };
       }
 
+      // Module 7 — the owner-confirmed income figures + the deterministic
+      // EGI/NOI/indicated value (income-approach.ts). The AI only explains
+      // these; enforceIncomeRealData server-side forces "inconclusive" if the
+      // core figures or a cap rate are missing.
+      if (id === "income") {
+        input.incomeFigures = {
+          grossPotentialIncome: incomeComputed.gpi,
+          otherIncome: incomeComputed.otherIncome,
+          vacancyPct: incomeComputed.vacancyPct,
+          operatingExpenses: incomeComputed.operatingExpenses,
+          egiComputed: incomeComputed.egi,
+          noiComputed: incomeComputed.noiComputed,
+          opexRatioPct: incomeComputed.opexRatioPct,
+          rentableSqft: incomeAnalysis?.rentableSqft ?? null,
+          documentKinds: incomeDocKinds,
+        };
+        input.capRate = {
+          pct: incomeComputed.capRatePct,
+          source: incomeComputed.capRateSource,
+        };
+        input.incomeIndicatedValue = incomeComputed.indicatedValue;
+        input.cadValue = state.totalValue ?? null;
+        const cs = computeComparableStats(
+          compsMap.data?.subject ?? null,
+          compsMap.data?.comps ?? [],
+          state.totalValue,
+        );
+        input.compsIndicatedRange = cs.indicated
+          ? { min: cs.indicated.min, median: cs.indicated.median, max: cs.indicated.max }
+          : null;
+      }
+
       // Module 10 reconciles Modules 2/3/8/9's already-real outputs — see the
       // sequencing effect above that waits for strategy + evidence to settle
       // before this ever fires, so these reads are the real thing, not
@@ -895,6 +1076,16 @@ function Report() {
             max: execStats.indicated.max,
             gapPct: execStats.valuationGapPct,
             confidencePct: execStats.confidencePct,
+          };
+        }
+        // Module 7's real income indication, when the owner completed it — a
+        // second valuation view for the executive to weigh alongside comps.
+        if (incomeComputed.complete && incomeComputed.indicatedValue != null) {
+          input.incomeIndicated = {
+            indicatedValue: incomeComputed.indicatedValue,
+            gapPct: incomeComputed.gapPct,
+            supports: incomeSupportsCad(incomeComputed),
+            confidencePct: incomeComputed.confidencePct,
           };
         }
         if (savingsEstimate) {
@@ -1358,7 +1549,9 @@ function Report() {
     if (hasFullAccess || m.n <= FREE_MODULE_COUNT) {
       setOpenId(m.id);
       if (!m.requiresUserData) loadModule(m.id);
-      if (m.id === "comps") loadCompsMap();
+      // Module 7 shows the comparable-sales range alongside its income value —
+      // load the same comps map Module 3 uses.
+      if (m.id === "comps" || m.id === "income") loadCompsMap();
       return;
     }
     setShowWall(true);
@@ -1593,6 +1786,7 @@ function Report() {
               totalValue={state.totalValue}
               improvementValue={state.improvementValue}
               overrides={overrides}
+              incomeComputed={incomeComputed}
               onOpen={() => openModule(m)}
               onForceReload={() => loadModule(m.id, { force: true })}
             />
@@ -1656,6 +1850,10 @@ function Report() {
                 onSaveCompSelection={() => {}}
                 onRemoveCompSelection={() => {}}
                 onExtractCompSale={async () => null}
+                incomeAnalysis={incomeAnalysis}
+                incomeComputed={incomeComputed}
+                onSaveIncomeAnalysis={() => {}}
+                onExtractIncome={extractIncome}
               />
             </div>
           ));
@@ -1709,6 +1907,10 @@ function Report() {
             onSaveCompSelection={saveCompSelection}
             onRemoveCompSelection={removeCompSelection}
             onExtractCompSale={extractCompSaleFromFile}
+            incomeAnalysis={incomeAnalysis}
+            incomeComputed={incomeComputed}
+            onSaveIncomeAnalysis={saveIncomeAnalysis}
+            onExtractIncome={extractIncome}
           />
           <div className="mt-6 flex gap-2 justify-end">
             <button onClick={() => setOpenId(null)} className="btn-outline">
@@ -1781,6 +1983,7 @@ function ModuleCard({
   totalValue,
   improvementValue,
   overrides,
+  incomeComputed,
   onOpen,
   onForceReload,
 }: {
@@ -1802,6 +2005,7 @@ function ModuleCard({
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
+  incomeComputed: IncomeApproach;
   onOpen: () => void;
   onForceReload: () => void;
 }) {
@@ -1814,7 +2018,13 @@ function ModuleCard({
     : m.id === "income"
       ? isModuleNotApplicable(overrides, "income")
         ? "Not Applicable"
-        : "Needs Data"
+        : !incomeComputed.dataComplete
+          ? "Needs Data"
+          : !moduleState || moduleState.loading
+            ? "Analyzing"
+            : moduleState.error
+              ? "Error"
+              : "Completed"
       : m.id === "savings"
         ? "Completed"
         : !moduleState || moduleState.loading
@@ -1823,7 +2033,7 @@ function ModuleCard({
             ? "Error"
             : "Completed";
   const insight = unlocked
-    ? moduleInsight(m, moduleState, compsMap, estimated, totalValue, overrides)
+    ? moduleInsight(m, moduleState, compsMap, estimated, totalValue, overrides, incomeComputed)
     : null;
   // Module 2's own score for this module's strategy, once it's resolved — see
   // the priorityContext sequencing in loadModule()/the eager-load effects
@@ -1904,6 +2114,7 @@ function ModuleCard({
             totalValue={totalValue}
             improvementValue={improvementValue}
             overrides={overrides}
+            incomeComputed={incomeComputed}
             onOpen={onOpen}
           />
         </div>
@@ -1974,6 +2185,7 @@ function ModuleVisual({
   totalValue,
   improvementValue,
   overrides,
+  incomeComputed,
   onOpen,
 }: {
   m: Module;
@@ -1993,6 +2205,7 @@ function ModuleVisual({
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
+  incomeComputed: IncomeApproach;
   onOpen: () => void;
 }) {
   if (!unlocked) {
@@ -2018,16 +2231,30 @@ function ModuleVisual({
   }
 
   if (m.id === "income") {
-    return isModuleNotApplicable(overrides, "income") ? (
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <CheckCircle2 className="h-4 w-4 shrink-0" />
-        <span className="text-xs">Marked not applicable — excluded from this protest</span>
-      </div>
-    ) : (
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <FileWarning className="h-4 w-4 shrink-0" />
-        <span className="text-xs">Upload financials to run this analysis</span>
-      </div>
+    if (isModuleNotApplicable(overrides, "income")) {
+      return (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <span className="text-xs">Marked not applicable — excluded from this protest</span>
+        </div>
+      );
+    }
+    if (!incomeComputed.dataComplete) {
+      return (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <FileWarning className="h-4 w-4 shrink-0" />
+          <span className="text-xs">Upload financials to run this analysis</span>
+        </div>
+      );
+    }
+    const aiSupports = (moduleData.income?.data as ModuleResultMap["income"] | undefined)
+      ?.supportsCadValue;
+    return (
+      <IncomeCardVisual
+        computed={incomeComputed}
+        supports={aiSupports ?? incomeSupportsCad(incomeComputed)}
+        onOpen={onOpen}
+      />
     );
   }
 
@@ -3913,11 +4140,21 @@ function moduleInsight(
   estimated: { savings: number },
   totalValue: number | null | undefined,
   overrides: ModuleOverride[],
+  incomeComputed?: IncomeApproach,
 ): string | null {
   if (m.id === "income") {
-    return isModuleNotApplicable(overrides, "income")
-      ? "Marked Not Applicable"
-      : "Upload financials to unlock";
+    if (isModuleNotApplicable(overrides, "income")) return "Marked Not Applicable";
+    if (!incomeComputed?.complete) {
+      return incomeComputed?.dataComplete ? "Cap rate needed" : "Upload financials to unlock";
+    }
+    const supports =
+      (moduleState?.data as ModuleResultMap["income"] | undefined)?.supportsCadValue ??
+      incomeSupportsCad(incomeComputed);
+    return supports === "does-not-support"
+      ? "Income does not support CAD value"
+      : supports === "supports"
+        ? "Income supports CAD value"
+        : "Income analysis inconclusive";
   }
   if (m.id === "savings") return estimated.savings > 0 ? "Strong Potential Savings" : null;
   if (!moduleState?.data) return null;
@@ -4784,7 +5021,9 @@ function ZoningAspectTiles({
       <div className="grid grid-cols-2 gap-2 text-center">
         <div
           className={`rounded-lg border p-2 ${
-            consistent ? "border-success/40 bg-success/10" : "border-border bg-secondary/30 opacity-50"
+            consistent
+              ? "border-success/40 bg-success/10"
+              : "border-border bg-secondary/30 opacity-50"
           }`}
         >
           <div className="flex items-center justify-center gap-1 text-xs font-bold text-success">
@@ -4835,6 +5074,741 @@ function ZoningImpactCol({
         {title}
       </div>
       <div className="text-sm text-muted-foreground">{children}</div>
+    </div>
+  );
+}
+
+// ── Module 7 (Income Value) ───────────────────────────────────────────────
+// Every figure rendered here is the deterministic result from
+// src/lib/income-approach.ts (computed from owner-confirmed data) — never an
+// AI value. The AI narrative (moduleData.income) only explains these.
+
+const INCOME_DOC_KINDS = ["P&L", "Operating Statement", "Rent Roll", "Appraisal"] as const;
+
+// A recharts waterfall: Potential Income → −Vacancy → −Operating Expenses →
+// NOI → (÷ Cap Rate) → Indicated Value. Two stacked bars — a transparent
+// spacer that lifts each step to its running total, then the visible delta.
+function IncomeWaterfall({ c, height = 180 }: { c: IncomeApproach; height?: number }) {
+  if (!c.dataComplete || c.gpi == null || c.egi == null || c.noi == null) {
+    return (
+      <div
+        className="flex items-center justify-center rounded-lg border border-dashed border-border bg-secondary/30 px-4 text-center text-xs text-muted-foreground"
+        style={{ height }}
+      >
+        Provide the figures below to see the income waterfall.
+      </div>
+    );
+  }
+  const potential = c.gpi + c.otherIncome;
+  const vac = c.vacancyLoss ?? 0;
+  const opex = c.operatingExpenses ?? 0;
+  const indicated = c.indicatedValue;
+  const steps: { name: string; spacer: number; delta: number; fill: string; show: string }[] = [
+    {
+      name: "Potential Income",
+      spacer: 0,
+      delta: potential,
+      fill: "#3b82f6",
+      show: compactCurrency(potential),
+    },
+    {
+      name: "Vacancy",
+      spacer: potential - vac,
+      delta: vac,
+      fill: "#f87171",
+      show: `−${compactCurrency(vac)}`,
+    },
+    {
+      name: "Operating Expenses",
+      spacer: c.noi,
+      delta: opex,
+      fill: "#fb923c",
+      show: `−${compactCurrency(opex)}`,
+    },
+    { name: "NOI", spacer: 0, delta: c.noi, fill: "#3b82f6", show: compactCurrency(c.noi) },
+    {
+      name: "Cap Rate",
+      spacer: 0,
+      delta: 0,
+      fill: "#2dd4bf",
+      show: c.capRatePct != null ? `${c.capRatePct}%` : "—",
+    },
+    indicated != null
+      ? {
+          name: "Value Indicated",
+          spacer: 0,
+          delta: indicated,
+          fill: "#22c55e",
+          show: compactCurrency(indicated),
+        }
+      : {
+          name: "Value Indicated",
+          spacer: 0,
+          delta: 0,
+          fill: "#94a3b8",
+          show: "cap rate needed",
+        },
+  ];
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart
+        data={steps}
+        margin={{ top: 16, right: 8, left: 8, bottom: 4 }}
+        barCategoryGap="18%"
+      >
+        <XAxis
+          dataKey="name"
+          tick={{ fontSize: 9 }}
+          interval={0}
+          axisLine={false}
+          tickLine={false}
+        />
+        <YAxis hide domain={[0, Math.ceil(potential * 1.15)]} />
+        <Bar dataKey="spacer" stackId="w" fill="transparent" isAnimationActive={false} />
+        <Bar dataKey="delta" stackId="w" isAnimationActive={false} radius={[2, 2, 0, 0]}>
+          {steps.map((s, i) => (
+            <Cell key={i} fill={s.fill} />
+          ))}
+          <LabelList dataKey="show" position="top" fontSize={9} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+const INCOME_VERDICT: Record<
+  "supports" | "does-not-support" | "inconclusive",
+  { label: string; cls: string }
+> = {
+  supports: { label: "Income Supports CAD Value", cls: "bg-success/10 text-success" },
+  "does-not-support": {
+    label: "Income Does Not Support CAD Value",
+    cls: "bg-accent/10 text-accent",
+  },
+  inconclusive: {
+    label: "Income Analysis Inconclusive",
+    cls: "bg-secondary text-muted-foreground",
+  },
+};
+
+function IncomeVerdictBand({
+  supports,
+  onClick,
+}: {
+  supports: "supports" | "does-not-support" | "inconclusive";
+  onClick?: () => void;
+}) {
+  const v = INCOME_VERDICT[supports];
+  const inner = (
+    <>
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/60">
+        <DollarSign className="h-4 w-4" />
+      </span>
+      <span className="flex-1 text-left text-sm font-semibold">{v.label}</span>
+      {onClick && <ArrowRight className="h-4 w-4 shrink-0" />}
+    </>
+  );
+  return onClick ? (
+    <button
+      onClick={onClick}
+      className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 ${v.cls}`}
+    >
+      {inner}
+    </button>
+  ) : (
+    <div className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 ${v.cls}`}>
+      {inner}
+    </div>
+  );
+}
+
+// Compact card visual (ModuleVisual) — mini waterfall + Income Value vs CAD
+// Value tiles + the verdict band. Mirrors the reference card.
+function IncomeCardVisual({
+  computed,
+  supports,
+  onOpen,
+}: {
+  computed: IncomeApproach;
+  supports: "supports" | "does-not-support" | "inconclusive";
+  onOpen: () => void;
+}) {
+  return (
+    <div>
+      <IncomeWaterfall c={computed} height={120} />
+      <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <div className="rounded-lg bg-accent/10 p-2 text-center">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-accent">
+            Income Value
+          </div>
+          <div className="text-sm font-bold text-accent">
+            {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+          </div>
+        </div>
+        <span className="text-[10px] font-bold text-muted-foreground">vs</span>
+        <div className="rounded-lg bg-destructive/10 p-2 text-center">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-destructive">
+            CAD Value
+          </div>
+          <div className="text-sm font-bold text-destructive">
+            {computed.cadValue != null ? compactCurrency(computed.cadValue) : "—"}
+          </div>
+        </div>
+      </div>
+      <IncomeVerdictBand supports={supports} onClick={onOpen} />
+    </div>
+  );
+}
+
+// The full 3-up value comparison in the modal: Income Value · AI Market Value
+// Range (from Module 3's comps) · CAD Value, then the verdict band.
+function IncomeValueComparison({
+  computed,
+  compsRange,
+  supports,
+}: {
+  computed: IncomeApproach;
+  compsRange: { min: number; max: number } | null;
+  supports: "supports" | "does-not-support" | "inconclusive";
+}) {
+  return (
+    <div>
+      <div className={`grid gap-2 ${compsRange ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+        <div className="rounded-lg bg-accent/10 p-3 text-center">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+            Income Value
+          </div>
+          <div className="font-serif text-xl font-bold text-accent">
+            {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {computed.reliability} reliability
+          </div>
+        </div>
+        {compsRange && (
+          <div className="rounded-lg bg-success/10 p-3 text-center">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-success">
+              AI Market Value Range
+            </div>
+            <div className="font-serif text-xl font-bold text-success">
+              {compactCurrency(compsRange.min)}–{compactCurrency(compsRange.max)}
+            </div>
+            <div className="text-[10px] text-muted-foreground">from comparable sales</div>
+          </div>
+        )}
+        <div className="rounded-lg bg-destructive/10 p-3 text-center">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-destructive">
+            CAD Value
+          </div>
+          <div className="font-serif text-xl font-bold text-destructive">
+            {computed.cadValue != null ? compactCurrency(computed.cadValue) : "—"}
+          </div>
+          <div className="text-[10px] text-muted-foreground">current assessed</div>
+        </div>
+      </div>
+      <IncomeVerdictBand supports={supports} />
+    </div>
+  );
+}
+
+// The income-approach summary ladder — every value straight from `c`.
+function IncomeApproachTable({ c }: { c: IncomeApproach }) {
+  const money = (v: number | null | undefined) => (v != null ? currency(v) : "—");
+  const rows: {
+    label: string;
+    value: string;
+    hint?: string;
+    strong?: boolean;
+    accent?: boolean;
+  }[] = [
+    {
+      label: "Gross Potential Income",
+      value: money(c.gpi),
+      hint: c.gpi == null ? "Needs data" : undefined,
+    },
+    {
+      label: `(−) Vacancy${c.vacancyPct != null ? ` (${c.vacancyPct}%)` : ""}`,
+      value: c.vacancyLoss != null ? `(${currency(c.vacancyLoss)})` : "—",
+      hint: c.vacancyPct == null ? "Needs data" : undefined,
+    },
+    c.otherIncome
+      ? { label: "(+) Other Income", value: currency(c.otherIncome) }
+      : { label: "(+) Other Income", value: "—" },
+    { label: "Effective Gross Income", value: money(c.egi), strong: true },
+    {
+      label: `(−) Operating Expenses${c.opexRatioPct != null ? ` (${c.opexRatioPct}% of EGI)` : ""}`,
+      value: c.operatingExpenses != null ? `(${currency(c.operatingExpenses)})` : "—",
+      hint: c.operatingExpenses == null ? "Needs data" : undefined,
+    },
+    { label: "Net Operating Income (NOI)", value: money(c.noi), strong: true },
+    {
+      label: "÷ Market Cap Rate",
+      value:
+        c.capRatePct != null
+          ? `${c.capRatePct}%${c.capRateSource ? ` (${c.capRateSource === "appraisal" ? "appraisal" : "your input"})` : ""}`
+          : "—",
+      hint: c.capRatePct == null ? "Needs a cap rate" : undefined,
+    },
+    {
+      label: "Indicated Value",
+      value: c.indicatedValue != null ? currency(c.indicatedValue) : "—",
+      accent: true,
+      hint: c.indicatedValue == null ? "Complete the figures above" : undefined,
+    },
+  ];
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Income Approach (Summary)
+      </div>
+      <table className="w-full text-sm">
+        <tbody>
+          {rows.map((r) => (
+            <tr
+              key={r.label}
+              className={`border-t border-border/60 ${r.accent ? "bg-success/10" : r.strong ? "bg-secondary/30" : ""}`}
+            >
+              <td className={`px-4 py-2 ${r.strong || r.accent ? "font-semibold" : ""}`}>
+                {r.label}
+              </td>
+              <td
+                className={`whitespace-nowrap px-4 py-2 text-right tabular-nums ${
+                  r.accent
+                    ? "font-serif text-base font-bold text-success"
+                    : r.strong
+                      ? "font-semibold"
+                      : ""
+                }`}
+              >
+                {r.value}
+                {r.hint && (
+                  <span className="ml-2 rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
+                    {r.hint}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Data Availability panel — which source documents the owner has provided,
+// with a per-kind upload control. Mirrors ZoningClassificationTable's
+// per-row upload.
+function IncomeDataAvailability({
+  docKinds,
+  onUpload,
+  uploading,
+}: {
+  docKinds: string[];
+  onUpload?: (kind: string, files: File[]) => void;
+  uploading?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Data Availability
+      </div>
+      <ul className="divide-y divide-border/60">
+        {INCOME_DOC_KINDS.map((kind) => {
+          const has = docKinds.includes(kind);
+          return (
+            <li key={kind} className="flex items-center justify-between gap-2 px-4 py-2.5 text-sm">
+              <span className="flex items-center gap-2">
+                {has ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                ) : (
+                  <FileWarning className="h-4 w-4 shrink-0 text-muted-foreground" />
+                )}
+                <span>
+                  {kind}
+                  {kind === "Appraisal" && (
+                    <span className="ml-1 text-xs text-muted-foreground">(cap rate)</span>
+                  )}
+                </span>
+              </span>
+              <span className="flex items-center gap-2">
+                <span
+                  className={`text-xs font-semibold ${has ? "text-success" : "text-muted-foreground"}`}
+                >
+                  {has ? "Provided" : "Not provided"}
+                </span>
+                {onUpload && (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
+                    <input
+                      type="file"
+                      accept="image/*,.pdf,.csv,.xlsx,.xls"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        if (sel.length > 0) onUpload(kind, sel);
+                        e.target.value = "";
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "Uploading…" : has ? "Replace" : "Upload"}
+                  </label>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+type IncomeFormState = {
+  grossPotentialIncome: string;
+  otherIncome: string;
+  vacancyPct: string;
+  operatingExpenses: string;
+  noiStated: string;
+  rentableSqft: string;
+  capRatePct: string;
+  capRateSource: "appraisal" | "owner";
+};
+
+function toFormState(a: IncomeAnalysis | null): IncomeFormState {
+  const s = (v: number | null | undefined) => (v != null ? String(v) : "");
+  return {
+    grossPotentialIncome: s(a?.grossPotentialIncome),
+    otherIncome: s(a?.otherIncome),
+    vacancyPct: s(a?.vacancyPct),
+    operatingExpenses: s(a?.operatingExpenses),
+    noiStated: s(a?.noiStated),
+    rentableSqft: s(a?.rentableSqft),
+    capRatePct: s(a?.capRatePct),
+    capRateSource: a?.capRateSource ?? "owner",
+  };
+}
+
+const numOrNull = (v: string): number | null => {
+  const n = Number(v.replace(/[^0-9.-]/g, ""));
+  return v.trim() !== "" && Number.isFinite(n) ? n : null;
+};
+
+// The editable review form — pre-fills from AI-extracted document figures,
+// the owner confirms/corrects, then Save persists and re-runs Module 7.
+function IncomeFiguresForm({
+  analysis,
+  incomeDocs,
+  canEdit,
+  onExtractIncome,
+  onSave,
+}: {
+  analysis: IncomeAnalysis | null;
+  incomeDocs: DocumentRecord[];
+  canEdit: boolean;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  onSave: (input: IncomeAnalysisInput) => void;
+}) {
+  const [form, setForm] = useState<IncomeFormState>(() => toFormState(analysis));
+  const [extracting, setExtracting] = useState(false);
+  const [extractNote, setExtractNote] = useState<string | null>(null);
+  const analysisKey = analysis?.updatedAt ?? "none";
+  useEffect(() => {
+    setForm(toFormState(analysis));
+  }, [analysisKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = <K extends keyof IncomeFormState>(k: K, v: IncomeFormState[K]) =>
+    setForm((f) => ({ ...f, [k]: v }));
+
+  async function runExtract() {
+    if (incomeDocs.length === 0) return;
+    setExtracting(true);
+    setExtractNote(null);
+    try {
+      const results = await Promise.all(
+        incomeDocs.map((d) => onExtractIncome(d.id).catch(() => null)),
+      );
+      setForm((f) => {
+        const next = { ...f };
+        const fill = (k: Exclude<keyof IncomeFormState, "capRateSource">, v: number | null) => {
+          if (v != null && next[k] === "") next[k] = String(v);
+        };
+        for (const r of results) {
+          if (!r) continue;
+          fill("grossPotentialIncome", r.grossPotentialIncome);
+          fill("otherIncome", r.otherIncome);
+          fill("vacancyPct", r.vacancyPct);
+          fill("operatingExpenses", r.operatingExpenses);
+          fill("noiStated", r.noi);
+          fill("rentableSqft", r.rentableSqft);
+          if (r.capRatePct != null && next.capRatePct === "") {
+            next.capRatePct = String(r.capRatePct);
+            next.capRateSource = "appraisal";
+          }
+        }
+        return next;
+      });
+      const got = results.filter(Boolean).length;
+      setExtractNote(
+        got > 0
+          ? `Read ${got} document${got === 1 ? "" : "s"}. Review and correct anything below, then Save.`
+          : "Couldn't read figures from the uploaded documents — enter them below.",
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function submit() {
+    onSave({
+      grossPotentialIncome: numOrNull(form.grossPotentialIncome),
+      otherIncome: numOrNull(form.otherIncome),
+      vacancyPct: numOrNull(form.vacancyPct),
+      operatingExpenses: numOrNull(form.operatingExpenses),
+      noiStated: numOrNull(form.noiStated),
+      rentableSqft: numOrNull(form.rentableSqft),
+      capRatePct: numOrNull(form.capRatePct),
+      capRateSource: form.capRatePct.trim() !== "" ? form.capRateSource : null,
+      sourceDocumentIds: incomeDocs.map((d) => d.id),
+    });
+  }
+
+  const field = (
+    label: string,
+    k: keyof IncomeFormState,
+    opts?: { prefix?: string; suffix?: string },
+  ) => (
+    <label className="grid gap-1 text-xs">
+      <span className="font-medium text-muted-foreground">{label}</span>
+      <span className="flex items-center rounded-md border border-border bg-background px-2 focus-within:border-accent">
+        {opts?.prefix && <span className="text-muted-foreground">{opts.prefix}</span>}
+        <input
+          inputMode="decimal"
+          disabled={!canEdit}
+          value={form[k] as string}
+          onChange={(e) => set(k, e.target.value)}
+          className="w-full bg-transparent py-1.5 text-sm outline-none disabled:opacity-60"
+        />
+        {opts?.suffix && <span className="text-muted-foreground">{opts.suffix}</span>}
+      </span>
+    </label>
+  );
+
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Income Figures
+        </div>
+        {canEdit && incomeDocs.length > 0 && (
+          <button
+            type="button"
+            onClick={runExtract}
+            disabled={extracting}
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10 disabled:opacity-60"
+          >
+            {extracting ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Activity className="h-3.5 w-3.5" />
+            )}
+            {extracting ? "Reading documents…" : "Extract from uploaded documents"}
+          </button>
+        )}
+      </div>
+      {extractNote && <p className="mt-1.5 text-[11px] text-muted-foreground">{extractNote}</p>}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {field("Gross potential income (annual)", "grossPotentialIncome", { prefix: "$" })}
+        {field("Other income (annual)", "otherIncome", { prefix: "$" })}
+        {field("Vacancy / collection loss", "vacancyPct", { suffix: "%" })}
+        {field("Operating expenses (annual)", "operatingExpenses", { prefix: "$" })}
+        {field("Stated NOI (optional, from a doc)", "noiStated", { prefix: "$" })}
+        {field("Rentable area (optional)", "rentableSqft", { suffix: "SF" })}
+        {field("Capitalization rate", "capRatePct", { suffix: "%" })}
+        <label className="grid gap-1 text-xs">
+          <span className="font-medium text-muted-foreground">Cap rate source</span>
+          <select
+            disabled={!canEdit}
+            value={form.capRateSource}
+            onChange={(e) => set("capRateSource", e.target.value as "owner" | "appraisal")}
+            className="rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-accent disabled:opacity-60"
+          >
+            <option value="owner">I'm providing this rate</option>
+            <option value="appraisal">From an appraisal</option>
+          </select>
+        </label>
+      </div>
+      {canEdit && (
+        <div className="mt-3 flex justify-end">
+          <button type="button" onClick={submit} className="btn-primary text-sm">
+            Save figures
+          </button>
+        </div>
+      )}
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Figures come only from your documents or your entry — nothing here is estimated. The
+        indicated value is <span className="font-medium">NOI ÷ cap rate</span>, computed from what
+        you enter.
+      </p>
+    </div>
+  );
+}
+
+// The full Module 7 workspace shown in the preview modal.
+function IncomeWorkspace({
+  m,
+  state,
+  moduleState,
+  compsMap,
+  analysis,
+  computed,
+  evidenceDocs,
+  allowEvidenceUpload,
+  uploadingEvidence,
+  onUploadEvidence,
+  onSaveIncomeAnalysis,
+  onExtractIncome,
+  onForceReload,
+  onMarkNotApplicable,
+}: {
+  m: Module;
+  state: IntakeState;
+  moduleState: ModuleAsyncState | undefined;
+  compsMap: { data: CompsResult | null; loading: boolean };
+  analysis: IncomeAnalysis | null;
+  computed: IncomeApproach;
+  evidenceDocs: DocumentRecord[];
+  allowEvidenceUpload: boolean;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  onForceReload: () => void;
+  onMarkNotApplicable: () => void;
+}) {
+  const incomeDocs = evidenceDocs.filter((d) => d.documentType?.startsWith("Income: "));
+  const docKinds = [
+    ...new Set(
+      incomeDocs
+        .map((d) => d.documentType?.replace(/^Income:\s*/, "").trim())
+        .filter((k): k is string => !!k),
+    ),
+  ];
+  const d = moduleState?.data as ModuleResultMap["income"] | undefined;
+  const supports = d?.supportsCadValue ?? incomeSupportsCad(computed);
+  const cs = computeComparableStats(
+    compsMap.data?.subject ?? null,
+    compsMap.data?.comps ?? [],
+    state.totalValue,
+  );
+  const compsRange = cs.indicated ? { min: cs.indicated.min, max: cs.indicated.max } : null;
+  const aiLoading = computed.dataComplete && (!moduleState || moduleState.loading);
+
+  return (
+    <div className="mt-4 grid gap-4">
+      <p className="-mb-1 text-sm text-muted-foreground">
+        AI models the income approach when the figures are available — every number below is yours,
+        computed as <span className="font-medium">NOI ÷ cap rate</span>, never estimated.
+      </p>
+      <AnalysisPipeline
+        steps={[
+          { eyebrow: "User input", label: "Income data (P&L, rent roll)", Icon: User },
+          { eyebrow: "AI processing", label: "Income modeling engine", Icon: Cpu },
+          { eyebrow: "Logic / decision", label: "NOI & cap-rate model", Icon: Scale },
+          { eyebrow: "AI output", label: "Income value estimate", Icon: Gauge, current: true },
+          { eyebrow: "Next step", label: "Compare & apply weight", Icon: ArrowRight },
+        ]}
+      />
+
+      <IncomeDataAvailability
+        docKinds={docKinds}
+        onUpload={
+          allowEvidenceUpload
+            ? (kind, files) => onUploadEvidence(files, undefined, `Income: ${kind}`)
+            : undefined
+        }
+        uploading={uploadingEvidence}
+      />
+
+      <IncomeFiguresForm
+        analysis={analysis}
+        incomeDocs={incomeDocs}
+        canEdit={allowEvidenceUpload}
+        onExtractIncome={onExtractIncome}
+        onSave={onSaveIncomeAnalysis}
+      />
+
+      <IncomeApproachTable c={computed} />
+      <IncomeWaterfall c={computed} />
+      <IncomeValueComparison computed={computed} compsRange={compsRange} supports={supports} />
+
+      {aiLoading && <LoadingLine text="Modeling the income approach…" className="text-sm" />}
+      {d && (
+        <div className="grid gap-3">
+          <AiVerdictLine icon={m.icon} text={d.assessment} color={m.color} />
+          {d.cadComparisonNarrative && (
+            <p className="text-sm text-muted-foreground">{d.cadComparisonNarrative}</p>
+          )}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <ZoningImpactCol title="Valuation basis" tone="success">
+              <p className="mb-1">
+                <span className="font-medium text-foreground">Vacancy:</span>{" "}
+                {d.vacancyBasis || "—"}
+              </p>
+              <p className="mb-1">
+                <span className="font-medium text-foreground">Operating expenses:</span>{" "}
+                {d.opexBasis || "—"}
+              </p>
+              <p>
+                <span className="font-medium text-foreground">Cap rate:</span>{" "}
+                {d.capRateBasis || "—"}
+              </p>
+            </ZoningImpactCol>
+            <ZoningImpactCol title="Assumptions & sources" tone="accent">
+              {d.assumptions.length > 0 && (
+                <ul className="mb-2 grid list-disc gap-1 pl-4">
+                  {d.assumptions.map((a, i) => (
+                    <li key={i}>{a}</li>
+                  ))}
+                </ul>
+              )}
+              {d.sources.length > 0 ? (
+                <p className="text-[11px]">
+                  <span className="font-medium text-foreground">Sources:</span>{" "}
+                  {d.sources.join("; ")}
+                </p>
+              ) : (
+                <p>—</p>
+              )}
+            </ZoningImpactCol>
+            <ZoningImpactCol title="Confidence & missing info" tone="success">
+              <p className="mb-1">{d.confidenceNote || "—"}</p>
+              {d.missingInformation.length > 0 && (
+                <ul className="grid list-disc gap-1 pl-4">
+                  {d.missingInformation.map((mi, i) => (
+                    <li key={i}>{mi}</li>
+                  ))}
+                </ul>
+              )}
+            </ZoningImpactCol>
+          </div>
+        </div>
+      )}
+      {moduleState?.error && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+          <span className="text-destructive">Couldn't generate the income narrative.</span>
+          <button onClick={onForceReload} className="btn-outline text-xs">
+            Retry
+          </button>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={onMarkNotApplicable}
+        className="justify-self-start text-xs font-medium text-accent hover:underline"
+      >
+        I don't have this — mark Not Applicable
+      </button>
     </div>
   );
 }
@@ -5381,6 +6355,10 @@ function ModulePreviewContent({
   onSaveCompSelection,
   onRemoveCompSelection,
   onExtractCompSale,
+  incomeAnalysis,
+  incomeComputed,
+  onSaveIncomeAnalysis,
+  onExtractIncome,
 }: {
   m: Module;
   estimated: {
@@ -5426,6 +6404,14 @@ function ModulePreviewContent({
   // Uploads one sale document and returns the AI-extracted figures, or null
   // (no-op in the printable report view).
   onExtractCompSale: (file: File) => Promise<CompSaleExtraction | null>;
+  // Module 7 (Income Value) — the owner-confirmed income figures (see
+  // income-analysis.ts) and the deterministic income-approach result
+  // (income-approach.ts). onSaveIncomeAnalysis / onExtractIncome are no-ops
+  // in the printable report view (allowEvidenceUpload false).
+  incomeAnalysis: IncomeAnalysis | null;
+  incomeComputed: IncomeApproach;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
 }) {
   // Real AI analysis of the customer's own uploaded evidence — see Module
   // 8's "evidence" case below and analyzeEvidence() in protest-reason.ts.
@@ -5449,41 +6435,41 @@ function ModulePreviewContent({
   const [categorizingEvidence, setCategorizingEvidence] = useState(false);
 
   if (m.requiresUserData) {
-    const isNotApplicable = isModuleNotApplicable(overrides, "income");
+    if (isModuleNotApplicable(overrides, "income")) {
+      return (
+        <div className="mt-4 card-elev p-4 bg-secondary/60">
+          <p className="flex items-center gap-2 text-sm">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+            Marked not applicable — no P&L, rent roll, or operating statement is available for this
+            property. The income approach is excluded from this protest.
+          </p>
+          <button
+            type="button"
+            onClick={() => onClearNotApplicable("income")}
+            className="mt-2 text-xs font-medium text-accent hover:underline"
+          >
+            Undo — I can upload financials
+          </button>
+        </div>
+      );
+    }
     return (
-      <div className="mt-4 card-elev p-4 bg-secondary/60">
-        {isNotApplicable ? (
-          <>
-            <p className="flex items-center gap-2 text-sm">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-              Marked not applicable — no P&L, rent roll, or operating statement is available for
-              this property. The income approach is excluded from this protest.
-            </p>
-            <button
-              type="button"
-              onClick={() => onClearNotApplicable("income")}
-              className="mt-2 text-xs font-medium text-accent hover:underline"
-            >
-              Undo — I can upload financials
-            </button>
-          </>
-        ) : (
-          <>
-            <p className="text-sm">
-              This module requires private financial data (P&L, rent roll, or operating statement)
-              to complete. Upload once you subscribe — AI will run the income approach and compare
-              to your assessed value.
-            </p>
-            <button
-              type="button"
-              onClick={() => onMarkNotApplicable("income")}
-              className="mt-2 text-xs font-medium text-accent hover:underline"
-            >
-              I don't have this — mark Not Applicable
-            </button>
-          </>
-        )}
-      </div>
+      <IncomeWorkspace
+        m={m}
+        state={state}
+        moduleState={moduleState}
+        compsMap={compsMap}
+        analysis={incomeAnalysis}
+        computed={incomeComputed}
+        evidenceDocs={evidenceDocs}
+        allowEvidenceUpload={allowEvidenceUpload}
+        uploadingEvidence={uploadingEvidence}
+        onUploadEvidence={onUploadEvidence}
+        onSaveIncomeAnalysis={onSaveIncomeAnalysis}
+        onExtractIncome={onExtractIncome}
+        onForceReload={onForceReload}
+        onMarkNotApplicable={() => onMarkNotApplicable("income")}
+      />
     );
   }
 
@@ -5534,6 +6520,14 @@ function ModulePreviewContent({
         <p className="text-center text-xs text-muted-foreground">
           {estimated.rationale ?? "Based on your county's real effective tax rate."}
         </p>
+        {incomeComputed.complete && incomeComputed.indicatedValue != null && (
+          <p className="text-center text-xs text-muted-foreground">
+            Income approach also indicates {compactCurrency(incomeComputed.indicatedValue)}
+            {incomeComputed.gapPct != null &&
+              ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`}
+            . This estimate is unchanged — see Module 7 for the income analysis.
+          </p>
+        )}
       </div>
     );
   }
