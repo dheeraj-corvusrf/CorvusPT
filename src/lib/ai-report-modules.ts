@@ -27,16 +27,23 @@ export type ModuleAnalysisInput = {
   // zoning so their guidance stays consistent with — and prioritized by — the
   // Strategy module's ranking. See loadModule()'s sequencing in ai-report.tsx.
   priorityContext?: { strategy: string; score: number }[];
-  // Only for "comps" — the real top-5-by-similarity comps
-  // computeComparableStats() already ranked client-side (see
-  // comps-analysis.ts), so the module's recommendedUse field can name
-  // specific real properties. See loadModule()'s comps branch.
+  // Only for "comps" — every ranked comp computeComparableStats() produced
+  // client-side (see comps-analysis.ts), each with a stable `key`, so the
+  // module can recommend the strongest 3-5 (recommendedKeys) and give a
+  // per-comp use/exclude verdict. `excluded` marks a comp the user already
+  // dropped; `userAdded` a comp they entered by hand or from an uploaded
+  // sale document. See loadModule()'s comps branch.
   topComps?: {
+    key: string;
     address: string;
     distanceMi: number;
     marketValue: number | null;
     similarity: number;
+    excluded?: boolean;
+    userAdded?: boolean;
+    saleVerified?: boolean;
   }[];
+  compsSubjectValue?: number | null;
   // Everything below is only for "executive" — real outputs Modules 2/3/8/9
   // already computed (never regenerated), so Module 10 can actually
   // reconcile them instead of writing a recommendation blind to the rest of
@@ -128,7 +135,18 @@ export type ModuleResultMap = {
     strategies: StrategyEntry[];
     topStrategySummary: string;
   };
-  comps: { guidance: string; checklist: string[]; recommendedUse: string };
+  comps: {
+    guidance: string;
+    checklist: string[];
+    recommendedUse: string;
+    // The strongest 3-5 comp keys (a subset of the keys sent in
+    // topComps), a per-comp use/exclude verdict + one-line reason, and how
+    // to use the comp set in the protest. Keys are clamped server-side to
+    // the set actually sent — the model can't introduce a comp.
+    recommendedKeys: string[];
+    perComp: { key: string; verdict: "use" | "exclude"; reason: string }[];
+    protestRecommendation: string;
+  };
   // Real 16-factor structured assessment — see MODULE_SPECS.site and
   // enforceSiteFactorRealData in the edge function. Only "Floodplain",
   // "Grade", "Highway Proximity", and "Railroad Proximity" can ever read

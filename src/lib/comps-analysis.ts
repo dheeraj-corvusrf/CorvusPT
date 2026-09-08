@@ -32,7 +32,53 @@ function decayScore(diff: number, halfScale: number): number {
   return 100 * Math.exp((-Math.LN2 * Math.abs(diff)) / halfScale);
 }
 
-export type RankedComp = CompProperty & { distanceMi: number; similarity: number };
+// A stable id for a comp across the whole Module 3 flow: the CAD pid as a
+// string for a fetched comp, or "user:<uuid>" for one the user added (see
+// comp-selections.ts). Used to match a comp to an exclude mark and to the
+// AI's per-comp recommendations.
+export function compKeyOf(c: { pid: number }): string {
+  return String(c.pid);
+}
+
+// A comp the user added by hand or from an uploaded sale document — the real
+// figures that get merged into the ranking pool alongside CAD comps.
+export type ExtraComp = {
+  key: string; // "user:<uuid>"
+  address: string | null;
+  latitude: number;
+  longitude: number;
+  salePrice: number | null;
+  saleDate: string | null;
+  landSqft: number | null;
+  buildingSqft: number | null;
+  source: string | null;
+  saleVerified: boolean;
+};
+
+export type RankedComp = CompProperty & {
+  distanceMi: number;
+  similarity: number;
+  key: string;
+  // Set when the user has excluded this comp — kept in `ranked` so the table
+  // can still show it (struck through), but left out of the indicated value,
+  // gap and confidence math.
+  excluded?: boolean;
+  // Populated only for a user-added comp (ExtraComp) — a CAD comp has no
+  // verifiable sale in a non-disclosure state.
+  salePrice?: number | null;
+  saleDate?: string | null;
+  buildingSqft?: number | null;
+  pricePerSqft?: number | null;
+  saleVerified?: boolean;
+  userAdded?: boolean;
+};
+
+type ComputeOpts = {
+  // CAD pids (as strings) the user has excluded from the value math.
+  excludedKeys?: Set<string>;
+  // Comps the user added — merged into the pool before ranking.
+  extraComps?: ExtraComp[];
+};
 
 // Blends 4 real signals into one 0-100 similarity score: value proximity
 // (the strongest signal for an equal-and-uniform argument), distance,
@@ -84,22 +130,72 @@ const TOP_N_FOR_INDICATED_VALUE = 5;
 const MIN_CONFIDENCE_PCT = 35;
 const MAX_CONFIDENCE_PCT = 95;
 
+// Maps a user-added comp to the CompProperty shape similarityScore() reads —
+// its sale price stands in for market value, its lot size (converted from
+// square feet) for legalAcreage. No property-type code, so typeScore lands on
+// its neutral 50.
+function extraToCompProperty(e: ExtraComp): CompProperty {
+  return {
+    pid: 0,
+    address: e.address ?? "",
+    latitude: e.latitude,
+    longitude: e.longitude,
+    marketValue: e.salePrice,
+    ownerName: null,
+    legalAcreage: e.landSqft != null ? e.landSqft / 43560 : null,
+    landValue: null,
+    improvementValue: null,
+    appraisedValue: null,
+    lastTransferDt: e.saleDate,
+    propType: null,
+    zoning: null,
+  };
+}
+
 export function computeComparableStats(
   subject: CompProperty | null,
   comps: CompProperty[],
   subjectTotalValue: number | null | undefined,
+  opts: ComputeOpts = {},
 ): ComparableStats {
+  const excludedKeys = opts.excludedKeys ?? new Set<string>();
+  const extraComps = opts.extraComps ?? [];
+
   const ranked: RankedComp[] = subject
-    ? [...comps]
-        .map((c) => ({
-          ...c,
-          distanceMi: haversineMiles(subject, c),
-          similarity: similarityScore(subject, c),
-        }))
-        .sort((a, b) => b.similarity - a.similarity)
+    ? [
+        ...comps.map((c) => {
+          const key = compKeyOf(c);
+          return {
+            ...c,
+            distanceMi: haversineMiles(subject, c),
+            similarity: similarityScore(subject, c),
+            key,
+            excluded: excludedKeys.has(key) || undefined,
+          };
+        }),
+        ...extraComps.map((e) => {
+          const cp = extraToCompProperty(e);
+          return {
+            ...cp,
+            distanceMi: haversineMiles(subject, cp),
+            similarity: similarityScore(subject, cp),
+            key: e.key,
+            excluded: excludedKeys.has(e.key) || undefined,
+            salePrice: e.salePrice,
+            saleDate: e.saleDate,
+            buildingSqft: e.buildingSqft,
+            pricePerSqft:
+              e.salePrice != null && e.buildingSqft != null && e.buildingSqft > 0
+                ? Math.round(e.salePrice / e.buildingSqft)
+                : null,
+            saleVerified: e.saleVerified,
+            userAdded: true as const,
+          };
+        }),
+      ].sort((a, b) => b.similarity - a.similarity)
     : [];
 
-  const usable = ranked.filter((c) => c.marketValue != null);
+  const usable = ranked.filter((c) => c.marketValue != null && !c.excluded);
   const limitedData = usable.length < MIN_USABLE_COMPS;
   const subjectValue = subjectTotalValue ?? subject?.marketValue ?? null;
 

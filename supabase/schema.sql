@@ -1655,6 +1655,65 @@ create policy "Users can delete their own referral invites"
   on public.referral_invites for delete
   using (referrer_id = auth.uid());
 
+-- Per-property comparable-sales selection for Module 3 (Market Value). One row
+-- per comp the user has touched: either a CAD comp they excluded from the
+-- indicated-value math (comp_key = the CAD pid as text, action = 'exclude'), or
+-- a comp they added by hand / from an uploaded sale document (comp_key =
+-- 'user:<uuid>', action = 'include', with the real sale fields filled in).
+-- Ranking, indicated value, gap and confidence are still computed
+-- deterministically in code (see src/lib/comps-analysis.ts) — this table only
+-- decides which comps feed that math. sale_verified is true only when the
+-- figures came from a document the user uploaded (source_document_id), never
+-- from an unverifiable source — Texas is a non-disclosure state.
+create table if not exists public.comp_selections (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid not null references public.properties (id) on delete cascade,
+  comp_key text not null,
+  action text not null check (action in ('exclude', 'include')),
+  address text,
+  latitude double precision,
+  longitude double precision,
+  sale_price numeric,
+  sale_date date,
+  land_sqft numeric,
+  building_sqft numeric,
+  source text,
+  notes text,
+  sale_verified boolean not null default false,
+  source_document_id uuid references public.documents (id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique (property_id, comp_key)
+);
+
+alter table public.comp_selections enable row level security;
+
+drop policy if exists "Users can view their own comp selections" on public.comp_selections;
+create policy "Users can view their own comp selections"
+  on public.comp_selections for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own comp selections" on public.comp_selections;
+create policy "Users can insert their own comp selections"
+  on public.comp_selections for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own comp selections" on public.comp_selections;
+create policy "Users can update their own comp selections"
+  on public.comp_selections for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete their own comp selections" on public.comp_selections;
+create policy "Users can delete their own comp selections"
+  on public.comp_selections for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all comp selections" on public.comp_selections;
+create policy "Admins can view all comp selections"
+  on public.comp_selections for select
+  using (public.is_admin());
+
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
 -- by itself, substituting your real email, to make that account an admin:

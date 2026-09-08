@@ -58,11 +58,16 @@ type ModulesInput = {
   // properties instead of speaking only in generalities. Every field here
   // is a real CAD-record value; nothing invented server-side.
   topComps?: {
+    key: string;
     address: string;
     distanceMi: number;
     marketValue: number | null;
     similarity: number;
+    excluded?: boolean;
+    userAdded?: boolean;
+    saleVerified?: boolean;
   }[];
+  compsSubjectValue?: number | null;
   // Only for moduleId "executive" — real outputs Modules 2/3/8/9 already
   // computed client-side (never regenerated here), so the executive module
   // can actually reconcile them. See loadModule()'s executive branch and its
@@ -612,17 +617,24 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
   comps: {
     instruction:
       "Give guidance on comparable-property and equity-comp evidence relevant to this property " +
-      "type and county (Texas is a non-disclosure state — never call anything a 'sale' or imply " +
-      "a sale price exists; these are assessed-value comparables). If real top comparable " +
-      "properties were given above, also recommend how to use them in the protest: which ones to " +
-      "lean on primarily and why (real similarity/distance/value differences only), and any real " +
-      "weakness in the comp set to address (e.g. few comps, wide value spread) — never invent a " +
-      "property, address, or number not given.",
+      "type and county. For a CAD comp (no 'saleVerified' flag) this is an assessed-value " +
+      "comparable — never call it a 'sale' or imply a sale price. A comp marked userAdded with " +
+      "saleVerified true came from a document the owner uploaded and DOES have a real sale price. " +
+      "Each comp above has a stable 'key'. From the comps given: (1) pick the strongest 3-5 as " +
+      "recommendedKeys — most similar by real value/distance/land-size/type differences, most " +
+      "reliable source; never pick a comp already marked excluded. (2) For EACH comp key, give a " +
+      "verdict of 'use' or 'exclude' and a one-line reason citing only real differences given " +
+      "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use "
+      + "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in "
+      + "the protest hearing. Never invent a property, address, key, or number not given above.",
     schema:
       `{"guidance": "<ONE short sentence, max ~18 words — a headline, the checklist below carries ` +
       `the detail>", "checklist": ["<short item>", ...], "recommendedUse": "<ONE to two short ` +
       `sentences, max ~30 words total — omit/empty string entirely if no real top comps were given ` +
-      `above>"}`,
+      `above>", "recommendedKeys": ["<key>", ...] (3-5, each MUST be one of the keys given above), ` +
+      `"perComp": [{"key": "<key given above>", "verdict": "use | exclude", "reason": "<max ~16 ` +
+      `words, real differences only>"}, ...], "protestRecommendation": "<ONE to two short sentences, ` +
+      `max ~35 words — empty string if no real comps were given>"}`,
     parse: (p) => ({
       guidance: str(p.guidance, 160),
       checklist: checklist(p.checklist),
@@ -632,6 +644,21 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       // read as a broken/cut-off UI, not just "a bit long." Generous
       // headroom over the target is safer here than a tight truncation.
       recommendedUse: str(p.recommendedUse, 320),
+      // recommendedKeys / perComp are clamped to the keys actually sent in
+      // the handler below (spec.parse has no access to input.topComps).
+      recommendedKeys: strList(p.recommendedKeys, 5, 64),
+      perComp: Array.isArray(p.perComp)
+        ? p.perComp
+            .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
+            .map((x) => ({
+              key: str(x.key, 64),
+              verdict: x.verdict === "exclude" ? "exclude" : "use",
+              reason: str(x.reason, 160),
+            }))
+            .filter((x) => x.key.length > 0)
+            .slice(0, 40)
+        : [],
+      protestRecommendation: str(p.protestRecommendation, 320),
     }),
   },
   site: {
@@ -1254,6 +1281,36 @@ Deno.serve(async (req: Request) => {
           evidenceParts.length > 0,
           Array.isArray(input.notApplicableComponents) ? input.notApplicableComponents : [],
         );
+    }
+    // Real-data enforcement for Module 3 — the model can only ever recommend
+    // or judge a comp that was actually sent to it. Clamp every key it
+    // returned to the input set, drop duplicates, and if it didn't produce
+    // at least 3 usable recommendations fall back to the top-by-similarity
+    // non-excluded keys the client already ranked (never invent one).
+    if (input.moduleId === "comps") {
+      const r = result as {
+        recommendedKeys: string[];
+        perComp: { key: string; verdict: "use" | "exclude"; reason: string }[];
+      };
+      const sent = Array.isArray(input.topComps) ? input.topComps : [];
+      const validKeys = new Set(sent.map((c) => c.key));
+      r.recommendedKeys = [...new Set(r.recommendedKeys.filter((k) => validKeys.has(k)))].slice(
+        0,
+        5,
+      );
+      const seen = new Set<string>();
+      r.perComp = r.perComp.filter((pc) => {
+        if (!validKeys.has(pc.key) || seen.has(pc.key)) return false;
+        seen.add(pc.key);
+        return true;
+      });
+      if (r.recommendedKeys.length < 3) {
+        r.recommendedKeys = sent
+          .filter((c) => !c.excluded)
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, 5)
+          .map((c) => c.key);
+      }
     }
     return new Response(JSON.stringify(result), { status: 200, headers: corsHeaders });
   } catch (err) {
