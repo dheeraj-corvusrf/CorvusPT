@@ -139,10 +139,6 @@ export function CaseDetailView({
   // where Corvus flags it as blocking, without leaving this modal.
   const [property, setProperty] = useState<PropertyRecord>(propertyProp);
   const [acknowledging, setAcknowledging] = useState(false);
-  // Per-open, not per-case: the notice must appear every time the customer
-  // clicks View Case, not just the first time — deliberately not derived
-  // from corvusGuidanceAckAt below, since that would only show it once ever.
-  const [acknowledgedThisOpen, setAcknowledgedThisOpen] = useState(false);
   // Real signed_at off the Notice of Protest submission (see
   // protest-form-submissions.ts) — the one honest signal this app has for
   // "has the customer actually signed this," distinct from and never
@@ -176,12 +172,8 @@ export function CaseDetailView({
   async function handleAcknowledgeGuidance() {
     setAcknowledging(true);
     try {
-      // Still recorded on the case every time, for an audit trail of when the
-      // notice was shown/accepted — it just no longer gates whether the
-      // notice is shown again on the next open (see acknowledgedThisOpen).
       await acknowledgeGuidance(protest.id);
       setCurrent((prev) => ({ ...prev, corvusGuidanceAckAt: new Date().toISOString() }));
-      setAcknowledgedThisOpen(true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not continue — please try again.");
     } finally {
@@ -189,10 +181,11 @@ export function CaseDetailView({
     }
   }
 
-  // Gates entry into a not-yet-filed case until the customer acknowledges
-  // Corvus's guidance notice for THIS open of the case — shown every time
-  // View Case is clicked on a not-yet-filed case, not just the first time.
-  const needsGuidanceAck = current.status === "requested" && !acknowledgedThisOpen;
+  // One-time per case: the AI Guidance & Filing Notice gates a not-yet-filed
+  // case only until the customer has accepted it once (persisted as
+  // protests.corvus_guidance_ack_at). After that it never shows again for
+  // this case — reopening View Case, switching tabs, or a new session.
+  const needsGuidanceAck = current.status === "requested" && !current.corvusGuidanceAckAt;
 
   return (
     <div>
@@ -398,8 +391,8 @@ function goToGuidanceAnchor(anchor: string) {
 }
 
 // Ambient, ongoing guidance — purely additive, sits above the existing
-// sections on every visit once the notice above has been acknowledged for
-// this open. Every fact it shows comes from getCaseGuidance()'s
+// sections on every visit once the one-time filing notice above has been
+// accepted for this case. Every fact it shows comes from getCaseGuidance()'s
 // deterministic mapping of real case/property/county data — never
 // AI-generated. No checkbox, no gating: informational only, and nothing
 // below it is disabled or hidden by its presence.
