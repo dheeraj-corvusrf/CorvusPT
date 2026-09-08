@@ -1947,9 +1947,11 @@ function Report() {
               improvementValue={state.improvementValue}
               overrides={overrides}
               incomeComputed={incomeComputed}
+              incomeAnalysis={incomeAnalysis}
               savingsAnalysis={savingsAnalysis}
               uploadingEvidence={uploadingEvidence}
               onUploadEvidence={handleUploadEvidence}
+              onSaveIncomeAnalysis={saveIncomeAnalysis}
               onOpen={() => openModule(m)}
               onForceReload={() => loadModule(m.id, { force: true })}
             />
@@ -2153,9 +2155,11 @@ function ModuleCard({
   improvementValue,
   overrides,
   incomeComputed,
+  incomeAnalysis,
   savingsAnalysis,
   uploadingEvidence,
   onUploadEvidence,
+  onSaveIncomeAnalysis,
   onOpen,
   onForceReload,
 }: {
@@ -2178,9 +2182,11 @@ function ModuleCard({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  incomeAnalysis: IncomeAnalysis | null;
   savingsAnalysis: SavingsAnalysis;
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
   onOpen: () => void;
   onForceReload: () => void;
 }) {
@@ -2299,9 +2305,12 @@ function ModuleCard({
             improvementValue={improvementValue}
             overrides={overrides}
             incomeComputed={incomeComputed}
+            incomeAnalysis={incomeAnalysis}
             savingsAnalysis={savingsAnalysis}
             uploadingEvidence={uploadingEvidence}
             onUploadEvidence={onUploadEvidence}
+            onSaveIncomeAnalysis={onSaveIncomeAnalysis}
+            hasFullAccess={hasFullAccess}
             onOpen={onOpen}
           />
         </div>
@@ -2373,13 +2382,17 @@ function ModuleVisual({
   improvementValue,
   overrides,
   incomeComputed,
+  incomeAnalysis,
   savingsAnalysis,
   uploadingEvidence,
   onUploadEvidence,
+  onSaveIncomeAnalysis,
+  hasFullAccess,
   onOpen,
 }: {
   m: Module;
   unlocked: boolean;
+  hasFullAccess: boolean;
   moduleState: ModuleAsyncState | undefined;
   moduleData: Record<string, ModuleAsyncState>;
   compsMap: { data: CompsResult | null; loading: boolean };
@@ -2396,9 +2409,11 @@ function ModuleVisual({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  incomeAnalysis: IncomeAnalysis | null;
   savingsAnalysis: SavingsAnalysis;
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
   onOpen: () => void;
 }) {
   if (!unlocked) {
@@ -2436,7 +2451,15 @@ function ModuleVisual({
       );
     }
     if (!incomeComputed.dataComplete) {
-      return <IncomeLadderPreview cadValue={incomeComputed.cadValue ?? totalValue ?? null} />;
+      return (
+        <IncomeLadderPreview
+          computed={incomeComputed}
+          editable={hasFullAccess}
+          analysis={incomeAnalysis}
+          onSave={onSaveIncomeAnalysis}
+          onOpen={onOpen}
+        />
+      );
     }
     const aiSupports = (moduleData.income?.data as ModuleResultMap["income"] | undefined)
       ?.supportsCadValue;
@@ -5433,47 +5456,154 @@ function IncomeWaterfall({
   );
 }
 
-// Card empty state — before the owner has entered any figures. A readable
-// preview of the exact ladder the module computes (labels only, values
-// dashed), so it's obvious what data is needed and what comes out. The real
-// CAD value is shown for context; nothing here is estimated.
-function IncomeLadderPreview({ cadValue }: { cadValue: number | null }) {
-  const rows = [
-    "Gross Potential Income",
-    "(−) Vacancy",
-    "Effective Gross Income",
-    "(−) Operating Expenses",
-    "Net Operating Income",
-    "÷ Market Cap Rate",
+// Card empty/partial state — the exact ladder the module computes. When
+// `editable`, the four owner-driven rows (GPI, Vacancy %, Operating
+// Expenses, Cap Rate %) are inline inputs so the values can be entered right
+// on the card, without opening the module; EGI / NOI / Indicated Value stay
+// computed. Nothing here is estimated.
+function IncomeLadderPreview({
+  computed,
+  editable,
+  analysis,
+  onSave,
+  onOpen,
+}: {
+  computed: IncomeApproach;
+  editable?: boolean;
+  analysis?: IncomeAnalysis | null;
+  onSave?: (input: IncomeAnalysisInput) => void;
+  onOpen?: () => void;
+}) {
+  const seed = () => ({
+    gpi: computed.gpi != null ? String(computed.gpi) : "",
+    vac: computed.vacancyPct != null ? String(computed.vacancyPct) : "",
+    opex: computed.operatingExpenses != null ? String(computed.operatingExpenses) : "",
+    cap: computed.capRatePct != null ? String(computed.capRatePct) : "",
+  });
+  const [f, setF] = useState(seed);
+  const extKey = [
+    computed.gpi,
+    computed.vacancyPct,
+    computed.operatingExpenses,
+    computed.capRatePct,
+  ].join("|");
+  useEffect(() => {
+    setF(seed());
+  }, [extKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const parse = (v: string): number | null => {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return v.trim() !== "" && Number.isFinite(n) ? n : null;
+  };
+  const dirty =
+    f.gpi !== seed().gpi || f.vac !== seed().vac || f.opex !== seed().opex || f.cap !== seed().cap;
+  const money = (v: number | null | undefined) => (v != null ? compactCurrency(v) : "—");
+
+  const inputCell = (key: "gpi" | "vac" | "opex" | "cap", prefix?: string, suffix?: string) => (
+    <span className="flex items-center gap-0.5">
+      {prefix && <span className="text-muted-foreground">{prefix}</span>}
+      <input
+        inputMode="decimal"
+        value={f[key]}
+        placeholder="—"
+        onChange={(e) => setF((s) => ({ ...s, [key]: e.target.value }))}
+        className="w-20 rounded border border-border bg-background px-1 py-0.5 text-right text-xs tabular-nums outline-none focus:border-accent"
+      />
+      {suffix && <span className="text-muted-foreground">{suffix}</span>}
+    </span>
+  );
+  const readCell = (v: string) => <span className="tabular-nums">{v}</span>;
+
+  const rows: { label: string; cell: React.ReactNode }[] = [
+    {
+      label: "Gross Potential Income",
+      cell: editable ? inputCell("gpi", "$") : readCell(money(computed.gpi)),
+    },
+    {
+      label: "(−) Vacancy",
+      cell: editable ? inputCell("vac", "", "%") : readCell(money(computed.vacancyLoss)),
+    },
+    { label: "Effective Gross Income", cell: readCell(money(computed.egi)) },
+    {
+      label: "(−) Operating Expenses",
+      cell: editable ? inputCell("opex", "$") : readCell(money(computed.operatingExpenses)),
+    },
+    { label: "Net Operating Income", cell: readCell(money(computed.noi)) },
+    {
+      label: "÷ Market Cap Rate",
+      cell: editable ? inputCell("cap", "", "%") : readCell(money(computed.capRatePct)),
+    },
   ];
+
+  function save() {
+    if (!onSave) return;
+    onSave({
+      grossPotentialIncome: parse(f.gpi),
+      vacancyPct: parse(f.vac),
+      operatingExpenses: parse(f.opex),
+      capRatePct: parse(f.cap),
+      capRateSource: parse(f.cap) != null ? (analysis?.capRateSource ?? "owner") : null,
+      otherIncome: analysis?.otherIncome ?? null,
+      noiStated: analysis?.noiStated ?? null,
+      rentableSqft: analysis?.rentableSqft ?? null,
+      sourceDocumentIds: analysis?.sourceDocumentIds ?? [],
+      notes: analysis?.notes ?? null,
+    });
+  }
+
   return (
     <div className="grid gap-2">
-      <div className="rounded-lg border border-dashed border-border p-3">
+      <div
+        className={`rounded-lg border p-3 ${editable ? "border-border" : "border-dashed border-border"}`}
+      >
         <div className="grid gap-1 text-xs text-muted-foreground">
           {rows.map((r) => (
-            <div key={r} className="flex items-center justify-between">
-              <span>{r}</span>
-              <span className="tabular-nums">—</span>
+            <div key={r.label} className="flex items-center justify-between gap-2">
+              <span>{r.label}</span>
+              {r.cell}
             </div>
           ))}
           <div className="mt-1 flex items-center justify-between border-t border-border/60 pt-1.5 text-sm font-semibold text-foreground">
             <span>Indicated Value</span>
-            <span className="tabular-nums">—</span>
+            <span className="tabular-nums">
+              {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+            </span>
           </div>
         </div>
-        {cadValue != null && (
+        {computed.cadValue != null && (
           <div className="mt-2 flex items-center justify-between text-xs">
             <span className="text-muted-foreground">Current CAD value</span>
             <span className="font-semibold tabular-nums text-foreground">
-              {compactCurrency(cadValue)}
+              {compactCurrency(computed.cadValue)}
             </span>
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <FileWarning className="h-4 w-4 shrink-0" />
-        <span className="text-xs">Add a P&amp;L, rent roll, or appraisal to run this</span>
-      </div>
+      {editable ? (
+        <div className="flex items-center justify-between gap-2">
+          {onOpen && (
+            <button
+              type="button"
+              onClick={onOpen}
+              className="text-xs font-medium text-accent hover:underline"
+            >
+              More options & upload docs
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={save}
+            disabled={!dirty}
+            className="btn-primary text-xs disabled:opacity-50"
+          >
+            Save values
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <FileWarning className="h-4 w-4 shrink-0" />
+          <span className="text-xs">Add a P&amp;L, rent roll, or appraisal to run this</span>
+        </div>
+      )}
     </div>
   );
 }
