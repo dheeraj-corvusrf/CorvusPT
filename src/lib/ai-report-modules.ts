@@ -58,6 +58,35 @@ export type ModuleAnalysisInput = {
     comps: { classification: string | null; zoning: string | null }[];
     uploadedDocs: string[];
   };
+  // Only for "income" (Module 7) — the owner-confirmed income figures and the
+  // deterministically-computed EGI/NOI/indicated value from
+  // src/lib/income-approach.ts. The AI layer only *explains* these; it never
+  // produces a revenue, expense, NOI, or cap-rate number. enforceIncomeRealData
+  // in the edge function forces an "inconclusive" verdict when figures or a
+  // cap rate are missing. See loadModule()'s income branch in ai-report.tsx.
+  incomeFigures?: {
+    grossPotentialIncome: number | null;
+    otherIncome: number | null;
+    vacancyPct: number | null;
+    operatingExpenses: number | null;
+    egiComputed: number | null;
+    noiComputed: number | null;
+    opexRatioPct: number | null;
+    rentableSqft: number | null;
+    documentKinds: string[];
+  };
+  capRate?: { pct: number | null; source: "appraisal" | "owner" | null };
+  incomeIndicatedValue?: number | null;
+  cadValue?: number | null;
+  compsIndicatedRange?: { min: number; median: number; max: number } | null;
+  // Only for "executive" — Module 7's real income indication, when the owner
+  // completed it, as a second valuation view alongside compsIndicated.
+  incomeIndicated?: {
+    indicatedValue: number | null;
+    gapPct: number | null;
+    supports: string;
+    confidencePct: number;
+  } | null;
   // Everything below is only for "executive" — real outputs Modules 2/3/8/9
   // already computed (never regenerated), so Module 10 can actually
   // reconcile them instead of writing a recommendation blind to the rest of
@@ -122,7 +151,14 @@ export type ModuleAnalysisInput = {
 };
 
 export type BatchModuleId =
-  "strategy" | "comps" | "site" | "improvement" | "zoning" | "evidence" | "executive";
+  | "strategy"
+  | "comps"
+  | "site"
+  | "improvement"
+  | "zoning"
+  | "income"
+  | "evidence"
+  | "executive";
 
 // One ranked valuation strategy from Module 2 — see StrategyList/StrategyDetail in
 // src/routes/ai-report.tsx and the "strategy" MODULE_SPEC in the edge function.
@@ -267,6 +303,25 @@ export type ModuleResultMap = {
     // Kept for backward-compat with the compact card's "Stated → Typical"
     // flow; the AI still returns it.
     typicalClassification: string;
+  };
+  // Module 7 — the AI *narrative* layer over the income approach. Every
+  // dollar figure and the cap rate are computed deterministically in
+  // src/lib/income-approach.ts from owner-confirmed data; this only
+  // explains them. supportsCadValue is forced to "inconclusive"
+  // server-side (enforceIncomeRealData) whenever the figures or a cap rate
+  // are missing — the module never fills the gap with a typical number.
+  income: {
+    assessment: string;
+    supportsCadValue: "supports" | "does-not-support" | "inconclusive";
+    cadComparisonNarrative: string;
+    vacancyBasis: string;
+    opexBasis: string;
+    capRateBasis: string;
+    assumptions: string[];
+    sources: string[];
+    confidenceNote: string;
+    missingInformation: string[];
+    lineItemNotes: { line: string; note: string }[];
   };
   evidence: {
     items: {

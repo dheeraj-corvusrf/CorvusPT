@@ -135,6 +135,34 @@ type ModulesInput = {
     comps: { classification: string | null; zoning: string | null }[];
     uploadedDocs: string[];
   };
+  // Only for moduleId "income" (Module 7) — the owner-confirmed income
+  // figures and the deterministically-computed EGI/NOI/indicated value from
+  // src/lib/income-approach.ts. The AI only *explains* these numbers; it
+  // never produces a revenue, expense, NOI, or cap-rate figure.
+  // enforceIncomeRealData forces an "inconclusive" verdict whenever the core
+  // figures or a cap rate are missing here — the module never fills the gap
+  // with a typical number.
+  incomeFigures?: {
+    grossPotentialIncome: number | null;
+    otherIncome: number | null;
+    vacancyPct: number | null;
+    operatingExpenses: number | null;
+    egiComputed: number | null;
+    noiComputed: number | null;
+    opexRatioPct: number | null;
+    rentableSqft: number | null;
+    documentKinds: string[];
+  };
+  capRate?: { pct: number | null; source: "appraisal" | "owner" | null };
+  incomeIndicatedValue?: number | null;
+  cadValue?: number | null;
+  compsIndicatedRange?: { min: number; median: number; max: number } | null;
+  incomeIndicated?: {
+    indicatedValue: number | null;
+    gapPct: number | null;
+    supports: string;
+    confidencePct: number;
+  } | null;
   // Question-mode fields (see Deno.serve below) — when `question` is set, this
   // request is a Q&A follow-up, not a module-analysis request.
   question?: string;
@@ -590,6 +618,60 @@ function enforceZoningRealData(
   return { ...result, aspects };
 }
 
+// Module 7 (income) — honest-data enforcement, same discipline as Modules
+// 4/5/6. Every dollar figure and the cap rate are computed client-side from
+// owner-confirmed data (src/lib/income-approach.ts). If the core figures or a
+// usable cap rate aren't present in the request, the module must not state a
+// verdict it can't support: force "inconclusive", replace the comparison /
+// cap-rate narrative with an honest "no data yet" line, and make
+// missingInformation the concrete upload list. Also: the verdict can never be
+// non-inconclusive when there is no computed indicated value to compare.
+type IncomeResult = {
+  supportsCadValue: "supports" | "does-not-support" | "inconclusive";
+  cadComparisonNarrative: string;
+  capRateBasis: string;
+  missingInformation: string[];
+  [k: string]: unknown;
+};
+
+function enforceIncomeRealData(result: IncomeResult, input: ModulesInput): IncomeResult {
+  const f = input.incomeFigures;
+  const hasCoreFigures =
+    !!f && f.grossPotentialIncome != null && f.vacancyPct != null && f.operatingExpenses != null;
+  const hasCapRate = !!input.capRate?.pct && input.capRate.pct > 0;
+  const hasIndicated = input.incomeIndicatedValue != null;
+
+  if (hasCoreFigures && hasCapRate && hasIndicated) {
+    // Real data present — trust the parsed narrative, but still never let the
+    // model claim support without a computed value behind it.
+    return result;
+  }
+
+  const needed: string[] = [];
+  if (!hasCoreFigures) {
+    needed.push("Trailing-12 profit & loss / operating statement", "Current rent roll");
+  }
+  if (!hasCapRate) {
+    needed.push("Capitalization rate — a fee appraisal that states one, or your own input");
+  }
+  const existing = new Set((result.missingInformation ?? []).map((s) => s.toLowerCase()));
+  const missingInformation = [
+    ...needed.filter((s) => !existing.has(s.toLowerCase())),
+    ...(result.missingInformation ?? []),
+  ].slice(0, 8);
+
+  return {
+    ...result,
+    supportsCadValue: "inconclusive",
+    cadComparisonNarrative:
+      "The income approach can't be completed yet — upload the financial records and provide a capitalization rate, then this will compare the income-indicated value with the CAD value.",
+    capRateBasis: hasCapRate
+      ? (result.capRateBasis as string)
+      : "No capitalization rate on file yet — upload an appraisal that states one, or enter a rate.",
+    missingInformation,
+  };
+}
+
 // Module 5 (improvement) — the 4 fixed building components, in a fixed
 // order. Same allow-list discipline as SITE_FACTORS: the AI can't omit or
 // invent a row, so the UI's 4-row layout is always stable.
@@ -719,9 +801,9 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "recommendedKeys — most similar by real value/distance/land-size/type differences, most " +
       "reliable source; never pick a comp already marked excluded. (2) For EACH comp key, give a " +
       "verdict of 'use' or 'exclude' and a one-line reason citing only real differences given " +
-      "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use "
-      + "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in "
-      + "the protest hearing. Never invent a property, address, key, or number not given above.",
+      "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use " +
+      "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in " +
+      "the protest hearing. Never invent a property, address, key, or number not given above.",
     schema:
       `{"guidance": "<ONE short sentence, max ~18 words — a headline, the checklist below carries ` +
       `the detail>", "checklist": ["<short item>", ...], "recommendedUse": "<ONE to two short ` +
@@ -876,7 +958,7 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "none were found in the data given); comment in one sentence on whether the comparable " +
       "properties' classifications look consistent with this one; and classify this property into " +
       "exactly one category. Never invent a zoning code, ordinance, restriction, or use not present " +
-      "in the data. For an aspect with no real value in zoningData, use \"—\" and status " +
+      'in the data. For an aspect with no real value in zoningData, use "—" and status ' +
       '"Additional Data Needed".',
     schema:
       `{"matches": "<consistent | inconsistent | uncertain>", ` +
@@ -957,6 +1039,70 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
         evidenceRequired: strList(p.evidenceRequired, 6, 120),
         restrictions: str(p.restrictions, 300),
         comparableClassifications: str(p.comparableClassifications, 240),
+      };
+    },
+  },
+  income: {
+    instruction:
+      "You are given a commercial property's OWNER-CONFIRMED income figures and the " +
+      "already-computed EGI, NOI, and income-approach indicated value (all in the record above, " +
+      "under 'Income approach'). DO NOT recompute or invent ANY number — no revenue, expense, " +
+      "vacancy rate, NOI, or capitalization rate. Your job is to EXPLAIN the figures given. " +
+      "State the basis for the vacancy percentage used, and say whether the operating-expense " +
+      "ratio looks typical for this property type (general appraisal knowledge only — never cite " +
+      "a specific comparable figure you were not given). State where the cap rate came from " +
+      "(owner-entered vs an appraisal) and, if you know a typical market range for this property " +
+      "type and region as general knowledge, give it as context only. Compare the indicated " +
+      "value to the CAD value and, if a comparable-sales range is given, to that range; then " +
+      "classify support as exactly one of: supports (income indicated value is at or above the " +
+      "CAD value), does-not-support (income indicates a materially lower value than the CAD), " +
+      "inconclusive. List the key assumptions made, the data sources used, an honest one-line " +
+      "confidence note, and the specific additional documents that would materially improve this " +
+      "analysis. If the record says the figures or the cap rate are missing, set supportsCadValue " +
+      "to 'inconclusive', keep every narrative field brief, and put the needed documents in " +
+      "missingInformation — never fill a gap with a typical number.",
+    schema:
+      `{"assessment": "<ONE short sentence, max ~18 words — the headline verdict>", ` +
+      `"supportsCadValue": "<supports | does-not-support | inconclusive>", ` +
+      `"cadComparisonNarrative": "<1-2 sentences comparing the income indicated value to the CAD ` +
+      `value (and comps range if given); no restating raw numbers the tiles already show>", ` +
+      `"vacancyBasis": "<max ~20 words — basis for the vacancy % used, or 'Owner-provided; no ` +
+      `market basis on file.'>", ` +
+      `"opexBasis": "<max ~24 words — whether the operating-expense ratio looks typical for this ` +
+      `property type>", ` +
+      `"capRateBasis": "<max ~24 words — where the cap rate came from and any general market-range ` +
+      `context>", ` +
+      `"assumptions": ["<short phrase>", ...] (max 8, empty if none), ` +
+      `"sources": ["<short phrase>", ...] (max 8), ` +
+      `"confidenceNote": "<ONE short sentence on data quality/completeness>", ` +
+      `"missingInformation": ["<short phrase>", ...] (max 8), ` +
+      `"lineItemNotes": [{"line": "<Gross Potential Income | Vacancy | Effective Gross Income | ` +
+      `Operating Expenses | Net Operating Income | Cap Rate | Indicated Value>", "note": "<max ` +
+      `~18 words>"}, ...] (only where a note adds something, max 8)}`,
+    parse: (p) => {
+      const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fb: T): T =>
+        typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fb;
+      const lineItemNotes = (Array.isArray(p.lineItemNotes) ? p.lineItemNotes : [])
+        .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
+        .map((x) => ({ line: str(x.line, 40), note: str(x.note, 160) }))
+        .filter((x) => x.line.length > 0 && x.note.length > 0)
+        .slice(0, 8);
+      return {
+        assessment: str(p.assessment, 160),
+        supportsCadValue: oneOf(
+          p.supportsCadValue,
+          ["supports", "does-not-support", "inconclusive"] as const,
+          "inconclusive",
+        ),
+        cadComparisonNarrative: str(p.cadComparisonNarrative, 400),
+        vacancyBasis: str(p.vacancyBasis, 200),
+        opexBasis: str(p.opexBasis, 240),
+        capRateBasis: str(p.capRateBasis, 240),
+        assumptions: strList(p.assumptions, 8, 140),
+        sources: strList(p.sources, 8, 120),
+        confidenceNote: str(p.confidenceNote, 220),
+        missingInformation: strList(p.missingInformation, 8, 140),
+        lineItemNotes,
       };
     },
   },
@@ -1211,6 +1357,54 @@ function buildRecord(input: ModulesInput): string {
           : "") +
         (c.confidencePct != null ? `, ${c.confidencePct}/100 confidence` : "") +
         ". Use this exact range — never invent a different indicated value.",
+    );
+  }
+  if (input.moduleId === "income" && input.incomeFigures) {
+    const f = input.incomeFigures;
+    const money = (v: number | null | undefined) =>
+      v != null ? `$${Math.round(v).toLocaleString()}` : "not provided";
+    const capPct = input.capRate?.pct;
+    lines.push(
+      `Income approach — OWNER-CONFIRMED figures and deterministically-computed results (do NOT ` +
+        `recompute or invent any of these):\n` +
+        `- Gross potential income (annual): ${money(f.grossPotentialIncome)}\n` +
+        `- Other income (annual): ${money(f.otherIncome)}\n` +
+        `- Vacancy / collection loss: ${f.vacancyPct != null ? `${f.vacancyPct}%` : "not provided"}\n` +
+        `- Operating expenses (annual): ${money(f.operatingExpenses)}` +
+        (f.opexRatioPct != null ? ` (${f.opexRatioPct}% of EGI)` : "") +
+        `\n` +
+        `- Effective gross income (computed): ${money(f.egiComputed)}\n` +
+        `- Net operating income (computed): ${money(f.noiComputed)}\n` +
+        `- Capitalization rate: ${capPct ? `${capPct}%` : "NOT PROVIDED"}` +
+        (input.capRate?.source ? ` (source: ${input.capRate.source})` : "") +
+        `\n` +
+        `- Income-approach indicated value (NOI ÷ cap rate): ${money(input.incomeIndicatedValue)}\n` +
+        `- Current CAD assessed value: ${money(input.cadValue)}` +
+        (input.compsIndicatedRange
+          ? `\n- Market Value module's comparable-sales range: $${Math.round(
+              input.compsIndicatedRange.min,
+            ).toLocaleString()}-$${Math.round(
+              input.compsIndicatedRange.max,
+            ).toLocaleString()} (median $${Math.round(
+              input.compsIndicatedRange.median,
+            ).toLocaleString()})`
+          : "") +
+        (f.rentableSqft != null ? `\n- Rentable area: ${f.rentableSqft.toLocaleString()} SF` : "") +
+        (f.documentKinds.length > 0
+          ? `\n- Source documents provided: ${f.documentKinds.join(", ")}`
+          : `\n- No source documents provided yet.`),
+    );
+  }
+  if (input.moduleId === "executive" && input.incomeIndicated?.indicatedValue != null) {
+    const i = input.incomeIndicated;
+    lines.push(
+      `The Income Value module's real income-approach analysis indicates a value of ` +
+        `$${Math.round(i.indicatedValue!).toLocaleString()}` +
+        (i.gapPct != null
+          ? `, ${i.gapPct > 0 ? "below" : "at or above"} the CAD value by ${Math.abs(i.gapPct)}%`
+          : "") +
+        ` (${i.supports}, ${i.confidencePct}/100 confidence). Weigh this alongside the ` +
+        `comparable-sales indication — use this exact figure, never invent a different one.`,
     );
   }
   if (input.financialSummary) {
@@ -1470,6 +1664,14 @@ Deno.serve(async (req: Request) => {
       (result as ZoningResult).matches = z.matches;
       (result as ZoningResult).discrepancies = z.discrepancies;
       (result as ZoningResult).valuationRelevance = z.valuationRelevance;
+    }
+    // Real-data enforcement for Module 7 — see enforceIncomeRealData. The AI
+    // never produces a dollar figure or cap rate; when the owner-confirmed
+    // figures or a cap rate are missing, the verdict is forced to
+    // "inconclusive" and the narrative replaced with an honest "no data yet"
+    // line. Runs here because only the handler has input.incomeFigures.
+    if (input.moduleId === "income") {
+      Object.assign(result as IncomeResult, enforceIncomeRealData(result as IncomeResult, input));
     }
     // Real-data enforcement for Module 3 — the model can only ever recommend
     // or judge a comp that was actually sent to it. Clamp every key it
