@@ -6,6 +6,7 @@ import { readIntake, classifyAndStoreDocument, type IntakeState } from "@/lib/in
 import { useAuth } from "@/lib/auth";
 import { listProtests, type ProtestRecord, type ProtestStatus } from "@/lib/protests";
 import { listProperties, PROPERTIES_CHANGED_EVENT, type PropertyRecord } from "@/lib/properties";
+import { getPropertyProtestStatus, type ActionStatus } from "@/lib/portfolio-status";
 import { getMyBilling } from "@/lib/billing";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
@@ -199,7 +200,10 @@ export function JourneyTracker() {
   const [protests, setProtests] = useState<ProtestRecord[]>([]);
   const [properties, setProperties] = useState<PropertyRecord[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [page, setPage] = useState(0);
+  // Which property's tracker is showing — tracked by id, not list index, so it
+  // survives filtering, reordering, and a delete (see activeProperty below).
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<ActionStatus | "all">("all");
   const [authorizingProperty, setAuthorizingProperty] = useState<PropertyRecord | null>(null);
   const [isBeta, setIsBeta] = useState(false);
   // This component lives in __root.tsx, so it mounts once and persists across
@@ -282,10 +286,22 @@ export function JourneyTracker() {
   const suppressActions = pathname === "/" || pathname === "/dashboard";
 
   const hasSavedProperty = properties.length > 0;
-  // Clamp rather than reset to 0 outright, so losing the last property on the
-  // last page (e.g. it gets removed) lands on the new last page instead of
-  // always yanking back to the first one.
-  const currentPage = Math.min(page, Math.max(0, properties.length - 1));
+
+  // Portfolio breakdown by the same action-status the Properties page badges
+  // and dashboard nudge use — drives the filter dropdown's counts.
+  const statusOf = (p: PropertyRecord) => getPropertyProtestStatus(p, protests).status;
+  const statusCounts = properties.reduce(
+    (acc, p) => {
+      acc[statusOf(p)] = (acc[statusOf(p)] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<ActionStatus, number>,
+  );
+  // Properties matching the active filter; never let it collapse to nothing —
+  // an empty filter result falls back to the full list.
+  const matches =
+    statusFilter === "all" ? properties : properties.filter((p) => statusOf(p) === statusFilter);
+  const visibleProperties = matches.length > 0 ? matches : properties;
 
   // Nobody has a saved property yet — one generic tracker driven purely by
   // whatever the current browser session's in-progress intake flow has done so
@@ -311,9 +327,10 @@ export function JourneyTracker() {
   // One box, one property's tracker at a time — each block is driven by that
   // specific property's own protest (if any), rather than blending every case
   // the user has into one bar. A property with no protest yet simply sits at
-  // "Choose Service". Switch properties via the page numbers below instead of
-  // stacking every property's tracker in one long scroll.
-  const activeProperty = properties[currentPage];
+  // "Choose Service". Switch properties via the address dropdown below.
+  // `visibleProperties[0]` is always defined here (hasSavedProperty guard
+  // above), and covers the active property being filtered out or deleted.
+  const activeProperty = visibleProperties.find((p) => p.id === activeId) ?? visibleProperties[0];
   const activeProtest = protests.find((pr) => pr.propertyId === activeProperty.id);
   const activeRank = activeProtest ? STATUS_RANK[activeProtest.status] : 0;
   // Only trust this session's real intake signals (no document uploaded, no
@@ -355,25 +372,47 @@ export function JourneyTracker() {
         />
       )}
       {properties.length > 1 && (
-        <nav aria-label="Select property" className="mt-6 flex flex-wrap items-center gap-2">
-          {properties.map((p, i) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => setPage(i)}
-              aria-current={i === currentPage ? "page" : undefined}
-              aria-label={p.address}
-              title={p.address}
-              className={`h-8 w-8 rounded-full text-xs font-semibold transition-colors ${
-                i === currentPage
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-secondary text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {i + 1}
-            </button>
-          ))}
-        </nav>
+        <div className="mt-6 flex flex-wrap items-center gap-2">
+          <label htmlFor="journey-property" className="sr-only">
+            Property
+          </label>
+          <select
+            id="journey-property"
+            value={activeProperty.id}
+            onChange={(e) => setActiveId(e.target.value)}
+            className="border-input bg-background min-w-0 flex-1 rounded-md border px-3 py-2 text-sm sm:flex-none sm:min-w-[18rem]"
+          >
+            {visibleProperties.map((p) => {
+              const st = getPropertyProtestStatus(p, protests);
+              return (
+                <option key={p.id} value={p.id}>
+                  {p.address} — {st.label}
+                </option>
+              );
+            })}
+          </select>
+
+          <select
+            aria-label="Filter properties"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as ActionStatus | "all")}
+            className="border-input bg-background rounded-md border px-3 py-2 text-sm"
+          >
+            <option value="all">All properties ({properties.length})</option>
+            <option value="needs_action">Needs action ({statusCounts.needs_action ?? 0})</option>
+            <option value="in_progress">
+              Protest in progress ({statusCounts.in_progress ?? 0})
+            </option>
+            <option value="on_track">On track ({statusCounts.on_track ?? 0})</option>
+            <option value="resolved">Resolved ({statusCounts.resolved ?? 0})</option>
+          </select>
+
+          {matches.length === 0 && statusFilter !== "all" && (
+            <span className="text-muted-foreground text-xs">
+              No properties match — showing all.
+            </span>
+          )}
+        </div>
       )}
     </section>
   );
