@@ -1756,21 +1756,21 @@ function ModuleCard({
         ) : (
           <span className="text-xs text-muted-foreground">Requires subscription</span>
         )}
-        {/* The insight band above is the open affordance when it's there.
-            This stays only as the fallback: a locked module (real
-            "Subscribe" CTA) or a module with no insight line yet. */}
-        {!unlocked ? (
-          <button onClick={onOpen} className="btn-outline text-sm py-2">
-            Subscribe to unlock
-          </button>
-        ) : !insight ? (
+        {/* The colored insight band above is the big affordance; this stays
+            as the explicit, always-present control — a subtle text link for
+            an unlocked module, the real "Subscribe" CTA for a locked one. */}
+        {unlocked ? (
           <button
             onClick={onOpen}
             className="inline-flex items-center gap-1 text-sm font-semibold text-accent hover:underline"
           >
             Open <ArrowRight className="h-3.5 w-3.5" />
           </button>
-        ) : null}
+        ) : (
+          <button onClick={onOpen} className="btn-outline text-sm py-2">
+            Subscribe to unlock
+          </button>
+        )}
       </div>
     </div>
   );
@@ -3852,7 +3852,7 @@ function StrategyRankList({
 }) {
   const shown = max ? strategies.slice(0, max) : strategies;
   return (
-    <div className="grid gap-2">
+    <div className="grid gap-2 [&>*]:min-w-0">
       {shown.map((s) => (
         <StrategyBar key={s.name} s={s} />
       ))}
@@ -3878,6 +3878,8 @@ function StrategyDetail({
   onUploadEvidence,
   answer,
   onAnswerStrategy,
+  onRefresh,
+  refreshing,
 }: {
   s: StrategyEntry;
   rank: number;
@@ -3887,6 +3889,11 @@ function StrategyDetail({
   onUploadEvidence: (files: File[], strategyId: string) => void;
   answer: string | undefined;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
+  // Re-runs the whole Strategy module (the AI returns every strategy in one
+  // pass — there's no per-strategy call), which is what a user wants after
+  // uploading evidence for this one. Same handler as the card's header spinner.
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }) {
   const Icon = strategyIcon(s);
   const slug = strategySlug(s.name);
@@ -3895,7 +3902,7 @@ function StrategyDetail({
   const hasAnyEvidence = uploaded.length > 0 || !!answer?.trim();
 
   return (
-    <div className="card-elev p-4">
+    <div className="card-elev min-w-0 p-4">
       <div className="flex items-center gap-2.5">
         <NumberBadge n={rank} color={color} size="sm" />
         <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -3917,37 +3924,49 @@ function StrategyDetail({
             Additional Data Needed
           </span>
         )}
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            title="Re-run strategy analysis"
+            aria-label="Re-run strategy analysis"
+            className="shrink-0 rounded-full p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-default disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          </button>
+        )}
       </div>
 
-      <div className="mt-3 grid gap-2.5 text-xs sm:grid-cols-2">
+      <div className="mt-3 grid gap-2.5 text-xs sm:grid-cols-2 [&>div]:min-w-0">
         {s.whySelected && (
           <div>
             <div className="font-semibold text-foreground">Why AI selected it</div>
-            <p className="text-muted-foreground">{s.whySelected}</p>
+            <p className="break-words text-muted-foreground">{s.whySelected}</p>
           </div>
         )}
         {s.supportingFindings && (
           <div>
             <div className="font-semibold text-foreground">Supporting findings</div>
-            <p className="text-muted-foreground">{s.supportingFindings}</p>
+            <p className="break-words text-muted-foreground">{s.supportingFindings}</p>
           </div>
         )}
         {s.valuationRelevance && (
           <div>
             <div className="font-semibold text-foreground">Potential valuation relevance</div>
-            <p className="text-muted-foreground">{s.valuationRelevance}</p>
+            <p className="break-words text-muted-foreground">{s.valuationRelevance}</p>
           </div>
         )}
         {s.recommendedInvestigation && (
           <div>
             <div className="font-semibold text-foreground">Recommended investigation</div>
-            <p className="text-muted-foreground">{s.recommendedInvestigation}</p>
+            <p className="break-words text-muted-foreground">{s.recommendedInvestigation}</p>
           </div>
         )}
       </div>
 
       {(s.existingEvidence.length > 0 || s.missingEvidence.length > 0) && (
-        <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
+        <div className="mt-3 grid gap-2.5 sm:grid-cols-2 [&>div]:min-w-0">
           {s.existingEvidence.length > 0 && (
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wide text-success">
@@ -5191,17 +5210,17 @@ function ModulePreviewContent({
         );
       }
       return (
-        <div className="mt-4 grid gap-4">
+        <div className="mt-4 grid gap-4 [&>*]:min-w-0">
           {d.topStrategySummary && (
             <AiVerdictLine icon={m.icon} text={d.topStrategySummary} color={m.color} />
           )}
-          <div className="card-elev p-4">
+          <div className="card-elev min-w-0 p-4">
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               Ranked Strategies
             </div>
             <StrategyRankList strategies={d.strategies} color={m.color} />
           </div>
-          <div className="grid gap-3">
+          <div className="grid gap-3 [&>*]:min-w-0">
             {d.strategies.map((s, i) => (
               <StrategyDetail
                 key={s.name}
@@ -5213,6 +5232,8 @@ function ModulePreviewContent({
                 onUploadEvidence={onUploadEvidence}
                 answer={state.strategyAnswers?.[strategySlug(s.name)]}
                 onAnswerStrategy={onAnswerStrategy}
+                onRefresh={onForceReload}
+                refreshing={moduleState?.loading}
               />
             ))}
           </div>
@@ -6320,7 +6341,7 @@ function AiVerdictLine({
   return (
     <div className={`min-w-0 flex items-start gap-2.5 rounded-lg p-3 ${color.bg}`}>
       <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${color.text}`} />
-      <p className="min-w-0 flex-1 text-sm font-medium leading-snug">{text}</p>
+      <p className="min-w-0 flex-1 break-words text-sm font-medium leading-snug">{text}</p>
     </div>
   );
 }
