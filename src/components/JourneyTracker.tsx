@@ -193,6 +193,18 @@ function getMessage(currentStep: number, allDone: boolean): StepMessage | null {
   }
 }
 
+// The property <select>'s popup is only as wide as the control, so a native
+// dropdown truncates anything longer ("2233 SAM RAYBURN HWY , MELISSA, TX
+// 75454 — Needs action" -> "2233 SAM RAYBURN HWY , MEL..."). Drop the
+// trailing state + ZIP: street + city is what actually tells two of the
+// owner's properties apart.
+function shortAddress(address: string): string {
+  return address
+    .replace(/,?\s*(?:TX|Texas)\s*\d{5}(?:-\d{4})?\s*$/i, "")
+    .replace(/[\s,]+$/, "")
+    .trim();
+}
+
 export function JourneyTracker() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -372,7 +384,7 @@ export function JourneyTracker() {
         />
       )}
       {properties.length > 1 && (
-        <div className="mt-6 flex flex-wrap items-center gap-2">
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           <label htmlFor="journey-property" className="sr-only">
             Property
           </label>
@@ -380,13 +392,13 @@ export function JourneyTracker() {
             id="journey-property"
             value={activeProperty.id}
             onChange={(e) => setActiveId(e.target.value)}
-            className="border-input bg-background min-w-0 flex-1 rounded-md border px-3 py-2 text-sm sm:flex-none sm:min-w-[18rem]"
+            className="border-input bg-background w-full min-w-0 rounded-md border px-3 py-2 text-sm sm:flex-1 sm:min-w-[24rem] sm:max-w-[44rem]"
           >
             {visibleProperties.map((p) => {
               const st = getPropertyProtestStatus(p, protests);
               return (
                 <option key={p.id} value={p.id}>
-                  {p.address} — {st.label}
+                  {shortAddress(p.address)} · {st.label}
                 </option>
               );
             })}
@@ -396,7 +408,7 @@ export function JourneyTracker() {
             aria-label="Filter properties"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as ActionStatus | "all")}
-            className="border-input bg-background rounded-md border px-3 py-2 text-sm"
+            className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm sm:w-auto"
           >
             <option value="all">All properties ({properties.length})</option>
             <option value="needs_action">Needs action ({statusCounts.needs_action ?? 0})</option>
