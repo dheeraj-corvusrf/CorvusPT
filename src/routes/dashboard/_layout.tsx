@@ -1,4 +1,4 @@
-import { createFileRoute, Outlet, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 
@@ -21,13 +21,18 @@ const REDIRECT_REASONS: Record<string, string> = {
 function DashboardLayout() {
   const nav = useNavigate();
   const { user, loading } = useAuth();
+  // The router's own pathname is app-relative (base already stripped) —
+  // window.location.pathname still carries the GitHub Pages base ("/corvuspt"),
+  // and storing THAT as `redirect` made sign-in navigate to
+  // "/corvuspt/corvuspt/dashboard/..." (base prepended twice) → 404. Seen
+  // most often right after an idle-timeout sign-out on production.
+  const path = useRouterState({ select: (s) => s.location.pathname });
 
   useEffect(() => {
     if (!loading && !user) {
-      const path = window.location.pathname;
       nav({ to: "/sign-in", search: { redirect: path, reason: REDIRECT_REASONS[path] } });
     }
-  }, [loading, user, nav]);
+  }, [loading, user, nav, path]);
 
   if (loading || !user) return null;
 
