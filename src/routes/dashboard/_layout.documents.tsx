@@ -186,17 +186,10 @@ function Documents() {
     }
   }
 
-  async function handleReviewOpen(doc: DocumentRecord) {
+  // The modal itself fetches the explanation (and stores it) if it's not
+  // already on the record — this just opens it.
+  function handleReviewOpen(doc: DocumentRecord) {
     setReviewDoc(doc);
-    if (!doc.aiExplanation) {
-      try {
-        const { explanation } = await reviewDocument(doc.id);
-        patchDoc(doc.id, { aiExplanation: explanation });
-        setReviewDoc((r) => (r && r.id === doc.id ? { ...r, aiExplanation: explanation } : r));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Could not generate the AI review.");
-      }
-    }
   }
 
   function onEditorSaved(newDoc: DocumentRecord) {

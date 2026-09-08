@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -28,6 +28,13 @@ export function DocumentReviewModal({
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [thread, setThread] = useState<{ q: string; a: string }[]>([]);
+  // The document id we've already kicked off a review fetch for — so a
+  // parent re-render (new onExplanation identity) never re-fires the call.
+  const fetchedFor = useRef<string | null>(null);
+  const onExplanationRef = useRef(onExplanation);
+  onExplanationRef.current = onExplanation;
+
+  const docId = doc?.id ?? null;
 
   useEffect(() => {
     setThread([]);
@@ -37,14 +44,15 @@ export function DocumentReviewModal({
       return;
     }
     setExplanation(doc.aiExplanation ?? null);
-    if (doc.aiExplanation) return;
+    if (doc.aiExplanation || fetchedFor.current === doc.id) return;
+    fetchedFor.current = doc.id;
     let cancelled = false;
     setLoadingExplanation(true);
     reviewDocument(doc.id)
       .then((r) => {
         if (cancelled) return;
         setExplanation(r.explanation);
-        onExplanation(doc.id, r.explanation);
+        onExplanationRef.current(doc.id, r.explanation);
       })
       .catch((err) => {
         if (!cancelled) toast.error(getErrorMessage(err, "Could not generate the AI review."));
@@ -55,7 +63,8 @@ export function DocumentReviewModal({
     return () => {
       cancelled = true;
     };
-  }, [doc, onExplanation]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId]);
 
   async function submit() {
     const q = question.trim();
