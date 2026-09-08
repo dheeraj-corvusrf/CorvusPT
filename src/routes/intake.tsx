@@ -939,10 +939,33 @@ function Intake() {
                 </div>
               </div>
             )}
+            {alreadySaved && (
+              <div className="mb-4 flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-4 py-3 text-sm">
+                <Check className="h-4 w-4 shrink-0 text-accent" />
+                <span>
+                  You&apos;ve already added this property to your account — no need to add it again.
+                </span>
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
-              <button onClick={() => setStep("confirm")} className="btn-primary btn-primary-hover">
-                Continue
-              </button>
+              {alreadySaved ? (
+                <button
+                  onClick={() => {
+                    updateIntake({ confirmed: true });
+                    nav({ to: "/ai-report" });
+                  }}
+                  className="btn-primary btn-primary-hover"
+                >
+                  View AI Report
+                </button>
+              ) : (
+                <button
+                  onClick={() => setStep("confirm")}
+                  className="btn-primary btn-primary-hover"
+                >
+                  Continue
+                </button>
+              )}
               <button onClick={() => setStep("address")} className="btn-outline">
                 Search a Different Address
               </button>
