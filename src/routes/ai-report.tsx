@@ -26,6 +26,10 @@ import {
   ArrowDown,
   ChevronDown,
   Upload,
+  User,
+  Cpu,
+  Scale,
+  Gauge,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -4591,31 +4595,38 @@ function StrategyDetail({
   );
 }
 
-// A small "how the analysis flows" ribbon — User Input → AI Processing →
-// Logic/Decision → AI Output → Next Step. Purely a process cue; the labels
-// are passed by the module so each can name its own steps.
+// A "how the analysis flows" ribbon — User Input → AI Processing →
+// Logic/Decision → AI Output → Next Step. Purely a process cue; each step
+// carries its own eyebrow (the stage), a short label, and an icon so a
+// module can name its own pipeline. The AI-output step is accented.
 function AnalysisPipeline({
   steps,
 }: {
-  steps: { label: string; done?: boolean; current?: boolean }[];
+  steps: { eyebrow: string; label: string; Icon: LucideIcon; current?: boolean }[];
 }) {
   return (
-    <div className="flex items-stretch gap-1 overflow-x-auto pb-1 text-[10px]">
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
       {steps.map((s, i) => (
         <Fragment key={s.label}>
           <div
-            className={`flex shrink-0 items-center rounded-md px-2 py-1 font-medium ${
-              s.current
-                ? "bg-accent/15 text-accent"
-                : s.done
-                  ? "bg-secondary/70 text-foreground"
-                  : "bg-secondary/40 text-muted-foreground"
+            className={`flex w-[108px] shrink-0 flex-col items-center gap-1 rounded-lg px-2 py-2 text-center ${
+              s.current ? "bg-accent/15 ring-1 ring-accent/30" : "bg-secondary/50"
             }`}
           >
-            {s.label}
+            <s.Icon
+              className={`h-4 w-4 ${s.current ? "text-accent" : "text-muted-foreground"}`}
+            />
+            <div
+              className={`text-[8px] font-bold uppercase leading-none tracking-wide ${
+                s.current ? "text-accent" : "text-muted-foreground"
+              }`}
+            >
+              {s.eyebrow}
+            </div>
+            <div className="text-[10px] font-medium leading-tight text-foreground">{s.label}</div>
           </div>
           {i < steps.length - 1 && (
-            <ArrowRight className="h-3 w-3 shrink-0 self-center text-muted-foreground" />
+            <ArrowRight className="h-3.5 w-3.5 shrink-0 self-center text-muted-foreground" />
           )}
         </Fragment>
       ))}
@@ -4625,79 +4636,122 @@ function AnalysisPipeline({
 
 const ZONING_ASPECT_STATUS: Record<
   ModuleResultMap["zoning"]["aspects"][number]["status"],
-  { label: string; cls: string }
+  { label: string; cls: string; Icon: LucideIcon; iconCls: string }
 > = {
-  Confirmed: { label: "Confirmed", cls: "bg-success/15 text-success" },
-  "Partial Data": { label: "Partial", cls: "bg-warning/20 text-warning-foreground" },
-  "Additional Data Needed": { label: "Needs data", cls: "bg-secondary text-muted-foreground" },
+  Confirmed: {
+    label: "Confirmed",
+    cls: "bg-success/15 text-success",
+    Icon: CheckCircle2,
+    iconCls: "text-success",
+  },
+  "Partial Data": {
+    label: "Partial",
+    cls: "bg-warning/20 text-warning-foreground",
+    Icon: AlertTriangle,
+    iconCls: "text-warning-foreground",
+  },
+  "Additional Data Needed": {
+    label: "Needs data",
+    cls: "bg-secondary text-muted-foreground",
+    Icon: HelpCircle,
+    iconCls: "text-muted-foreground",
+  },
 };
 
+const ZONING_ASPECT_ICON: Record<string, LucideIcon> = {
+  "CAD Classification": FileText,
+  "Actual Use": Building2,
+  "Zoning District": MapPin,
+  "Permitted Use": CheckCircle2,
+};
+
+// The 4-column classification line-up from the spec's screenshot: the four
+// aspects are the columns, one value row, then a muted source / upload row.
+// The Permitted Use column also carries the overall consistent/mismatch mark.
 function ZoningClassificationTable({
   aspects,
+  matches,
   onUpload,
   uploading,
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
+  matches: keyof typeof ZONING_STATUS;
   onUpload?: (aspectLabel: string, files: File[]) => void;
   uploading?: boolean;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full min-w-[520px] text-left text-xs">
+      <table className="w-full min-w-[560px] table-fixed text-left text-xs">
         <thead className="bg-secondary/60 text-[10px] uppercase tracking-wide text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-semibold">Aspect</th>
-            <th className="px-3 py-2 font-semibold">Value</th>
-            <th className="px-3 py-2 font-semibold">Status</th>
-            <th className="px-3 py-2 font-semibold">Source</th>
+            {aspects.map((a) => (
+              <th key={a.label} className="px-3 py-2 font-semibold">
+                {a.label}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {aspects.map((a) => {
-            const st = ZONING_ASPECT_STATUS[a.status];
-            return (
-              <tr key={a.label} className="border-t border-border/60 align-top">
-                <td className="px-3 py-2 font-medium">{a.label}</td>
-                <td className="px-3 py-2">{a.value}</td>
-                <td className="px-3 py-2">
-                  <span
-                    className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${st.cls}`}
-                  >
-                    {st.label}
-                  </span>
+          <tr className="border-t border-border/60 align-top">
+            {aspects.map((a) => {
+              const st = ZONING_ASPECT_STATUS[a.status];
+              const isPermitted = a.label === "Permitted Use";
+              const showMismatch = isPermitted && matches === "inconsistent";
+              const showMatch = isPermitted && matches === "consistent";
+              return (
+                <td key={a.label} className="px-3 py-2">
+                  <div className="flex items-start gap-1.5">
+                    {showMismatch ? (
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                    ) : showMatch ? (
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+                    ) : (
+                      <st.Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${st.iconCls}`} />
+                    )}
+                    <span
+                      className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
+                    >
+                      {a.value || "—"}
+                    </span>
+                  </div>
                 </td>
-                <td className="px-3 py-2 text-muted-foreground">
-                  {a.source || "—"}
-                  {onUpload && a.status === "Additional Data Needed" && (
-                    <label className="ml-2 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/10">
-                      <input
-                        type="file"
-                        accept="image/*,.pdf"
-                        multiple
-                        disabled={uploading}
-                        className="hidden"
-                        onChange={(e) => {
-                          const sel = Array.from(e.target.files ?? []);
-                          if (sel.length > 0) onUpload(a.label, sel);
-                          e.target.value = "";
-                        }}
-                      />
-                      <Upload className="h-3 w-3" />
-                      {uploading ? "Uploading…" : "Upload"}
-                    </label>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+              );
+            })}
+          </tr>
+          <tr className="border-t border-border/40 align-top text-[10px] text-muted-foreground">
+            {aspects.map((a) => (
+              <td key={a.label} className="px-3 py-2">
+                <div>{a.source || "—"}</div>
+                {onUpload && a.status === "Additional Data Needed" && (
+                  <label className="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 font-semibold text-accent hover:bg-accent/10">
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        if (sel.length > 0) onUpload(a.label, sel);
+                        e.target.value = "";
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "Uploading…" : "Upload"}
+                  </label>
+                )}
+              </td>
+            ))}
+          </tr>
         </tbody>
       </table>
     </div>
   );
 }
 
-// Compact card visual — the 4 classification aspects as small status tiles,
-// then a Matches / Mismatch pill.
+// Compact card visual — the 4 classification aspects as small icon tiles,
+// branching into a Matches / Mismatch outcome, then a "verify" call to
+// action. Mirrors the spec's card screenshot in the app's own light styling.
 function ZoningAspectTiles({
   aspects,
   matches,
@@ -4705,18 +4759,20 @@ function ZoningAspectTiles({
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
 }) {
-  const { color, label } = ZONING_STATUS[matches];
+  const consistent = matches === "consistent";
+  const uncertain = matches === "uncertain";
   return (
     <div>
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+      <div className="grid grid-cols-4 gap-1.5">
         {aspects.map((a) => {
           const st = ZONING_ASPECT_STATUS[a.status];
+          const Icon = ZONING_ASPECT_ICON[a.label] ?? FileText;
           return (
             <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
-              <div className="text-[9px] uppercase leading-tight tracking-wide text-muted-foreground">
+              <Icon className="mx-auto h-4 w-4 text-muted-foreground" />
+              <div className="mt-1 text-[8px] uppercase leading-tight tracking-wide text-muted-foreground">
                 {a.label}
               </div>
-              <div className="mt-1 truncate text-[11px] font-semibold">{a.value}</div>
               <span
                 className={`mt-1 inline-block rounded-full px-1.5 py-0.5 text-[8px] font-semibold ${st.cls}`}
               >
@@ -4726,22 +4782,58 @@ function ZoningAspectTiles({
           );
         })}
       </div>
-      <div className={`mt-2 text-center text-xs font-semibold ${color}`}>{label}</div>
+      <div className="mx-auto my-1.5 h-3 w-px bg-border" />
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div
+          className={`rounded-lg border p-2 ${
+            consistent ? "border-success/40 bg-success/10" : "border-border bg-secondary/30 opacity-50"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1 text-xs font-bold text-success">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Matches
+          </div>
+          <div className="text-[10px] text-muted-foreground">No issue</div>
+        </div>
+        <div
+          className={`rounded-lg border p-2 ${
+            !consistent && !uncertain
+              ? "border-destructive/40 bg-destructive/10"
+              : "border-border bg-secondary/30 opacity-50"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1 text-xs font-bold text-destructive">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Mismatch
+          </div>
+          <div className="text-[10px] text-muted-foreground">May impact value or exemptions</div>
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-accent/10 px-3 py-2 text-xs font-semibold text-accent">
+        <Scale className="h-4 w-4 shrink-0" />
+        Verify &amp; support any discrepancies
+        <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+      </div>
     </div>
   );
 }
 
 function ZoningImpactCol({
   title,
+  tone = "success",
   children,
 }: {
   title: string;
-  tone?: "success";
+  tone?: "success" | "accent";
   children: React.ReactNode;
 }) {
   return (
     <div className="rounded-lg border border-border p-3">
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-success">
+      <div
+        className={`mb-1 text-[10px] font-semibold uppercase tracking-wide ${
+          tone === "accent" ? "text-accent" : "text-success"
+        }`}
+      >
         {title}
       </div>
       <div className="text-xs text-muted-foreground">{children}</div>
@@ -6389,13 +6481,21 @@ function ModulePreviewContent({
       const d = moduleState.data as ModuleResultMap["zoning"];
       return (
         <div className="mt-4 grid gap-4">
+          <p className="-mb-1 text-xs text-muted-foreground">
+            AI checks alignment across classification, use, and zoning, then identifies issues.
+          </p>
           <AnalysisPipeline
             steps={[
-              { label: "Property & zoning data", done: true },
-              { label: "Zoning & use analyzer", done: true },
-              { label: "Alignment & impact model", done: true },
-              { label: "Zoning analysis report", current: true },
-              { label: "Apply to valuation", done: false },
+              { eyebrow: "User input", label: "Property & zoning data", Icon: User },
+              { eyebrow: "AI processing", label: "Zoning & use analyzer", Icon: Cpu },
+              { eyebrow: "Logic / decision", label: "Alignment & impact model", Icon: Scale },
+              {
+                eyebrow: "AI output",
+                label: "Zoning analysis report",
+                Icon: Gauge,
+                current: true,
+              },
+              { eyebrow: "Next step", label: "Apply to value relevance", Icon: ArrowRight },
             ]}
           />
 
@@ -6411,6 +6511,7 @@ function ModulePreviewContent({
 
           <ZoningClassificationTable
             aspects={d.aspects}
+            matches={d.matches}
             onUpload={
               allowEvidenceUpload
                 ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
@@ -6450,7 +6551,7 @@ function ModulePreviewContent({
               <ZoningImpactCol title="Valuation relevance" tone="success">
                 <p>{d.valuationRelevance}</p>
               </ZoningImpactCol>
-              <ZoningImpactCol title="Possible exemptions" tone="success">
+              <ZoningImpactCol title="Possible exemptions" tone="accent">
                 {d.possibleExemptions.length > 0 ? (
                   <ul className="grid gap-1 pl-4 list-disc">
                     {d.possibleExemptions.map((e, i) => (
