@@ -24,6 +24,7 @@ type HealthScoreInput = {
   compsSummary?: { median: number; min: number; max: number; count: number } | null;
   assessmentRatio?: { medianPct: number; cod: number; codOverCeiling: number } | null;
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
+  valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
 };
 
@@ -95,9 +96,15 @@ to a gauge/chips that already cover the supporting numbers, so this is the takea
 only, never a restatement of the data itself>",
 "scoreBreakdown": [{"label": "<one of: ${BREAKDOWN_LABELS.join(" | ")}>", "score": <integer
 0-100>}, ...] (only include labels the given data can actually speak to),
-"factorsIncreasing": ["<short finding that supports a protest>", ...] (up to 5),
-"factorsReducing": ["<short finding that weakens the case>", ...] (up to 5, empty array if
-none apply),
+"factorsIncreasing": ["<plain phrase, max ~12 words, that makes the protest STRONGER>",
+...] (up to 5). Each a bare point, not a sentence — no dollar figures restated, no "warrants
+a detailed review" filler, no leading "The property". Style like: "CAD value is higher than
+comparable properties", "property has condition issues", "assessment jumped sharply versus
+prior years", "assessment ratio above the county norm".
+"factorsReducing": ["<plain phrase, max ~12 words, that makes the protest WEAKER or harder
+to win>", ...] (up to 5, empty array if none apply). Same terse style. Style like: "strong
+comparable assessments nearby", "recent sale supports the CAD value", "limited evidence of
+overvaluation", "county ratio study shows uniform assessments".
 "confidencePct": <integer 0-100, how confident this analysis is given the data actually
 available>,
 "confidenceReasoning": "<ONE short sentence, max ~15 words, naming what's missing — not a
@@ -184,6 +191,18 @@ Deno.serve(async (req: Request) => {
             : " (within the IAAO standard)"),
       );
     }
+    if (input.valueHistory && input.valueHistory.length > 0) {
+      const hist = [...input.valueHistory]
+        .filter((h) => h && typeof h.year === "number" && typeof h.total === "number")
+        .sort((a, b) => a.year - b.year);
+      if (hist.length > 0) {
+        lines.push(
+          `Assessed value history (from the CAD): ${hist
+            .map((h) => `${h.year} $${h.total.toLocaleString()}`)
+            .join("; ")}.`,
+        );
+      }
+    }
     if (input.valueTrend?.jumpTriggered) {
       lines.push(
         `This property's assessed value jumped ${
@@ -217,6 +236,12 @@ Deno.serve(async (req: Request) => {
       // actually addresses the "spins forever" symptom.
       generationConfig: {
         responseMimeType: "application/json",
+        // Without this the model samples at its default temperature, so the
+        // same CAD record scored 50 ("Moderate Opportunity", 30% confidence)
+        // on one refresh and 85 ("Strong Opportunity", 55%) on the next.
+        // Every other AI function here already pins temperature 0 — this one
+        // was the outlier. Same input -> same score now.
+        temperature: 0,
         thinkingConfig: { thinkingBudget: 512 },
       },
     };
@@ -258,8 +283,8 @@ Deno.serve(async (req: Request) => {
       // enforcement, which the prompt's word counts do).
       executiveConclusion: str(parsed.executiveConclusion, 160),
       scoreBreakdown: scoreBreakdown(parsed.scoreBreakdown),
-      factorsIncreasing: strList(parsed.factorsIncreasing, 5, 90),
-      factorsReducing: strList(parsed.factorsReducing, 5, 90),
+      factorsIncreasing: strList(parsed.factorsIncreasing, 5, 80),
+      factorsReducing: strList(parsed.factorsReducing, 5, 80),
       confidencePct: score100(parsed.confidencePct),
       confidenceReasoning: str(parsed.confidenceReasoning, 140),
       methodology: str(parsed.methodology, 160),

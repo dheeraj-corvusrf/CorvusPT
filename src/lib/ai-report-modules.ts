@@ -18,6 +18,10 @@ export type ModuleAnalysisInput = {
   compsSummary?: { median: number; min: number; max: number; count: number } | null;
   assessmentRatio?: { medianPct: number; cod: number; codOverCeiling: number } | null;
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
+  // "health" only — the real year-by-year CAD value history, so Module 1's
+  // score can speak to actual historical trends rather than reporting them
+  // missing. See loadModule()'s health branch in ai-report.tsx.
+  valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
   // Module 2's own per-strategy scores, sent when loading comps/site/improvement/
   // zoning so their guidance stays consistent with — and prioritized by — the

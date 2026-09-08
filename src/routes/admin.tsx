@@ -501,7 +501,11 @@ function AdminPanel() {
       </p>
 
       <div className="mt-6 flex items-center justify-between gap-2 border-b border-border">
-        <div className="flex gap-1 overflow-x-auto">
+        {/* overflow-y-hidden: `overflow-x: auto` alone computes `overflow-y`
+            to `auto` too, and the buttons' -mb-px spills ~1px past this
+            container — enough for Windows to draw a vertical scrollbar
+            (just its ▲▼ arrows, no thumb). Clip that axis; keep x scrolling. */}
+        <div className="flex gap-1 overflow-x-auto overflow-y-hidden">
           {TABS.map((tab) => (
             <button
               key={tab.key}
