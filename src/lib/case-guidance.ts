@@ -165,14 +165,16 @@ export function getCaseGuidance(
         if (hasRealDeadline) {
           nextSteps.push({
             label: `File by ${formatDate(deadline!)}`,
-            detail: "Review and sign your Notice of Protest (Form 50-132) below.",
-            action: { label: "Review Notice of Protest", anchor: "case-documents" },
+            detail:
+              "Form 50-132, pre-filled by Corvus AI. Review, sign, and download it below, then file with your county.",
+            action: { label: "File Protest", anchor: "case-documents" },
           });
         } else {
           nextSteps.push({
-            label: "Review and sign your Notice of Protest",
-            detail: "Form 50-132, pre-filled from your case's real data.",
-            action: { label: "Review Notice of Protest", anchor: "case-documents" },
+            label: "File your Notice of Protest",
+            detail:
+              "Form 50-132, pre-filled by Corvus AI from your case's real data. Review, sign, and download it, then file with your county.",
+            action: { label: "File Protest", anchor: "case-documents" },
           });
         }
         nextSteps.push(...evidenceSteps(evidenceDocumentCount));
