@@ -1073,6 +1073,45 @@ create policy "Admins can view all protest authorizations"
   on public.protest_authorizations for select
   using (public.is_admin());
 
+-- The CorvusPT Service Agreement a property owner accepts (checkbox +
+-- "Agree & Continue") before the Appointment-of-Agent signature step — see
+-- ProtestAuthorizationFlow's "agreement" step and the record-service-agreement
+-- edge function. One row per acceptance; agreement_text is the EXACT text
+-- rendered and shown, agreement_version pins which template it was, and
+-- ip_address / user_agent / accepted_at are the electronic-acceptance record.
+-- INSERTs happen only via the edge function (service role) so the IP and the
+-- canonical text can't be supplied by the client. document_id points at the
+-- downloadable copy filed under the property's Documents.
+create table if not exists public.service_agreement_acceptances (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid not null references public.properties (id) on delete cascade,
+  protest_id uuid references public.protests (id) on delete set null,
+  owner_name text not null,
+  property_address text not null,
+  county text,
+  account_number text,
+  tax_year integer,
+  agreement_version text not null,
+  agreement_text text not null,
+  document_id uuid references public.documents (id) on delete set null,
+  ip_address text,
+  user_agent text,
+  accepted_at timestamptz not null default now()
+);
+
+alter table public.service_agreement_acceptances enable row level security;
+
+drop policy if exists "Users can view their own service agreements" on public.service_agreement_acceptances;
+create policy "Users can view their own service agreements"
+  on public.service_agreement_acceptances for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all service agreements" on public.service_agreement_acceptances;
+create policy "Admins can view all service agreements"
+  on public.service_agreement_acceptances for select
+  using (public.is_admin());
+
 -- Per-tax-year bill/payment/refund history for a property — closes the loop on the
 -- savings estimate shown at intake, which otherwise never gets compared against what
 -- the county actually billed. `properties.tax_amount_due`/`payment_due_date`/`paid_at`
