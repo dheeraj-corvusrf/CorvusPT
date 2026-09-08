@@ -5,7 +5,9 @@ const mockFrom = vi.fn();
 const mockSubmitWeb3Form = vi.fn();
 
 vi.mock("./supabase", () => ({ supabase: { from: (...args: unknown[]) => mockFrom(...args) } }));
-vi.mock("./web3forms", () => ({ submitWeb3Form: (...args: unknown[]) => mockSubmitWeb3Form(...args) }));
+vi.mock("./web3forms", () => ({
+  submitWeb3Form: (...args: unknown[]) => mockSubmitWeb3Form(...args),
+}));
 
 const { requestProtest, listProtests } = await import("./protests");
 

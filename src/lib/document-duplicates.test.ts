@@ -84,9 +84,13 @@ describe("findDuplicateCandidates", () => {
 
 describe("isEvidenceDoc", () => {
   it("honors the explicit use_as_evidence choice over document_type", () => {
-    expect(isEvidenceDoc(doc({ documentType: "Protest Evidence", useAsEvidence: false }))).toBe(false);
+    expect(isEvidenceDoc(doc({ documentType: "Protest Evidence", useAsEvidence: false }))).toBe(
+      false,
+    );
     expect(isEvidenceDoc(doc({ documentType: "Other", useAsEvidence: true }))).toBe(true);
-    expect(isEvidenceDoc(doc({ documentType: "Protest Evidence", useAsEvidence: null }))).toBe(true);
+    expect(isEvidenceDoc(doc({ documentType: "Protest Evidence", useAsEvidence: null }))).toBe(
+      true,
+    );
     expect(isEvidenceDoc(doc({ documentType: "Other", useAsEvidence: null }))).toBe(false);
   });
 });

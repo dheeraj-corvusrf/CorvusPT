@@ -13,6 +13,7 @@ import {
   ArrowRight,
   Plane,
   MapPin,
+  Loader2,
 } from "lucide-react";
 import {
   updateIntake,
@@ -206,7 +207,11 @@ function Home() {
                 style={{ backgroundColor: "var(--color-card)" }}
                 {...dropHandlers}
               >
-                <Upload className="h-4 w-4" />
+                {uploading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="h-4 w-4" />
+                )}
                 <input
                   type="file"
                   className="hidden"

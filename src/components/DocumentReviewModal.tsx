@@ -10,6 +10,7 @@ import {
 import { verdictMeta, type DocumentRecord } from "@/lib/documents";
 import { reviewDocument, askDocument } from "@/lib/document-review";
 import { getErrorMessage } from "@/lib/error-message";
+import { LoadingLine } from "@/components/LoadingLine";
 
 // AI Review for one document — the verdict + notes from analyze-document, the
 // long-form explanation from review-document, and a Q&A box grounded in the
@@ -115,7 +116,7 @@ export function DocumentReviewModal({
                 Explanation
               </div>
               {loadingExplanation ? (
-                <p className="text-muted-foreground">Reading the document…</p>
+                <LoadingLine text="Reading the document…" />
               ) : explanation ? (
                 <div className="grid gap-2 whitespace-pre-wrap text-foreground/90">
                   {explanation}

@@ -22,6 +22,8 @@ import { addProperty } from "@/lib/properties";
 import { uploadDocument } from "@/lib/documents";
 import { addTaxBill, recordRefund } from "@/lib/tax-bills";
 import { Modal } from "@/components/Modal";
+import { LoadingLine } from "@/components/LoadingLine";
+import { PropertyMaps } from "@/components/PropertyMaps";
 import { cadLookup } from "@/lib/cad-lookup";
 import { classifyPropertyCategory } from "@/lib/texas-tax-rates";
 
@@ -138,7 +140,7 @@ function DocumentReview() {
   if (!extraction) {
     return (
       <div className="container-page py-12">
-        <p className="text-muted-foreground">Loading document…</p>
+        <LoadingLine text="Loading document…" />
       </div>
     );
   }
@@ -146,7 +148,7 @@ function DocumentReview() {
   if (propertyCheck === "pending") {
     return (
       <div className="container-page py-12">
-        <p className="text-muted-foreground">Checking property type…</p>
+        <LoadingLine text="Checking property type…" />
       </div>
     );
   }
@@ -342,6 +344,12 @@ function DocumentReview() {
           body="This document's county or account number doesn't match what you entered earlier in this session. Double-check the details below before confirming."
         />
       )}
+
+      <PropertyMaps
+        address={extraction.propertyAddress ?? extraction.situsAddress ?? checkAddress}
+        cad={extraction.cadName ?? state.cad}
+        accountNumber={extraction.accountNumber ?? state.accountNumber}
+      />
 
       {/* Grid */}
       <section className="mt-6 grid gap-4 md:grid-cols-2">

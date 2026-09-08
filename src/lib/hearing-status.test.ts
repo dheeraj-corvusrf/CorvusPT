@@ -49,23 +49,23 @@ describe("getHearingUserStatus", () => {
   });
 
   it("is 'Attend Hearing' the day of the hearing", () => {
-    expect(
-      getHearingUserStatus(protest({ hearingDate: "2024-06-01" }), true, 3),
-    ).toBe("Attend Hearing");
+    expect(getHearingUserStatus(protest({ hearingDate: "2024-06-01" }), true, 3)).toBe(
+      "Attend Hearing",
+    );
   });
 
   it("is 'Upload Documents' when far out but the notice or evidence is missing", () => {
-    expect(
-      getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), false, 3),
-    ).toBe("Upload Documents");
-    expect(
-      getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), true, 0),
-    ).toBe("Upload Documents");
+    expect(getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), false, 3)).toBe(
+      "Upload Documents",
+    );
+    expect(getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), true, 0)).toBe(
+      "Upload Documents",
+    );
   });
 
   it("is 'Hearing Scheduled' when far out with the notice and evidence on file", () => {
-    expect(
-      getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), true, 3),
-    ).toBe("Hearing Scheduled");
+    expect(getHearingUserStatus(protest({ hearingDate: "2024-06-20" }), true, 3)).toBe(
+      "Hearing Scheduled",
+    );
   });
 });

@@ -3,7 +3,7 @@
 // corrupt rows exported from Excel/Sheets whenever a field contains a comma (they
 // get quoted, e.g. `"1234 Main St, Suite 100"`), so this is a real RFC4180-ish
 // state machine, not a one-liner.
-function parseCsvRows(text: string): string[][] {
+export function parseCsvRows(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -73,7 +73,7 @@ export type ParsePropertiesCsvResult = {
 
 // header name -> field name. Accepts a few common synonyms since a user's own
 // spreadsheet won't necessarily use our exact internal names.
-const HEADER_ALIASES: Record<string, keyof ParsedPropertyRow | "skip"> = {
+export const HEADER_ALIASES: Record<string, keyof ParsedPropertyRow | "skip"> = {
   address: "address",
   cad: "cad",
   county: "cad",
@@ -92,7 +92,7 @@ const HEADER_ALIASES: Record<string, keyof ParsedPropertyRow | "skip"> = {
   year: "taxYear",
 };
 
-function normalizeHeader(h: string): string {
+export function normalizeHeader(h: string): string {
   return h
     .trim()
     .toLowerCase()
@@ -101,7 +101,7 @@ function normalizeHeader(h: string): string {
 
 // Tolerates the way real-world spreadsheets format numbers — "$450,000",
 // "450,000.00" — rather than requiring a bare integer string.
-function parseNumber(raw: string): number | undefined {
+export function parseNumber(raw: string): number | undefined {
   const cleaned = raw.replace(/[$,\s]/g, "");
   if (cleaned === "") return undefined;
   const n = Number(cleaned);

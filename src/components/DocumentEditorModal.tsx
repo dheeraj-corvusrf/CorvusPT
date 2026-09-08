@@ -18,6 +18,7 @@ import {
 } from "@/lib/pdf-forms";
 import { docxToText, textToPdf, textToDocx } from "@/lib/docx-edit";
 import type { PropertyRecord } from "@/lib/properties";
+import { LoadingLine } from "@/components/LoadingLine";
 
 // Which uploaded files the Documents tab offers an in-place "Edit" for.
 export function isEditableDoc(doc: { fileName: string }): boolean {
@@ -178,7 +179,7 @@ export function DocumentEditorModal({
           </DialogDescription>
         </DialogHeader>
 
-        {kind === "loading" && <p className="text-muted-foreground text-sm">Loading the file…</p>}
+        {kind === "loading" && <LoadingLine text="Loading the file…" className="text-sm" />}
         {kind === "error" && (
           <p className="text-destructive text-sm">Couldn&apos;t open this file for editing.</p>
         )}

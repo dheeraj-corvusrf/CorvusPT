@@ -90,8 +90,13 @@ function SignIn() {
   const nav = useNavigate();
   const searchParams = Route.useSearch();
   const { redirect } = searchParams;
-  const returnTo =
-    redirect && redirect.startsWith("/") && !redirect.startsWith("//") ? redirect : "/";
+  // `redirect` must be an app-relative path. Also heal a stale value that
+  // still carries the GitHub Pages base ("/corvuspt/dashboard/...") — passing
+  // that to nav() would prepend the base a second time and 404.
+  const base = import.meta.env.BASE_URL.replace(/\/$/, ""); // "" locally, "/corvuspt" in prod
+  let cleaned = redirect ?? "";
+  if (base && cleaned.startsWith(`${base}/`)) cleaned = cleaned.slice(base.length);
+  const returnTo = cleaned && cleaned.startsWith("/") && !cleaned.startsWith("//") ? cleaned : "/";
   const [mode, setMode] = useState<"signin" | "signup">(
     searchParams.mode === "signup" ? "signup" : "signin",
   );
@@ -471,11 +476,7 @@ function SignIn() {
             disabled={loading || (mode === "signup" && !termsAccepted)}
             className="btn-primary btn-primary-hover disabled:opacity-60"
           >
-            {loading
-              ? "Please wait…"
-              : mode === "signin"
-                ? "Sign In"
-                : "Agree & Create Account"}
+            {loading ? "Please wait…" : mode === "signin" ? "Sign In" : "Agree & Create Account"}
           </button>
           <button
             type="button"
