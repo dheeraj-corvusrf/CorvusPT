@@ -1747,18 +1747,30 @@ function ModuleCard({
           />
         </div>
       </div>
-      {insight && <InsightBanner text={insight} color={m.color} />}
+      {insight && <InsightBanner text={insight} color={m.color} onClick={onOpen} />}
       <div className="px-5 pb-5 pt-3 flex items-center justify-between gap-2">
         {hasFullAccess ? (
-          <span className="text-xs font-medium text-success">Included</span>
+          <span className="text-xs font-medium text-success">Included in your plan</span>
         ) : unlocked ? (
           <span className="text-xs font-medium text-success">Free preview</span>
         ) : (
           <span className="text-xs text-muted-foreground">Requires subscription</span>
         )}
-        <button onClick={onOpen} className="btn-outline text-sm py-2">
-          {hasFullAccess ? "View report" : unlocked ? "View preview" : "Subscribe to unlock"}
-        </button>
+        {/* The insight band above is the open affordance when it's there.
+            This stays only as the fallback: a locked module (real
+            "Subscribe" CTA) or a module with no insight line yet. */}
+        {!unlocked ? (
+          <button onClick={onOpen} className="btn-outline text-sm py-2">
+            Subscribe to unlock
+          </button>
+        ) : !insight ? (
+          <button
+            onClick={onOpen}
+            className="inline-flex items-center gap-1 text-sm font-semibold text-accent hover:underline"
+          >
+            Open <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -3440,14 +3452,27 @@ function moduleInsight(
 // overflow-hidden so this never pokes past its rounded corners) — matches
 // the reference infographic's solid colored footer bars, rather than an
 // inset rounded pill floating inside the card's padding.
-function InsightBanner({ text, color }: { text: string; color: IconColor }) {
+// Clickable — this band is the card's primary "open the full module"
+// affordance now that the separate "View report" button is gone. The whole
+// strip is the hit target; the arrow nudges right on hover to read as a link.
+function InsightBanner({
+  text,
+  color,
+  onClick,
+}: {
+  text: string;
+  color: IconColor;
+  onClick: () => void;
+}) {
   return (
-    <div
-      className={`flex items-center justify-between gap-2 px-5 py-2.5 text-sm font-semibold ${color.bg} ${color.text}`}
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group flex w-full items-center justify-between gap-2 px-5 py-2.5 text-left text-sm font-semibold transition-[filter] hover:brightness-95 ${color.bg} ${color.text}`}
     >
-      <span className="min-w-0 flex-1 truncate">{text}</span>
-      <ArrowRight className="h-4 w-4 shrink-0" />
-    </div>
+      <span className="min-w-0 flex-1 truncate group-hover:underline">{text}</span>
+      <ArrowRight className="h-4 w-4 shrink-0 transition-transform group-hover:translate-x-1" />
+    </button>
   );
 }
 
