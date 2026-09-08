@@ -4605,28 +4605,26 @@ function AnalysisPipeline({
   steps: { eyebrow: string; label: string; Icon: LucideIcon; current?: boolean }[];
 }) {
   return (
-    <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+    <div className="flex items-stretch gap-1.5 overflow-x-auto pb-1">
       {steps.map((s, i) => (
         <Fragment key={s.label}>
           <div
-            className={`flex w-[108px] shrink-0 flex-col items-center gap-1 rounded-lg px-2 py-2 text-center ${
+            className={`flex min-w-[120px] flex-1 flex-col items-center gap-1.5 rounded-lg px-3 py-3 text-center ${
               s.current ? "bg-accent/15 ring-1 ring-accent/30" : "bg-secondary/50"
             }`}
           >
-            <s.Icon
-              className={`h-4 w-4 ${s.current ? "text-accent" : "text-muted-foreground"}`}
-            />
+            <s.Icon className={`h-5 w-5 ${s.current ? "text-accent" : "text-muted-foreground"}`} />
             <div
-              className={`text-[8px] font-bold uppercase leading-none tracking-wide ${
+              className={`text-[10px] font-bold uppercase leading-none tracking-wide ${
                 s.current ? "text-accent" : "text-muted-foreground"
               }`}
             >
               {s.eyebrow}
             </div>
-            <div className="text-[10px] font-medium leading-tight text-foreground">{s.label}</div>
+            <div className="text-xs font-medium leading-tight text-foreground">{s.label}</div>
           </div>
           {i < steps.length - 1 && (
-            <ArrowRight className="h-3.5 w-3.5 shrink-0 self-center text-muted-foreground" />
+            <ArrowRight className="h-4 w-4 shrink-0 self-center text-muted-foreground" />
           )}
         </Fragment>
       ))}
@@ -4681,11 +4679,11 @@ function ZoningClassificationTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full min-w-[560px] table-fixed text-left text-xs">
-        <thead className="bg-secondary/60 text-[10px] uppercase tracking-wide text-muted-foreground">
+      <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+        <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
           <tr>
             {aspects.map((a) => (
-              <th key={a.label} className="px-3 py-2 font-semibold">
+              <th key={a.label} className="px-4 py-2.5 font-semibold">
                 {a.label}
               </th>
             ))}
@@ -4699,14 +4697,14 @@ function ZoningClassificationTable({
               const showMismatch = isPermitted && matches === "inconsistent";
               const showMatch = isPermitted && matches === "consistent";
               return (
-                <td key={a.label} className="px-3 py-2">
+                <td key={a.label} className="px-4 py-3">
                   <div className="flex items-start gap-1.5">
                     {showMismatch ? (
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
                     ) : showMatch ? (
-                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
                     ) : (
-                      <st.Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${st.iconCls}`} />
+                      <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
                     )}
                     <span
                       className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
@@ -4718,12 +4716,12 @@ function ZoningClassificationTable({
               );
             })}
           </tr>
-          <tr className="border-t border-border/40 align-top text-[10px] text-muted-foreground">
+          <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
             {aspects.map((a) => (
-              <td key={a.label} className="px-3 py-2">
+              <td key={a.label} className="px-4 py-3">
                 <div>{a.source || "—"}</div>
                 {onUpload && a.status === "Additional Data Needed" && (
-                  <label className="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 font-semibold text-accent hover:bg-accent/10">
+                  <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 font-semibold text-accent hover:bg-accent/10">
                     <input
                       type="file"
                       accept="image/*,.pdf"
@@ -4828,15 +4826,15 @@ function ZoningImpactCol({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div className="rounded-lg border border-border p-4">
       <div
-        className={`mb-1 text-[10px] font-semibold uppercase tracking-wide ${
+        className={`mb-1.5 text-xs font-semibold uppercase tracking-wide ${
           tone === "accent" ? "text-accent" : "text-success"
         }`}
       >
         {title}
       </div>
-      <div className="text-xs text-muted-foreground">{children}</div>
+      <div className="text-sm text-muted-foreground">{children}</div>
     </div>
   );
 }
@@ -6481,7 +6479,7 @@ function ModulePreviewContent({
       const d = moduleState.data as ModuleResultMap["zoning"];
       return (
         <div className="mt-4 grid gap-4">
-          <p className="-mb-1 text-xs text-muted-foreground">
+          <p className="-mb-1 text-sm text-muted-foreground">
             AI checks alignment across classification, use, and zoning, then identifies issues.
           </p>
           <AnalysisPipeline
@@ -6502,7 +6500,7 @@ function ModulePreviewContent({
           <ZoningBadge matches={d.matches} />
           <AiVerdictLine icon={m.icon} text={d.assessment} color={m.color} />
 
-          <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-muted-foreground">Category:</span>
             <span className="badge-soft">{d.category}</span>
             <span className="text-muted-foreground">· Typical CAD class:</span>
@@ -6521,19 +6519,19 @@ function ModulePreviewContent({
           />
 
           {d.discrepancies.length > 0 && (
-            <div className="rounded-lg border border-warning/40 bg-warning/10 p-3">
-              <div className="text-xs font-semibold text-warning-foreground">
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4">
+              <div className="text-sm font-semibold text-warning-foreground">
                 Detected discrepancies
               </div>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
+              <p className="mt-1 text-xs text-muted-foreground">
                 A classification or zoning mismatch is a fact to explain — not, by itself, proof the
                 property is overvalued.
               </p>
-              <ul className="mt-2 grid gap-1.5 text-xs">
+              <ul className="mt-2.5 grid gap-2 text-sm">
                 {d.discrepancies.map((dc, i) => (
                   <li key={i}>
                     <span className="font-medium">{dc.between}</span>
-                    <span className="ml-1.5 rounded-full bg-secondary px-1.5 py-0.5 text-[9px] font-semibold text-muted-foreground">
+                    <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
                       {dc.confidence} confidence
                     </span>
                     <div className="text-muted-foreground">{dc.detail}</div>
@@ -6553,7 +6551,7 @@ function ModulePreviewContent({
               </ZoningImpactCol>
               <ZoningImpactCol title="Possible exemptions" tone="accent">
                 {d.possibleExemptions.length > 0 ? (
-                  <ul className="grid gap-1 pl-4 list-disc">
+                  <ul className="grid gap-1.5 pl-4 list-disc">
                     {d.possibleExemptions.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
@@ -6564,7 +6562,7 @@ function ModulePreviewContent({
               </ZoningImpactCol>
               <ZoningImpactCol title="Evidence required" tone="success">
                 {d.evidenceRequired.length > 0 ? (
-                  <ul className="grid gap-1 pl-4 list-disc">
+                  <ul className="grid gap-1.5 pl-4 list-disc">
                     {d.evidenceRequired.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
@@ -6576,7 +6574,7 @@ function ModulePreviewContent({
             </div>
           </div>
 
-          <div className="grid gap-2 rounded-lg bg-secondary/40 p-3 text-xs sm:grid-cols-2">
+          <div className="grid gap-3 rounded-lg bg-secondary/40 p-4 text-sm sm:grid-cols-2">
             <div>
               <div className="font-semibold text-foreground">Restrictions</div>
               <p className="text-muted-foreground">{d.restrictions || "—"}</p>
