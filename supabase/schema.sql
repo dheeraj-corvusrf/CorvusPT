@@ -914,7 +914,29 @@ do $$ begin
       check (ai_verdict is null or ai_verdict in ('valid', 'issues', 'invalid'));
   end if;
 end $$;
-grant update (file_name) on public.documents to authenticated;
+
+-- Documents workspace (see the Documents tab). deleted_at is a soft delete —
+-- the row and its storage object stay, so a delete can be undone / restored
+-- from the "Recently deleted" list; a real purge is a row DELETE (existing
+-- policy). use_as_evidence is the user's explicit choice for whether a file
+-- feeds the protest evidence packet (null = fall back to document_type).
+-- duplicate_of / dup_reviewed track the "possible duplicate — keep both or
+-- delete one" prompt. ai_explanation is the long-form AI Review text (the
+-- review-document edge function writes it, distinct from ai_notes).
+-- edited_from links an AI-edited copy back to the file it was edited from.
+alter table public.documents
+  add column if not exists deleted_at timestamptz,
+  add column if not exists use_as_evidence boolean,
+  add column if not exists duplicate_of uuid references public.documents (id) on delete set null,
+  add column if not exists dup_reviewed boolean not null default false,
+  add column if not exists ai_explanation text,
+  add column if not exists edited_from uuid references public.documents (id) on delete set null;
+
+-- file_name (rename), plus the ones the user controls directly from the
+-- Documents tab. ai_explanation is written only by the review-document edge
+-- function (service role); edited_from is set on insert.
+grant update (file_name, deleted_at, use_as_evidence, dup_reviewed, duplicate_of)
+  on public.documents to authenticated;
 
 -- Backfill: earlier uploads used protest_evidence_items.document_id (now legacy —
 -- superseded by evidence_item_id above) to link a single file. Idempotent, so it's

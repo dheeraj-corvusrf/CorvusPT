@@ -49,6 +49,16 @@ export type DocumentRecord = {
   aiCrossRefs?: string | null;
   aiCheckedAt?: string | null;
   suggestedName?: string | null;
+  // Documents-workspace fields (see schema.sql). deletedAt set = in the
+  // trash. useAsEvidence: user's explicit include/exclude for the protest
+  // evidence packet (null = fall back to documentType). editedFrom: the id
+  // of the file this one was AI-edited from.
+  deletedAt?: string | null;
+  useAsEvidence?: boolean | null;
+  duplicateOf?: string | null;
+  dupReviewed?: boolean;
+  aiExplanation?: string | null;
+  editedFrom?: string | null;
 };
 
 type DocumentRow = {
@@ -65,10 +75,16 @@ type DocumentRow = {
   ai_cross_refs: string | null;
   ai_checked_at: string | null;
   suggested_name: string | null;
+  deleted_at: string | null;
+  use_as_evidence: boolean | null;
+  duplicate_of: string | null;
+  dup_reviewed: boolean | null;
+  ai_explanation: string | null;
+  edited_from: string | null;
 };
 
 const SELECT_COLUMNS =
-  "id, property_id, file_name, storage_path, document_type, uploaded_at, category, source, ai_verdict, ai_notes, ai_cross_refs, ai_checked_at, suggested_name";
+  "id, property_id, file_name, storage_path, document_type, uploaded_at, category, source, ai_verdict, ai_notes, ai_cross_refs, ai_checked_at, suggested_name, deleted_at, use_as_evidence, duplicate_of, dup_reviewed, ai_explanation, edited_from";
 
 function fromRow(row: DocumentRow): DocumentRecord {
   return {
@@ -85,6 +101,12 @@ function fromRow(row: DocumentRow): DocumentRecord {
     aiCrossRefs: row.ai_cross_refs,
     aiCheckedAt: row.ai_checked_at,
     suggestedName: row.suggested_name,
+    deletedAt: row.deleted_at,
+    useAsEvidence: row.use_as_evidence,
+    duplicateOf: row.duplicate_of,
+    dupReviewed: row.dup_reviewed ?? false,
+    aiExplanation: row.ai_explanation,
+    editedFrom: row.edited_from,
   };
 }
 
@@ -96,6 +118,9 @@ export async function uploadDocument(
   propertyId: string,
   file: File,
   documentType?: string | null,
+  // Set when this file is an AI-edited copy of another document — links the
+  // new row back to its source (documents.edited_from).
+  editedFrom?: string | null,
 ): Promise<DocumentRecord> {
   const storagePath = `${userId}/${propertyId}/${Date.now()}-${file.name}`;
   const { error: uploadError } = await supabase.storage
@@ -111,6 +136,7 @@ export async function uploadDocument(
       file_name: file.name,
       storage_path: storagePath,
       document_type: documentType ?? null,
+      edited_from: editedFrom ?? null,
     })
     .select()
     .single();
@@ -118,12 +144,30 @@ export async function uploadDocument(
   return fromRow(data as DocumentRow);
 }
 
+// Live documents only — soft-deleted rows (deleted_at set) are excluded so
+// they never leak into the evidence packet, Module 8, or the pre-filing
+// check. The Documents tab's trash uses listTrashedDocuments below.
 export async function listDocuments(userId: string): Promise<DocumentRecord[]> {
   const { data, error } = await supabase
     .from("documents")
     .select(SELECT_COLUMNS)
     .eq("user_id", userId)
+    .is("deleted_at", null)
     .order("uploaded_at", { ascending: false });
+  if (error) throw error;
+  return (data as DocumentRow[]).map(fromRow);
+}
+
+// Soft-deleted documents from the last 30 days — the "Recently deleted" list.
+export async function listTrashedDocuments(userId: string): Promise<DocumentRecord[]> {
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("documents")
+    .select(SELECT_COLUMNS)
+    .eq("user_id", userId)
+    .not("deleted_at", "is", null)
+    .gte("deleted_at", cutoff)
+    .order("deleted_at", { ascending: false });
   if (error) throw error;
   return (data as DocumentRow[]).map(fromRow);
 }
@@ -140,9 +184,17 @@ export async function getProtestEvidenceDocuments(
   propertyId: string,
 ): Promise<DocumentRecord[]> {
   const docs = await listDocuments(userId);
-  return docs.filter(
-    (d) => d.propertyId === propertyId && d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE,
-  );
+  return docs.filter((d) => d.propertyId === propertyId && isEvidenceDoc(d));
+}
+
+// Whether a document feeds the protest evidence packet. The user's explicit
+// use_as_evidence choice wins (true = include even a non-evidence-typed
+// file; false = exclude even a "Protest Evidence" one); null falls back to
+// the document_type tag.
+export function isEvidenceDoc(d: DocumentRecord): boolean {
+  if (d.useAsEvidence === true) return true;
+  if (d.useAsEvidence === false) return false;
+  return d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE;
 }
 
 // Real "Filing Proof"-tagged documents for one property — see
@@ -181,17 +233,53 @@ export async function getDocumentUrl(storagePath: string): Promise<string> {
   return data.signedUrl;
 }
 
-// Row delete is the one that matters (it's what the RLS "Users can delete their
-// own documents" policy governs, and what makes the file disappear from the
-// UI). Removing the storage object is best-effort cleanup — an orphaned object
-// is invisible to the user; a failed row delete is not.
+// Soft delete — the row and its storage object stay so the delete can be
+// undone (Undo toast) or restored from "Recently deleted". A real purge is
+// purgeDocument() below.
 export async function deleteDocument(doc: DocumentRecord): Promise<void> {
+  const { error } = await supabase
+    .from("documents")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", doc.id);
+  if (error) throw error;
+}
+
+export async function restoreDocument(id: string): Promise<void> {
+  const { error } = await supabase.from("documents").update({ deleted_at: null }).eq("id", id);
+  if (error) throw error;
+}
+
+// Permanent delete — row delete (governed by the RLS "Users can delete their
+// own documents" policy) plus best-effort storage cleanup. Used by "Delete
+// permanently" in the trash.
+export async function purgeDocument(doc: DocumentRecord): Promise<void> {
   const { error } = await supabase.from("documents").delete().eq("id", doc.id);
   if (error) throw error;
   await supabase.storage
     .from("documents")
     .remove([doc.storagePath])
     .catch(() => {});
+}
+
+export async function setUseAsEvidence(id: string, value: boolean | null): Promise<void> {
+  const { error } = await supabase
+    .from("documents")
+    .update({ use_as_evidence: value })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+// Records that the user has resolved the "possible duplicate" prompt for a
+// document. Pass the other document's id to note which file this one dupes.
+export async function markDuplicateReviewed(
+  id: string,
+  duplicateOf: string | null = null,
+): Promise<void> {
+  const { error } = await supabase
+    .from("documents")
+    .update({ dup_reviewed: true, duplicate_of: duplicateOf })
+    .eq("id", id);
+  if (error) throw error;
 }
 
 // A small, honest display taxonomy over the free-text document_type — for the
