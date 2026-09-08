@@ -263,7 +263,7 @@ function Settings() {
               to="/terms"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-accent-foreground underline underline-offset-2"
+              className="text-accent underline underline-offset-2"
             >
               Terms of Service
             </Link>
@@ -271,7 +271,7 @@ function Settings() {
               to="/privacy"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-accent-foreground underline underline-offset-2"
+              className="text-accent underline underline-offset-2"
             >
               Privacy Policy
             </Link>

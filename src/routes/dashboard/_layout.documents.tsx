@@ -703,7 +703,7 @@ function PropertyDocGroup({
                       <code className="bg-secondary rounded px-1 py-0.5">{doc.suggestedName}</code>
                       <button
                         onClick={() => onRename(doc, doc.suggestedName!)}
-                        className="text-accent-foreground underline underline-offset-2"
+                        className="text-accent underline underline-offset-2"
                       >
                         Apply
                       </button>

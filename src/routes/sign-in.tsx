@@ -441,7 +441,7 @@ function SignIn() {
                     href="/terms"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-accent-foreground underline underline-offset-2"
+                    className="text-accent underline underline-offset-2"
                   >
                     Terms of Service
                   </a>{" "}
@@ -450,7 +450,7 @@ function SignIn() {
                     href="/privacy"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-accent-foreground underline underline-offset-2"
+                    className="text-accent underline underline-offset-2"
                   >
                     Privacy Policy
                   </a>

@@ -78,7 +78,7 @@ export function LegalGate() {
               to="/terms"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-accent-foreground underline"
+              className="text-accent underline"
             >
               Terms of Service
             </Link>{" "}
@@ -87,7 +87,7 @@ export function LegalGate() {
               to="/privacy"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-accent-foreground underline"
+              className="text-accent underline"
             >
               Privacy Policy
             </Link>{" "}
