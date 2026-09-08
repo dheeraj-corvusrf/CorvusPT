@@ -7,10 +7,13 @@ import {
   listDocuments,
   getDocumentUrl,
   deleteDocument,
-  categorizeDocument,
+  analyzeDocument,
+  renameDocument,
+  docCategory,
   sourceLabel,
   standardDocName,
   previewKind,
+  verdictMeta,
   type DocumentRecord,
 } from "@/lib/documents";
 import {
@@ -42,6 +45,7 @@ function Documents() {
   const [uploadingPropertyId, setUploadingPropertyId] = useState<string | null>(null);
   const [viewDoc, setViewDoc] = useState<DocumentRecord | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!user) return;
@@ -75,6 +79,53 @@ function Documents() {
       toast.error(err instanceof Error ? err.message : "Could not delete this document.");
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  function patchDoc(id: string, patch: Partial<DocumentRecord>) {
+    setDocuments((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+    setViewDoc((v) => (v && v.id === id ? { ...v, ...patch } : v));
+  }
+
+  async function handleAnalyze(doc: DocumentRecord): Promise<void> {
+    setAnalyzingIds((prev) => new Set(prev).add(doc.id));
+    try {
+      const a = await analyzeDocument(doc.id);
+      patchDoc(doc.id, {
+        category: a.category,
+        source: a.source,
+        aiVerdict: a.verdict,
+        aiNotes: a.notes,
+        aiCrossRefs: a.crossRefs.join("\n") || null,
+        aiCheckedAt: a.aiCheckedAt,
+        suggestedName: a.suggestedName,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not analyze this document.");
+    } finally {
+      setAnalyzingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(doc.id);
+        return next;
+      });
+    }
+  }
+
+  // Sequential (not Promise.all) — one Gemini call per file at a time, same
+  // reasoning as every other bulk action here.
+  async function handleAnalyzeAll(docs: DocumentRecord[]): Promise<void> {
+    for (const doc of docs) {
+      if (!doc.aiCheckedAt) await handleAnalyze(doc);
+    }
+  }
+
+  async function handleRename(doc: DocumentRecord, name: string) {
+    try {
+      await renameDocument(doc.id, name);
+      patchDoc(doc.id, { fileName: name });
+      toast.success("Renamed.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not rename this document.");
     }
   }
 
@@ -178,7 +229,9 @@ function Documents() {
       <h1 className="font-serif text-2xl font-semibold">Documents</h1>
       <p className="text-muted-foreground text-sm">
         Documents you upload during property intake land here automatically — or upload several at
-        once below and AI will read each one and sort it to the right property for you.
+        once below and AI sorts each one to the right property. Run an AI check on any file to
+        classify it, confirm it belongs to that property, flag anything off, and get a suggested
+        name.
       </p>
 
       <div className="mt-6 card-elev p-6">
@@ -245,7 +298,11 @@ function Documents() {
                 onView={setViewDoc}
                 onDownload={handleDownload}
                 onDelete={handleDelete}
+                onAnalyze={handleAnalyze}
+                onAnalyzeAll={handleAnalyzeAll}
+                onRename={handleRename}
                 deletingId={deletingId}
+                analyzingIds={analyzingIds}
                 onUpload={(files) =>
                   group.property && handleUploadToProperty(group.property, files)
                 }
@@ -268,19 +325,39 @@ function Documents() {
         doc={viewDoc}
         onClose={() => setViewDoc(null)}
         onDownload={handleDownload}
+        onAnalyze={handleAnalyze}
+        onRename={handleRename}
+        analyzing={viewDoc ? analyzingIds.has(viewDoc.id) : false}
       />
     </div>
   );
+}
+
+function VerdictBadge({ doc }: { doc: DocumentRecord }) {
+  const m = verdictMeta(doc.aiVerdict);
+  const cls =
+    m.tone === "success"
+      ? "badge-soft"
+      : m.tone === "destructive"
+        ? "badge-soft text-destructive"
+        : "badge-soft-warning";
+  return <span className={cls}>{doc.aiVerdict ? `AI: ${m.label}` : "AI: not checked"}</span>;
 }
 
 function DocumentViewerModal({
   doc,
   onClose,
   onDownload,
+  onAnalyze,
+  onRename,
+  analyzing,
 }: {
   doc: DocumentRecord | null;
   onClose: () => void;
   onDownload: (doc: DocumentRecord) => void;
+  onAnalyze: (doc: DocumentRecord) => void;
+  onRename: (doc: DocumentRecord, name: string) => void;
+  analyzing: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
@@ -320,18 +397,18 @@ function DocumentViewerModal({
           )}
         </DialogHeader>
 
-        <div className="bg-secondary/40 grid min-h-[55vh] place-items-center overflow-hidden rounded-lg">
+        <div className="bg-secondary/40 grid min-h-[45vh] place-items-center overflow-hidden rounded-lg">
           {error ? (
             <p className="text-destructive p-6 text-sm">Couldn't load this document.</p>
           ) : !url ? (
             <p className="text-muted-foreground p-6 text-sm">Loading…</p>
           ) : kind === "pdf" ? (
-            <iframe title={doc?.fileName ?? "Document"} src={url} className="h-[70vh] w-full" />
+            <iframe title={doc?.fileName ?? "Document"} src={url} className="h-[60vh] w-full" />
           ) : kind === "image" ? (
             <img
               src={url}
               alt={doc?.fileName ?? "Document"}
-              className="max-h-[70vh] w-auto object-contain"
+              className="max-h-[60vh] w-auto object-contain"
             />
           ) : (
             <p className="text-muted-foreground p-6 text-sm">
@@ -339,6 +416,51 @@ function DocumentViewerModal({
             </p>
           )}
         </div>
+
+        {doc && (
+          <div className="border-border rounded-lg border p-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">AI check</span>
+              <button
+                onClick={() => onAnalyze(doc)}
+                disabled={analyzing}
+                className="btn-outline text-xs disabled:opacity-60"
+              >
+                {analyzing ? "Analyzing…" : doc.aiCheckedAt ? "Re-check" : "Run check"}
+              </button>
+            </div>
+            {doc.aiCheckedAt ? (
+              <div className="mt-2 grid gap-2">
+                <VerdictBadge doc={doc} />
+                {doc.aiNotes && <p className="text-muted-foreground text-xs">{doc.aiNotes}</p>}
+                {doc.aiCrossRefs && (
+                  <ul className="text-muted-foreground grid gap-1 text-xs">
+                    {doc.aiCrossRefs.split("\n").map((line, i) => (
+                      <li key={i}>· {line}</li>
+                    ))}
+                  </ul>
+                )}
+                {doc.suggestedName && doc.suggestedName !== doc.fileName && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-muted-foreground">Suggested name:</span>
+                    <code className="bg-secondary rounded px-1.5 py-0.5">{doc.suggestedName}</code>
+                    <button
+                      onClick={() => onRename(doc, doc.suggestedName!)}
+                      className="btn-outline text-xs"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-muted-foreground mt-2 text-xs">
+                Not checked yet — run a check to classify it, confirm it belongs to this property,
+                and get a suggested name.
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="flex justify-end gap-2">
           {doc && (
@@ -440,7 +562,11 @@ function PropertyDocGroup({
   onView,
   onDownload,
   onDelete,
+  onAnalyze,
+  onAnalyzeAll,
+  onRename,
   deletingId,
+  analyzingIds,
   onUpload,
   uploading,
   defaultExpanded,
@@ -449,13 +575,30 @@ function PropertyDocGroup({
   onView: (doc: DocumentRecord) => void;
   onDownload: (doc: DocumentRecord) => void;
   onDelete: (doc: DocumentRecord) => void;
+  onAnalyze: (doc: DocumentRecord) => void;
+  onAnalyzeAll: (docs: DocumentRecord[]) => void;
+  onRename: (doc: DocumentRecord, name: string) => void;
   deletingId: string | null;
+  analyzingIds: Set<string>;
   onUpload: (files: File[]) => void;
   uploading: boolean;
   defaultExpanded: boolean;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded && group.docs.length > 0);
   const hasDocs = group.docs.length > 0;
+  const checked = group.docs.filter((d) => d.aiCheckedAt);
+  const issues = group.docs.filter((d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid");
+  const unchecked = group.docs.filter((d) => !d.aiCheckedAt);
+  const anyAnalyzing = group.docs.some((d) => analyzingIds.has(d.id));
+  const summary = hasDocs
+    ? [
+        `${checked.length}/${group.docs.length} checked`,
+        issues.length > 0 ? `${issues.length} need${issues.length === 1 ? "s" : ""} a look` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : null;
+
   return (
     <div className="card-elev p-4">
       <div className="flex items-center justify-between gap-2">
@@ -470,9 +613,25 @@ function PropertyDocGroup({
               className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`}
             />
           )}
-          <h2 className="truncate font-semibold">{group.label}</h2>
+          <span className="min-w-0">
+            <h2 className="truncate font-semibold">{group.label}</h2>
+            {summary && <span className="text-muted-foreground text-xs">{summary}</span>}
+          </span>
         </button>
         <div className="flex shrink-0 items-center gap-3">
+          {hasDocs && unchecked.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setExpanded(true);
+                onAnalyzeAll(group.docs);
+              }}
+              disabled={anyAnalyzing}
+              className="btn-outline text-xs disabled:opacity-60"
+            >
+              {anyAnalyzing ? "Checking…" : `Check ${unchecked.length}`}
+            </button>
+          )}
           {group.property && (
             <label
               className={`btn-outline text-xs cursor-pointer ${uploading ? "pointer-events-none opacity-60" : ""}`}
@@ -503,7 +662,8 @@ function PropertyDocGroup({
       {expanded && (
         <div className="mt-2 grid gap-2">
           {group.docs.map((doc) => {
-            const cat = categorizeDocument(doc.documentType);
+            const cat = docCategory(doc);
+            const analyzing = analyzingIds.has(doc.id);
             return (
               <div
                 key={doc.id}
@@ -528,9 +688,33 @@ function PropertyDocGroup({
                         Feeds: {cat.feeds}
                       </span>
                     )}
+                    <VerdictBadge doc={doc} />
                   </div>
+                  {doc.aiVerdict && doc.aiVerdict !== "valid" && doc.aiNotes && (
+                    <p className="text-muted-foreground mt-1 text-xs">{doc.aiNotes}</p>
+                  )}
+                  {doc.suggestedName && doc.suggestedName !== doc.fileName && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                      <span className="text-muted-foreground">Rename to</span>
+                      <code className="bg-secondary rounded px-1 py-0.5">{doc.suggestedName}</code>
+                      <button
+                        onClick={() => onRename(doc, doc.suggestedName!)}
+                        className="text-accent-foreground underline underline-offset-2"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => onAnalyze(doc)}
+                    disabled={analyzing}
+                    className="btn-outline text-sm disabled:opacity-60"
+                    aria-label={`AI check ${doc.fileName}`}
+                  >
+                    {analyzing ? "Checking…" : doc.aiCheckedAt ? "Re-check" : "Check"}
+                  </button>
                   <button
                     onClick={() => onView(doc)}
                     className="btn-outline text-sm"

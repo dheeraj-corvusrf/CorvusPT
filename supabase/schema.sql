@@ -873,6 +873,30 @@ create policy "Admins can update all documents"
 alter table public.documents add column if not exists evidence_item_id uuid
   references public.protest_evidence_items (id) on delete set null;
 
+-- Document analysis (see supabase/functions/analyze-document and the Documents
+-- tab). category/source are a canonical taxonomy over the free-text
+-- document_type; ai_verdict ('valid' | 'issues' | 'invalid') plus ai_notes /
+-- ai_cross_refs / ai_checked_at are the per-document AI check; suggested_name
+-- is the AI's proposed filename under the naming standard. All of these are
+-- written ONLY by the analyze-document edge function (service role) — the
+-- one thing a user can now also change on an existing row is file_name
+-- (applying a suggested rename), so that's added to the column grant.
+alter table public.documents
+  add column if not exists category text,
+  add column if not exists source text,
+  add column if not exists ai_verdict text,
+  add column if not exists ai_notes text,
+  add column if not exists ai_cross_refs text,
+  add column if not exists ai_checked_at timestamptz,
+  add column if not exists suggested_name text;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'documents_ai_verdict_chk') then
+    alter table public.documents add constraint documents_ai_verdict_chk
+      check (ai_verdict is null or ai_verdict in ('valid', 'issues', 'invalid'));
+  end if;
+end $$;
+grant update (file_name) on public.documents to authenticated;
+
 -- Backfill: earlier uploads used protest_evidence_items.document_id (now legacy —
 -- superseded by evidence_item_id above) to link a single file. Idempotent, so it's
 -- safe to re-run: only touches documents not already linked.
