@@ -34,6 +34,15 @@ test("signing the authorization and requesting a protest creates a case", async 
   // re-renders its content as it finishes mounting/opening — interacting
   // with a field before that settles gets it detached mid-fill. Waiting for
   // the dialog's own heading avoids that race.
+  await page
+    .getByRole("heading", { name: "CorvusPT Service Agreement" })
+    .waitFor({ state: "visible" });
+
+  // Step 0: the Service Agreement — attest, then "Agree & Continue" (this
+  // records the acceptance server-side and files a copy under Documents).
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Agree & Continue" }).click();
+
   await page.getByRole("heading", { name: "Property Owner Details" }).waitFor({ state: "visible" });
 
   // Step 1: owner details — only email is prefilled from the account; first/
@@ -52,7 +61,16 @@ test("signing the authorization and requesting a protest creates a case", async 
   await page.getByRole("radio").last().check(); // "No"
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 3: review + typed signature.
+  // Step 3: "Review Before Proceeding" AI acknowledgement — check the box,
+  // then "Confirm & Continue" (records the acknowledgement per property/case).
+  await page
+    .getByRole("heading", { name: "Review Before Proceeding" })
+    .waitFor({ state: "visible" });
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Confirm & Continue" }).click();
+
+  // Step 4: review + typed signature.
+  await page.getByRole("heading", { name: "Review & Sign" }).waitFor({ state: "visible" });
   await page.getByRole("checkbox").check();
   await page.getByPlaceholder("Type your full legal name").fill(fullName);
   await page.getByRole("button", { name: "Sign & Submit" }).click();

@@ -10,7 +10,18 @@ import {
 import { SignaturePad, type SignatureValue } from "@/components/SignaturePad";
 import { requestProtest, type ProtestRecord } from "@/lib/protests";
 import { createAuthorization } from "@/lib/protest-authorizations";
+import {
+  recordServiceAgreement,
+  SERVICE_AGREEMENT_SECTIONS,
+  OWNER_ACCEPTANCE_TEXT,
+  SERVICE_AGREEMENT_VERSION,
+  CORVUSPT_LEGAL_ENTITY,
+  CORVUSPT_CONTACT,
+  type ServiceAgreementAcceptance,
+} from "@/lib/service-agreement";
 import { getMyProfile } from "@/lib/profile";
+import { recordAiAcknowledgement } from "@/lib/legal-acceptance";
+import { AI_ACK_CHECKBOX, AI_ACK_BODY, AI_ACK_VERSION } from "@/lib/legal";
 import type { PropertyRecord } from "@/lib/properties";
 import { getErrorMessage } from "@/lib/error-message";
 
@@ -24,7 +35,7 @@ export const AGREEMENT = {
   venue: "Dallas County, Texas",
 };
 
-type Step = "owner" | "purchase" | "review";
+type Step = "agreement" | "owner" | "purchase" | "aiack" | "review";
 const ENTITY_TYPES = ["LLC", "Corporation", "Partnership", "Estate", "Trust", "Other"] as const;
 
 // The owner-identity fields carried from one property to the next when this
@@ -80,7 +91,12 @@ export function ProtestAuthorizationFlow({
   onOpenChange: (open: boolean) => void;
   onDone: (protest: ProtestRecord, ownerInfo: CarriedOwnerInfo) => void;
 }) {
-  const [step, setStep] = useState<Step>("owner");
+  const [step, setStep] = useState<Step>("agreement");
+  const [attested, setAttested] = useState(false);
+  const [recordingAgreement, setRecordingAgreement] = useState(false);
+  const [agreementAccepted, setAgreementAccepted] = useState<ServiceAgreementAcceptance | null>(
+    null,
+  );
   const [firstName, setFirstName] = useState(initialOwnerInfo?.firstName ?? "");
   const [lastName, setLastName] = useState(initialOwnerInfo?.lastName ?? "");
   const [email, setEmail] = useState(initialOwnerInfo?.email ?? userEmail ?? "");
@@ -94,6 +110,8 @@ export function ProtestAuthorizationFlow({
     initialOwnerInfo?.entityType ?? "",
   );
   const [purchasedRecently, setPurchasedRecently] = useState<boolean | null>(null);
+  const [aiAcked, setAiAcked] = useState(false);
+  const [recordingAiAck, setRecordingAiAck] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [signature, setSignature] = useState<SignatureValue | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -115,7 +133,10 @@ export function ProtestAuthorizationFlow({
   }, [open, userId]);
 
   function reset() {
-    setStep("owner");
+    setStep("agreement");
+    setAttested(false);
+    setRecordingAgreement(false);
+    setAgreementAccepted(null);
     setFirstName(initialOwnerInfo?.firstName ?? "");
     setLastName(initialOwnerInfo?.lastName ?? "");
     setEmail(initialOwnerInfo?.email ?? userEmail ?? "");
@@ -125,6 +146,8 @@ export function ProtestAuthorizationFlow({
     setEntityRelationship(initialOwnerInfo?.entityRelationship ?? "");
     setEntityType(initialOwnerInfo?.entityType ?? "");
     setPurchasedRecently(null);
+    setAiAcked(false);
+    setRecordingAiAck(false);
     setAgreed(false);
     setSignature(null);
     setError(null);
@@ -134,6 +157,46 @@ export function ProtestAuthorizationFlow({
   function close() {
     onOpenChange(false);
     reset();
+  }
+
+  async function handleAcceptAgreement() {
+    if (!attested || recordingAgreement) return;
+    if (!isPaid) {
+      setError("This property isn't covered by an active subscription — subscribe before filing.");
+      return;
+    }
+    setRecordingAgreement(true);
+    setError(null);
+    try {
+      const rec = await recordServiceAgreement({ propertyId: property.id });
+      setAgreementAccepted(rec);
+      setStep("owner");
+    } catch (err) {
+      const message = getErrorMessage(err, "Could not record your acceptance. Please try again.");
+      setError(message);
+      toast.error(message);
+    } finally {
+      setRecordingAgreement(false);
+    }
+  }
+
+  async function handleAiAck() {
+    if (!aiAcked || recordingAiAck) return;
+    setRecordingAiAck(true);
+    setError(null);
+    try {
+      await recordAiAcknowledgement({ propertyId: property.id });
+      setStep("review");
+    } catch (err) {
+      const message = getErrorMessage(
+        err,
+        "Could not record your acknowledgement. Please try again.",
+      );
+      setError(message);
+      toast.error(message);
+    } finally {
+      setRecordingAiAck(false);
+    }
   }
 
   const ownerValid =
@@ -198,8 +261,10 @@ export function ProtestAuthorizationFlow({
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
+            {step === "agreement" && "CorvusPT Service Agreement"}
             {step === "owner" && "Property Owner Details"}
             {step === "purchase" && "One More Question"}
+            {step === "aiack" && "Review Before Proceeding"}
             {step === "review" && "Review & Sign"}
           </DialogTitle>
           <DialogDescription>
@@ -207,6 +272,90 @@ export function ProtestAuthorizationFlow({
             {batchProgress && ` — Property ${batchProgress.index} of ${batchProgress.total}`}
           </DialogDescription>
         </DialogHeader>
+
+        {step === "agreement" && (
+          <div className="grid gap-4">
+            {!isPaid && (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+                This property isn't covered by an active subscription yet — you can read the
+                agreement, but you can't continue until you subscribe.
+              </div>
+            )}
+
+            <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 rounded-lg bg-secondary/40 p-4 text-sm sm:grid-cols-2">
+              {[
+                ["Property", property.address],
+                ["Account / PID", property.accountNumber ?? "—"],
+                ["County", property.cad ?? "—"],
+                ["Tax Year", property.taxYear != null ? String(property.taxYear) : "—"],
+                [
+                  "Property Owner",
+                  (property.ownerName ?? `${firstName} ${lastName}`.trim()) || "—",
+                ],
+              ].map(([label, value]) => (
+                <div key={label} className="flex justify-between gap-3 sm:block">
+                  <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+                  <dd className="min-w-0 truncate text-right sm:text-left">{value}</dd>
+                </div>
+              ))}
+            </dl>
+
+            <p className="text-sm text-muted-foreground">
+              By checking the box below and selecting “Agree &amp; Continue,” you (“Owner”)
+              authorize CorvusPT to provide property tax protest services for the property above,
+              subject to the following terms.
+            </p>
+
+            <div className="max-h-72 space-y-3 overflow-y-auto rounded-lg border border-border p-4 text-sm">
+              {SERVICE_AGREEMENT_SECTIONS.map((s) => (
+                <section key={s.n}>
+                  <h3 className="font-semibold">
+                    {s.n}. {s.title}
+                  </h3>
+                  {s.body.map((p, i) => (
+                    <p key={i} className="mt-1 text-muted-foreground">
+                      {p}
+                    </p>
+                  ))}
+                </section>
+              ))}
+              <p className="pt-1 text-xs text-muted-foreground">
+                {CORVUSPT_LEGAL_ENTITY} · {CORVUSPT_CONTACT.address} · {CORVUSPT_CONTACT.phone} ·{" "}
+                {CORVUSPT_CONTACT.email}. Agreement version {SERVICE_AGREEMENT_VERSION}.
+              </p>
+            </div>
+
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={attested}
+                onChange={(e) => setAttested(e.target.checked)}
+                className="mt-0.5"
+              />
+              {OWNER_ACCEPTANCE_TEXT}
+            </label>
+
+            {error && <p className="text-sm text-destructive">{error}</p>}
+
+            <div className="flex gap-2">
+              <button onClick={close} className="btn-outline">
+                Cancel
+              </button>
+              <button
+                disabled={!attested || !isPaid || recordingAgreement}
+                onClick={handleAcceptAgreement}
+                className="btn-primary btn-primary-hover disabled:opacity-50"
+              >
+                {recordingAgreement ? "Recording…" : "Agree & Continue"}
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Selecting “Agree &amp; Continue” electronically signs this Agreement. A copy is saved
+              to this property's Documents. The separate Appointment of Agent (Form 50-162) is
+              signed in the next steps.
+            </p>
+          </div>
+        )}
 
         {step === "owner" && (
           <div className="grid gap-4">
@@ -382,10 +531,45 @@ export function ProtestAuthorizationFlow({
               </button>
               <button
                 disabled={purchasedRecently === null}
-                onClick={() => setStep("review")}
+                onClick={() => setStep("aiack")}
                 className="btn-primary btn-primary-hover disabled:opacity-50"
               >
                 Next
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === "aiack" && (
+          <div className="grid gap-4">
+            <p className="text-sm text-muted-foreground">
+              Before you sign and submit this protest, please review how CorvusPT&apos;s AI-assisted
+              analysis should be used.
+            </p>
+            <div className="space-y-3 rounded-lg border border-border p-4 text-sm text-muted-foreground">
+              <p>{AI_ACK_BODY}</p>
+              <p className="text-xs">Acknowledgement version {AI_ACK_VERSION}.</p>
+            </div>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={aiAcked}
+                onChange={(e) => setAiAcked(e.target.checked)}
+                className="mt-0.5"
+              />
+              {AI_ACK_CHECKBOX}
+            </label>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={() => setStep("purchase")} className="btn-outline">
+                Go Back
+              </button>
+              <button
+                disabled={!aiAcked || recordingAiAck}
+                onClick={handleAiAck}
+                className="btn-primary btn-primary-hover disabled:opacity-50"
+              >
+                {recordingAiAck ? "Recording…" : "Confirm & Continue"}
               </button>
             </div>
           </div>
@@ -395,43 +579,22 @@ export function ProtestAuthorizationFlow({
           <div className="grid gap-4">
             {!isPaid && (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
-                This property isn't covered by an active subscription yet — you can review this
-                agreement, but signing is disabled until you subscribe.
+                This property isn't covered by an active subscription yet — signing is disabled
+                until you subscribe.
               </div>
             )}
-            <div className="rounded-lg border border-border p-4 text-sm max-h-56 overflow-y-auto">
-              <h3 className="font-semibold">CorvusPT Service Agreement</h3>
-              <p className="mt-2">
-                <strong>Service:</strong> During the term of this agreement, CorvusPT will evaluate
-                your current property tax assessment for errors and available exemptions and perform
-                a comparative market analysis. If CorvusPT determines your property assessment is
-                incorrect, CorvusPT will prepare and file evidence supporting a reduction with your
-                county tax assessor and/or review board, and will represent you at hearings and
-                negotiate an assessment reduction on your behalf.
-              </p>
-              <p className="mt-2">
-                <strong>Fee:</strong> There is no fee unless CorvusPT successfully obtains a
-                reduction in your property's assessed value. If successful, CorvusPT's fee is 25% of
-                the property tax savings obtained for the year in which the appeal is filed, plus
-                any recovered tax overpayments (refunds) from previous years.
-              </p>
-              <p className="mt-2">
-                <strong>Scope of Authorization:</strong> you authorize CorvusPT to execute and
-                submit an Appointment of Agent for Property Tax Matters (or similar form) with your
-                county appraisal district; obtain property, owner, and tax information on your
-                behalf; represent and negotiate on your behalf with the appraisal district and
-                review board; and present evidence at hearings.
-              </p>
-              <p className="mt-2">
-                <strong>Termination:</strong> you may terminate this agreement at any time up to two
-                months before the appeal filing deadline. You remain responsible for fees arising
-                from services already provided before termination.
-              </p>
-              <p className="mt-2 text-xs text-muted-foreground">
-                CorvusPT, {AGREEMENT.address} · {AGREEMENT.phone} · {AGREEMENT.email}. Governed by
-                the laws of the State of Texas; venue in {AGREEMENT.venue}.
-              </p>
-            </div>
+            {agreementAccepted && (
+              <div className="rounded-lg border border-border bg-secondary/40 p-3 text-xs text-muted-foreground">
+                CorvusPT Service Agreement (v{agreementAccepted.version}) accepted on{" "}
+                {new Date(agreementAccepted.acceptedAt).toLocaleString()}. A copy is saved to this
+                property's Documents.
+              </div>
+            )}
+            <p className="text-sm text-muted-foreground">
+              Next, sign the Texas Comptroller&apos;s Appointment of Agent for Property Tax Matters
+              (Form 50-162). CorvusPT files this with {property.cad ?? "the appraisal district"}{" "}
+              after you sign.
+            </p>
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="checkbox"
@@ -439,8 +602,8 @@ export function ProtestAuthorizationFlow({
                 onChange={(e) => setAgreed(e.target.checked)}
                 className="mt-0.5"
               />
-              I have read and agree to the CorvusPT Service Agreement above, and authorize CorvusPT
-              to act as my agent for this property's tax matters.
+              I authorize CorvusPT to be appointed as my agent for property tax matters for this
+              property (Form 50-162) and to prepare and file this protest on my behalf.
             </label>
             <div>
               <SignaturePad expectedName={property.ownerName} onChange={setSignature} />
@@ -467,7 +630,7 @@ export function ProtestAuthorizationFlow({
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex gap-2">
-              <button onClick={() => setStep("purchase")} className="btn-outline">
+              <button onClick={() => setStep("aiack")} className="btn-outline">
                 Back
               </button>
               <button

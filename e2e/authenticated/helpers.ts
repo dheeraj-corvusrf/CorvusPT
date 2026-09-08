@@ -79,5 +79,24 @@ export async function cleanupLatestProtest(email: string, password: string) {
   const latest = recent?.[0];
   if (latest) await client.from("protests").delete().eq("id", latest.id);
 
+  // The authorization flow now also records a Service Agreement acceptance and
+  // files a "Service Agreement" document copy. The acceptance row is an
+  // immutable compliance record with no delete policy (fine — it's a
+  // dedicated CI account, and real acceptances aren't deleted either), but
+  // clear the recent document copy so the test account's Documents tab
+  // doesn't fill up run over run.
+  const { data: recentDocs } = await client
+    .from("documents")
+    .select("id, storage_path, uploaded_at")
+    .eq("user_id", signInData.user.id)
+    .eq("document_type", "Service Agreement")
+    .gte("uploaded_at", tenMinutesAgo)
+    .order("uploaded_at", { ascending: false })
+    .limit(3);
+  for (const d of recentDocs ?? []) {
+    await client.storage.from("documents").remove([d.storage_path as string]);
+    await client.from("documents").delete().eq("id", d.id);
+  }
+
   await client.auth.signOut();
 }
