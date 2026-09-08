@@ -21,11 +21,40 @@ describe("estimateSavings", () => {
 
   it("uses the comps tier when qualifying nearby comps exist and the subject is overvalued", async () => {
     mockedGetComps.mockResolvedValue({
-      subject: { pid: 1, address: "123 Main St", latitude: 33.05, longitude: -96.75, marketValue: 400000, ownerName: null, asCode: "R1" },
+      subject: {
+        pid: 1,
+        address: "123 Main St",
+        latitude: 33.05,
+        longitude: -96.75,
+        marketValue: 400000,
+        ownerName: null,
+        asCode: "R1",
+      },
       comps: [
-        { pid: 2, address: "125 Main St", latitude: 33.0501, longitude: -96.7501, marketValue: 350000, ownerName: null },
-        { pid: 3, address: "127 Main St", latitude: 33.0502, longitude: -96.7502, marketValue: 340000, ownerName: null },
-        { pid: 4, address: "129 Main St", latitude: 33.0503, longitude: -96.7503, marketValue: 360000, ownerName: null },
+        {
+          pid: 2,
+          address: "125 Main St",
+          latitude: 33.0501,
+          longitude: -96.7501,
+          marketValue: 350000,
+          ownerName: null,
+        },
+        {
+          pid: 3,
+          address: "127 Main St",
+          latitude: 33.0502,
+          longitude: -96.7502,
+          marketValue: 340000,
+          ownerName: null,
+        },
+        {
+          pid: 4,
+          address: "129 Main St",
+          latitude: 33.0503,
+          longitude: -96.7503,
+          marketValue: 360000,
+          ownerName: null,
+        },
       ],
     });
 
@@ -46,9 +75,24 @@ describe("estimateSavings", () => {
 
   it("falls back to the formula tier when fewer than 3 comps qualify", async () => {
     mockedGetComps.mockResolvedValue({
-      subject: { pid: 1, address: "123 Main St", latitude: 33.05, longitude: -96.75, marketValue: 400000, ownerName: null, asCode: "R1" },
+      subject: {
+        pid: 1,
+        address: "123 Main St",
+        latitude: 33.05,
+        longitude: -96.75,
+        marketValue: 400000,
+        ownerName: null,
+        asCode: "R1",
+      },
       comps: [
-        { pid: 2, address: "125 Main St", latitude: 33.0501, longitude: -96.7501, marketValue: 350000, ownerName: null },
+        {
+          pid: 2,
+          address: "125 Main St",
+          latitude: 33.0501,
+          longitude: -96.7501,
+          marketValue: 350000,
+          ownerName: null,
+        },
       ],
     });
 
@@ -99,7 +143,11 @@ describe("estimateSavings", () => {
   });
 
   it("returns the same result for the same input (deterministic, no AI)", async () => {
-    const input = { cad: "Travis Central Appraisal District", totalValue: 600000, propertyType: "Commercial" };
+    const input = {
+      cad: "Travis Central Appraisal District",
+      totalValue: 600000,
+      propertyType: "Commercial",
+    };
     const first = await estimateSavings(input);
     const second = await estimateSavings(input);
     expect(first).toEqual(second);

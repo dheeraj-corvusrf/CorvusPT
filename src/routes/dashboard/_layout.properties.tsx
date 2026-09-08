@@ -354,7 +354,7 @@ function Properties() {
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => setImportOpen(true)} className="btn-outline">
-            Import CSV
+            Bulk Upload
           </button>
           <button type="button" onClick={() => setOwnershipsOpen(true)} className="btn-outline">
             Add Ownerships

@@ -67,7 +67,12 @@ describe("getBaseReductionPct", () => {
 describe("applyValueTrendAdjustment", () => {
   it("returns the base rate unchanged with no history", () => {
     const result = applyValueTrendAdjustment(0.05, null);
-    expect(result).toEqual({ reductionPct: 0.05, jumpTriggered: false, jumpPct: null, trailingCagrPct: null });
+    expect(result).toEqual({
+      reductionPct: 0.05,
+      jumpTriggered: false,
+      jumpPct: null,
+      trailingCagrPct: null,
+    });
   });
 
   it("returns the base rate unchanged with fewer than 2 valid years", () => {
@@ -155,7 +160,10 @@ describe("getAssessmentRatioInfo / applyAssessmentRatioAdjustment", () => {
 
   it("computes codOverCeiling above the IAAO ceiling, zero when within it", () => {
     // Collin residential COD 4.41, ceiling 15.0 -> well within, codOverCeiling 0
-    const withinStandard = getAssessmentRatioInfo("Collin Central Appraisal District", "residential");
+    const withinStandard = getAssessmentRatioInfo(
+      "Collin Central Appraisal District",
+      "residential",
+    );
     expect(withinStandard).toEqual({ medianPct: 1.0, cod: 4.41, codOverCeiling: 0 });
 
     // Denton commercial COD 17.96, ceiling 20.0 -> still within, 0
