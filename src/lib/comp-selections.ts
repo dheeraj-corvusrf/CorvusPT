@@ -1,5 +1,27 @@
 import { supabase } from "./supabase";
+import { invokeEdgeFunction } from "./edge-functions";
 import type { ExtraComp } from "./comps-analysis";
+
+export type CompSaleExtraction = {
+  address: string | null;
+  salePrice: number | null;
+  saleDate: string | null;
+  buildingSqft: number | null;
+  landSqft: number | null;
+  source: string | null;
+  confidence: number;
+  notes: string | null;
+  documentId: string;
+};
+
+// Reads a closing statement / settlement statement / purchase contract / fee
+// appraisal the user uploaded and pulls the sale facts printed on it, to
+// pre-fill the "Add a comparable" form. See
+// supabase/functions/extract-comp-sale/index.ts — nothing is written; the
+// user confirms the figures before the comp is saved (as a verified comp).
+export async function extractCompSale(documentId: string): Promise<CompSaleExtraction> {
+  return invokeEdgeFunction<CompSaleExtraction>("extract-comp-sale", { documentId });
+}
 
 // Per-property comparable-sales selection for Module 3 (Market Value). A row
 // exists only for a comp the user has actually touched:

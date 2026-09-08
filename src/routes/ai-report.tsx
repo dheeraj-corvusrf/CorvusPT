@@ -131,8 +131,10 @@ import {
   deleteCompSelection,
   excludedCompKeys,
   compSelectionsToExtraComps,
+  extractCompSale,
   type CompSelection,
   type CompSelectionInput,
+  type CompSaleExtraction,
 } from "@/lib/comp-selections";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
@@ -619,6 +621,29 @@ function Report() {
     } finally {
       setUploadingEvidence(false);
     }
+  }
+
+  // Module 3 — upload one sale document (closing statement / appraisal /
+  // contract), read it with extract-comp-sale, and hand the pulled figures
+  // back to AddCompForm so the user can confirm them before the comp is
+  // saved as verified. Tagged "Comp Sale Evidence" so it's filterable in
+  // Documents but kept out of the protest-evidence packet.
+  async function extractCompSaleFromFile(file: File): Promise<CompSaleExtraction | null> {
+    if (!user) return null;
+    const property = await ensureProperty();
+    if (!property) {
+      toast.error("Could not save this property. Please try again.");
+      return null;
+    }
+    if (file.size > UPLOAD_LIMITS.maxFileBytes) {
+      toast.error(
+        `${file.name} exceeds ${Math.round(UPLOAD_LIMITS.maxFileBytes / (1024 * 1024))} MB.`,
+      );
+      return null;
+    }
+    const doc = await uploadDocument(user.id, property.id, file, "Comp Sale Evidence");
+    setEvidenceDocs((prev) => [...prev, doc]);
+    return await extractCompSale(doc.id);
   }
 
   // Free-text fallback for Module 2's per-strategy evidence gate (see
@@ -1579,6 +1604,7 @@ function Report() {
                 compSelections={compSelections}
                 onSaveCompSelection={() => {}}
                 onRemoveCompSelection={() => {}}
+                onExtractCompSale={async () => null}
               />
             </div>
           ));
@@ -1632,6 +1658,7 @@ function Report() {
             compSelections={compSelections}
             onSaveCompSelection={saveCompSelection}
             onRemoveCompSelection={removeCompSelection}
+            onExtractCompSale={extractCompSaleFromFile}
           />
           <div className="mt-6 flex gap-2 justify-end">
             <button onClick={() => setOpenId(null)} className="btn-outline">
@@ -3124,7 +3151,13 @@ function CompsWorkflowRibbon({
 // surface (or a real sale from a document). Address is geocoded on submit so
 // it lands on the map relative to the subject; sale figures are optional and
 // stay unverified until backed by an uploaded document (Phase C).
-function AddCompForm({ onAdd }: { onAdd: (input: CompSelectionInput) => void }) {
+function AddCompForm({
+  onAdd,
+  onExtractSale,
+}: {
+  onAdd: (input: CompSelectionInput) => void;
+  onExtractSale: (file: File) => Promise<CompSaleExtraction | null>;
+}) {
   const [open, setOpen] = useState(false);
   const [address, setAddress] = useState("");
   const [salePrice, setSalePrice] = useState("");
@@ -3134,12 +3167,64 @@ function AddCompForm({ onAdd }: { onAdd: (input: CompSelectionInput) => void }) 
   const [source, setSource] = useState("");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set once a sale document has been read — the comp then saves as verified
+  // and links back to that document.
+  const [sourceDocumentId, setSourceDocumentId] = useState<string | null>(null);
+  const [extractNote, setExtractNote] = useState<string | null>(null);
 
   const num = (s: string) => {
     const n = Number(s.replace(/[^0-9.]/g, ""));
     return Number.isFinite(n) && n > 0 ? n : null;
   };
+
+  function reset() {
+    setAddress("");
+    setSalePrice("");
+    setSaleDate("");
+    setBuildingSqft("");
+    setLandSqft("");
+    setSource("");
+    setNotes("");
+    setSourceDocumentId(null);
+    setExtractNote(null);
+    setError(null);
+  }
+
+  async function handleDoc(file: File) {
+    setExtracting(true);
+    setError(null);
+    setExtractNote(null);
+    try {
+      const r = await onExtractSale(file);
+      if (!r) {
+        setError("Couldn't read that document. Enter the details by hand instead.");
+        return;
+      }
+      if (r.address) setAddress((prev) => prev || r.address!);
+      if (r.salePrice != null) setSalePrice(String(r.salePrice));
+      if (r.saleDate) setSaleDate(r.saleDate);
+      if (r.buildingSqft != null) setBuildingSqft(String(r.buildingSqft));
+      if (r.landSqft != null) setLandSqft(String(r.landSqft));
+      if (r.source) setSource((prev) => prev || r.source!);
+      if (r.salePrice != null) {
+        setSourceDocumentId(r.documentId);
+        setExtractNote(
+          `Read from your document${r.notes ? ` — ${r.notes}` : ""}. Review, then add.`,
+        );
+      } else {
+        setSourceDocumentId(null);
+        setExtractNote(
+          `No sale price found in that document${r.notes ? ` — ${r.notes}` : ""}. Enter it by hand.`,
+        );
+      }
+    } catch {
+      setError("Couldn't read that document. Enter the details by hand instead.");
+    } finally {
+      setExtracting(false);
+    }
+  }
 
   async function submit() {
     if (!address.trim()) {
@@ -3166,16 +3251,11 @@ function AddCompForm({ onAdd }: { onAdd: (input: CompSelectionInput) => void }) 
         landSqft: num(landSqft),
         source: source.trim() || null,
         notes: notes.trim() || null,
-        saleVerified: false,
+        saleVerified: !!sourceDocumentId && num(salePrice) != null,
+        sourceDocumentId,
       });
       setOpen(false);
-      setAddress("");
-      setSalePrice("");
-      setSaleDate("");
-      setBuildingSqft("");
-      setLandSqft("");
-      setSource("");
-      setNotes("");
+      reset();
     } catch {
       setError("Couldn't add that comp. Please try again.");
     } finally {
@@ -3198,6 +3278,22 @@ function AddCompForm({ onAdd }: { onAdd: (input: CompSelectionInput) => void }) 
   return (
     <div className="grid gap-2 rounded-lg border border-border p-3">
       <div className="text-xs font-semibold">Add a comparable</div>
+      <label className="inline-flex w-fit cursor-pointer items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/10">
+        <input
+          type="file"
+          accept="image/*,.pdf"
+          disabled={extracting}
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) handleDoc(f);
+            e.target.value = "";
+          }}
+        />
+        <Upload className="h-3.5 w-3.5" />
+        {extracting ? "Reading document…" : "Upload a sale document (AI reads it)"}
+      </label>
+      {extractNote && <p className="text-[11px] text-accent">{extractNote}</p>}
       <input
         className={field}
         placeholder="Address (required) — street, city, ZIP"
@@ -5026,6 +5122,7 @@ function ModulePreviewContent({
   compSelections,
   onSaveCompSelection,
   onRemoveCompSelection,
+  onExtractCompSale,
 }: {
   m: Module;
   estimated: {
@@ -5068,6 +5165,9 @@ function ModulePreviewContent({
   compSelections: CompSelection[];
   onSaveCompSelection: (sel: CompSelectionInput) => void;
   onRemoveCompSelection: (compKey: string) => void;
+  // Uploads one sale document and returns the AI-extracted figures, or null
+  // (no-op in the printable report view).
+  onExtractCompSale: (file: File) => Promise<CompSaleExtraction | null>;
 }) {
   // Real AI analysis of the customer's own uploaded evidence — see Module
   // 8's "evidence" case below and analyzeEvidence() in protest-reason.ts.
@@ -5284,7 +5384,9 @@ function ModulePreviewContent({
           </div>
         )}
 
-        {compsInteractive && <AddCompForm onAdd={onSaveCompSelection} />}
+        {compsInteractive && (
+          <AddCompForm onAdd={onSaveCompSelection} onExtractSale={onExtractCompSale} />
+        )}
 
         {hasAnyComp && (
           <>
