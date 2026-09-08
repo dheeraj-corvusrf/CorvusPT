@@ -347,7 +347,9 @@ function Report() {
           docs.filter(
             (d) =>
               d.propertyId === resolvedProperty.id &&
-              (d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+              d.useAsEvidence !== false &&
+              (d.useAsEvidence === true ||
+                d.documentType === EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType?.startsWith("Strategy Evidence: ")),
           ),
@@ -6250,8 +6252,10 @@ function ModulePreviewContent({
       // "Analyze My Evidence"/the evidence packet should see all of it.
       const protestEvidenceDocs = evidenceDocs.filter(
         (doc) =>
-          doc.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
-          doc.documentType?.startsWith("Evidence Category: "),
+          doc.useAsEvidence === true ||
+          (doc.useAsEvidence !== false &&
+            (doc.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
+              doc.documentType?.startsWith("Evidence Category: "))),
       );
 
       // Runs before the actual upload — reads each picked file's real
