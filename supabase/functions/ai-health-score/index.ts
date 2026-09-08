@@ -3,6 +3,8 @@
 //
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions (classify-document, ask-about-document, route-intent).
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -38,20 +40,7 @@ specific site defects, or facts not given below — if you don't have enough inf
 factor, say so (set dataSufficient to false and explain what's missing) rather than fabricating
 a number.
 
-Writing style: be precise and concise. Short, direct sentences — lead with the concrete fact
-(the actual number or detail), never a preamble like "based on the provided information" or
-"it should be noted that." Cut hedging and filler ("though a formal analysis should be
-performed once...", "based on this minimal information, there is..."); state a limitation
-plainly, then the specific next step, not wrapped in soft qualifiers. Every sentence must
-carry real information — if a sentence could be deleted without losing a fact, delete it.
-Example of the target density: instead of "The provided record contains only a single total
-assessed value of $3,100,000 for tax year 2026 without any land/improvement breakdown,
-property characteristics, or historical trends. Based on this minimal information, there is
-insufficient evidence to confirm a strong protest opportunity, though a formal equity and
-market comparison should be performed once detailed CAD data is pulled," write "The record
-only shows a 2026 assessed value of $3,100,000, with no land/improvement breakdown, property
-details, or historical data. There is not enough information to confirm a strong protest
-opportunity. A detailed CAD and market/equity analysis is needed."`;
+${PROSE_STYLE}`;
 
 const str = (v: unknown, len: number): string => (typeof v === "string" ? v.slice(0, len) : "");
 
@@ -90,10 +79,10 @@ const scoreBreakdown = (v: unknown): BreakdownEntry[] =>
     : [];
 
 const SCHEMA = `{"score": <integer 0-100, higher = stronger protest opportunity>,
-"executiveConclusion": "<ONE short sentence, max ~18 words — a headline verdict, not a
-paragraph: does this property have a meaningful protest opportunity? The UI shows this next
-to a gauge/chips that already cover the supporting numbers, so this is the takeaway line
-only, never a restatement of the data itself>",
+"executiveConclusion": "<1-2 short, plain sentences, max ~35 words total — the takeaway:
+does this property have a meaningful protest opportunity, and if the data is thin, what's
+missing and the one next step. Lead with the fact. No hedging, no restating numbers the
+gauge/chips already show>",
 "scoreBreakdown": [{"label": "<one of: ${BREAKDOWN_LABELS.join(" | ")}>", "score": <integer
 0-100>}, ...] (only include labels the given data can actually speak to),
 "factorsIncreasing": ["<plain phrase, max ~12 words, that makes the protest STRONGER>",
@@ -281,7 +270,7 @@ Deno.serve(async (req: Request) => {
       // the old "2-3 sentences" instructions produced — these are a hard
       // backstop against a single unusually long sentence, not the actual
       // enforcement, which the prompt's word counts do).
-      executiveConclusion: str(parsed.executiveConclusion, 160),
+      executiveConclusion: str(parsed.executiveConclusion, 260),
       scoreBreakdown: scoreBreakdown(parsed.scoreBreakdown),
       factorsIncreasing: strList(parsed.factorsIncreasing, 5, 80),
       factorsReducing: strList(parsed.factorsReducing, 5, 80),

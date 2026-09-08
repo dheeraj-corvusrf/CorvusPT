@@ -18,6 +18,8 @@
 //
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions.
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -194,20 +196,7 @@ module would normally need data this record doesn't include (actual comparable s
 inspection, a building condition survey), give general guidance and a checklist of what to
 gather instead of fabricated specific findings.
 
-Writing style: be precise and concise. Short, direct sentences — lead with the concrete fact
-(the actual number or detail), never a preamble like "based on the provided information" or
-"it should be noted that." Cut hedging and filler ("though a formal analysis should be
-performed once...", "based on this minimal information, there is..."); state a limitation
-plainly, then the specific next step, not wrapped in soft qualifiers. Every sentence must
-carry real information — if a sentence could be deleted without losing a fact, delete it.
-Example of the target density: instead of "The provided record contains only a single total
-assessed value of $3,100,000 for tax year 2026 without any land/improvement breakdown,
-property characteristics, or historical trends. Based on this minimal information, there is
-insufficient evidence to confirm a strong protest opportunity, though a formal equity and
-market comparison should be performed once detailed CAD data is pulled," write "The record
-only shows a 2026 assessed value of $3,100,000, with no land/improvement breakdown, property
-details, or historical data. There is not enough information to confirm a strong protest
-opportunity. A detailed CAD and market/equity analysis is needed."`;
+${PROSE_STYLE}`;
 
 // The 5 fixed valuation strategies Module 2 ranks, 1:1 with the modules that
 // investigate each one (see STRATEGY_MODULE_MAP) — matches the reference design's

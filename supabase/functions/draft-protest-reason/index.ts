@@ -15,6 +15,8 @@
 // callers: PdfFormEditor.tsx's "Generate Suggested Reason" button (reads
 // only suggestedReason) and ai-report.tsx's Module 8 "Analyze My Evidence"
 // (reads the full analysis).
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -51,7 +53,9 @@ Rules:
 - suggestedReason: a single paragraph suitable for the "Facts that may help resolve this protest" field on Texas Comptroller Form 50-132, written in the voice of the property owner ("The property's..." / "Comparable properties..."), not as an AI describing the documents. If none of the documents provide anything usable for this field, say so plainly instead of manufacturing filler.
 - Plain prose only in every field — no markdown, no bullet points, no headers.
 - Every field here is a SUGGESTION the property owner will review and can edit — do not claim certainty beyond what the documents actually show.
-- Return ONLY a JSON object matching this exact shape: {"documentFindings":[{"fileName":"...","status":"<one of: Accepted | Needs Review | Incorrect Document | Additional Information Needed>","assessment":"..."}],"summary":"...","suggestedReason":"..."}`;
+- Return ONLY a JSON object matching this exact shape: {"documentFindings":[{"fileName":"...","status":"<one of: Accepted | Needs Review | Incorrect Document | Additional Information Needed>","assessment":"..."}],"summary":"...","suggestedReason":"..."}
+
+${PROSE_STYLE}`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

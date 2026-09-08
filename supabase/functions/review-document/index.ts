@@ -11,6 +11,7 @@
 // Same discipline as analyze-document: read what's printed, never invent a
 // value, never make a fraud/forgery call.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,7 +19,9 @@ const corsHeaders = {
   "Content-Type": "application/json",
 };
 
-const BASE_SYSTEM = `You are CorvusPT's document reviewer for a Texas property-tax protest platform. You are given ONE uploaded document and the real facts of the property it is filed under. Read the document's actual content. Never invent a value, date, account number, or term that is not printed on the page. Do NOT make a forgery, tampering, or fraud judgement. Plain text only — no markdown, no bullet lists, no headers. Short, direct sentences; no "based on the provided information" preamble; every sentence carries real information.`;
+const BASE_SYSTEM = `You are CorvusPT's document reviewer for a Texas property-tax protest platform. You are given ONE uploaded document and the real facts of the property it is filed under. Read the document's actual content. Never invent a value, date, account number, or term that is not printed on the page. Do NOT make a forgery, tampering, or fraud judgement. Plain text only — no markdown, no bullet lists, no headers.
+
+${PROSE_STYLE}`;
 
 const EXPLAIN_SYSTEM = `${BASE_SYSTEM}
 
