@@ -217,6 +217,12 @@ Deno.serve(async (req: Request) => {
       // actually addresses the "spins forever" symptom.
       generationConfig: {
         responseMimeType: "application/json",
+        // Without this the model samples at its default temperature, so the
+        // same CAD record scored 50 ("Moderate Opportunity", 30% confidence)
+        // on one refresh and 85 ("Strong Opportunity", 55%) on the next.
+        // Every other AI function here already pins temperature 0 — this one
+        // was the outlier. Same input -> same score now.
+        temperature: 0,
         thinkingConfig: { thinkingBudget: 512 },
       },
     };
