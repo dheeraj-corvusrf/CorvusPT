@@ -2241,9 +2241,12 @@ function ModuleVisual({
     }
     if (!incomeComputed.dataComplete) {
       return (
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <FileWarning className="h-4 w-4 shrink-0" />
-          <span className="text-xs">Upload financials to run this analysis</span>
+        <div>
+          <IncomeWaterfallPreview />
+          <div className="mt-2 flex items-center gap-2 text-muted-foreground">
+            <FileWarning className="h-4 w-4 shrink-0" />
+            <span className="text-xs">Upload financials to run this analysis</span>
+          </div>
         </div>
       );
     }
@@ -5173,6 +5176,65 @@ function IncomeWaterfall({ c, height = 180 }: { c: IncomeApproach; height?: numb
         </Bar>
       </BarChart>
     </ResponsiveContainer>
+  );
+}
+
+// The same waterfall shape as a muted, number-free preview — shown on the
+// card before the owner has entered any figures, so the card looks like the
+// finished analysis rather than a blank. Clearly a placeholder: low opacity,
+// no values, dashed connectors.
+const INCOME_WATERFALL_PREVIEW = [
+  { label: "Potential Income", y: 6, h: 62, fill: "#3b82f6" },
+  { label: "Vacancy", y: 6, h: 9, fill: "#f87171" },
+  { label: "Operating Expenses", y: 15, h: 21, fill: "#fb923c" },
+  { label: "NOI", y: 36, h: 32, fill: "#3b82f6" },
+  { label: "Cap Rate", y: 32, h: 5, fill: "#2dd4bf" },
+  { label: "Value Indicated", y: 26, h: 42, fill: "#22c55e" },
+];
+
+function IncomeWaterfallPreview() {
+  const colW = 34;
+  const gap = 6;
+  const step = colW + gap;
+  const width = INCOME_WATERFALL_PREVIEW.length * step - gap;
+  return (
+    <svg
+      viewBox={`0 0 ${width} 84`}
+      className="w-full"
+      role="img"
+      aria-label="Income waterfall preview — provide figures to populate it"
+    >
+      {INCOME_WATERFALL_PREVIEW.map((b, i) => {
+        const x = i * step;
+        const prev = INCOME_WATERFALL_PREVIEW[i - 1];
+        return (
+          <g key={b.label} opacity={0.35}>
+            {prev && (
+              <line
+                x1={x - gap}
+                y1={prev.y}
+                x2={x}
+                y2={b.y}
+                stroke="currentColor"
+                strokeWidth={1}
+                strokeDasharray="2 2"
+                className="text-muted-foreground"
+              />
+            )}
+            <rect x={x} y={b.y} width={colW} height={b.h} rx={2} fill={b.fill} />
+            <text
+              x={x + colW / 2}
+              y={80}
+              textAnchor="middle"
+              className="fill-muted-foreground"
+              style={{ fontSize: 6 }}
+            >
+              {b.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
