@@ -57,7 +57,13 @@ function CasePage() {
     return () => {
       cancelled = true;
     };
-  }, [user, propertyId]);
+    // Keyed on user.id, NOT the user object — Supabase hands AuthProvider a
+    // fresh user object on every background TOKEN_REFRESHED / tab-focus
+    // session check, and depending on the object here made this whole page
+    // flash back to a skeleton and refetch (remounting CaseDetailView and
+    // resetting its transient state) every time the tab regained focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, propertyId]);
 
   function goToProperties() {
     nav({ to: "/dashboard/properties" });

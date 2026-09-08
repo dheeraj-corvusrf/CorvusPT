@@ -332,7 +332,12 @@ function Report() {
         });
       })
       .catch((err) => console.error("Could not resolve this property for protest filing:", err));
-  }, [user, state.address, state.cad, state.accountNumber]);
+    // user?.id, not the user object — a background TOKEN_REFRESHED hands us a
+    // fresh user object and would otherwise re-run this (and everything keyed
+    // on resolvedProperty) on every tab focus, briefly nulling the resolved
+    // property and remounting the protest-authorization modal mid-flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, state.address, state.cad, state.accountNumber]);
 
   useEffect(() => {
     if (!user || !resolvedProperty) return;
@@ -349,7 +354,8 @@ function Report() {
         ),
       )
       .catch((err) => console.error("Could not load uploaded evidence for this property:", err));
-  }, [user, resolvedProperty]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, resolvedProperty]);
 
   useEffect(() => {
     if (!resolvedProperty) return;
@@ -1068,7 +1074,8 @@ function Report() {
       })
       .catch(() => setHasFullAccess(false))
       .finally(() => setBillingChecked(true));
-  }, [user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Per-property access for owner_managed/corvusrf_managed — confirmed live
   // bug this replaces: the previous version only ever set hasFullAccess to

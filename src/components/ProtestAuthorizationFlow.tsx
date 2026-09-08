@@ -12,6 +12,7 @@ import { requestProtest, type ProtestRecord } from "@/lib/protests";
 import { createAuthorization } from "@/lib/protest-authorizations";
 import {
   recordServiceAgreement,
+  getServiceAgreementAcceptance,
   SERVICE_AGREEMENT_SECTIONS,
   OWNER_ACCEPTANCE_TEXT,
   SERVICE_AGREEMENT_VERSION,
@@ -97,6 +98,12 @@ export function ProtestAuthorizationFlow({
   const [agreementAccepted, setAgreementAccepted] = useState<ServiceAgreementAcceptance | null>(
     null,
   );
+  // The Service Agreement is a one-time thing per property. On open we check
+  // whether it's already on file (service_agreement_acceptances) and, if so,
+  // skip straight past the agreement step — it never shows again for a
+  // property once accepted, no matter how often this modal is reopened, the
+  // tab is switched, or the session is refreshed.
+  const [checkingAgreement, setCheckingAgreement] = useState(true);
   const [firstName, setFirstName] = useState(initialOwnerInfo?.firstName ?? "");
   const [lastName, setLastName] = useState(initialOwnerInfo?.lastName ?? "");
   const [email, setEmail] = useState(initialOwnerInfo?.email ?? userEmail ?? "");
@@ -131,6 +138,30 @@ export function ProtestAuthorizationFlow({
       })
       .catch((err) => console.error("Could not load profile for autofill:", err));
   }, [open, userId]);
+
+  // Skip the agreement step entirely if this property already has one on
+  // file. Keyed on property.id (not the property object) so a background
+  // token refresh / tab switch never re-runs this and bounces the user back.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setCheckingAgreement(true);
+    getServiceAgreementAcceptance(property.id)
+      .then((rec) => {
+        if (cancelled) return;
+        if (rec) {
+          setAgreementAccepted(rec);
+          setStep((s) => (s === "agreement" ? "owner" : s));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setCheckingAgreement(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, property.id]);
 
   function reset() {
     setStep("agreement");
@@ -273,7 +304,11 @@ export function ProtestAuthorizationFlow({
           </DialogDescription>
         </DialogHeader>
 
-        {step === "agreement" && (
+        {step === "agreement" && checkingAgreement && (
+          <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
+        )}
+
+        {step === "agreement" && !checkingAgreement && (
           <div className="grid gap-4">
             {!isPaid && (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
