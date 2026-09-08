@@ -1664,7 +1664,7 @@ function Report() {
 
       {/* Preview modal */}
       {openModel && (
-        <Modal onClose={() => setOpenId(null)}>
+        <Modal onClose={() => setOpenId(null)} wide>
           <span className="badge-soft">{hasFullAccess ? "Unlocked" : "Free Preview"}</span>
           <div className="mt-2 flex items-center gap-2">
             <NumberBadge n={openModel.n} color={openModel.color} size="lg" />

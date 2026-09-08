@@ -62,7 +62,7 @@ export function Modal({
           management, hence the same justified exception. */}
       {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
       <div
-        className={`relative overflow-hidden card-elev ${wide ? "w-[75vw] max-w-[75vw]" : "w-full max-w-lg"}`}
+        className={`relative overflow-hidden card-elev ${wide ? "w-[90vw] max-w-5xl" : "w-full max-w-lg"}`}
         onClick={(e) => e.stopPropagation()}
       >
         <Tooltip>
