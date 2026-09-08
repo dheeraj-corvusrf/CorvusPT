@@ -12,6 +12,7 @@ import {
   FileText,
   Scale,
   TrendingDown,
+  Loader2,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -353,7 +354,11 @@ function Overview() {
             <span
               className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${ICON_COLORS[2].bg} ${ICON_COLORS[2].text}`}
             >
-              <Upload className="h-4 w-4" />
+              {uploading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="h-4 w-4" />
+              )}
             </span>
             <div className="text-sm font-semibold">
               {isDraggingNotice

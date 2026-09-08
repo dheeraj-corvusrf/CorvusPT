@@ -22,6 +22,7 @@ import { addProperty } from "@/lib/properties";
 import { uploadDocument } from "@/lib/documents";
 import { addTaxBill, recordRefund } from "@/lib/tax-bills";
 import { Modal } from "@/components/Modal";
+import { LoadingLine } from "@/components/LoadingLine";
 import { cadLookup } from "@/lib/cad-lookup";
 import { classifyPropertyCategory } from "@/lib/texas-tax-rates";
 
@@ -138,7 +139,7 @@ function DocumentReview() {
   if (!extraction) {
     return (
       <div className="container-page py-12">
-        <p className="text-muted-foreground">Loading document…</p>
+        <LoadingLine text="Loading document…" />
       </div>
     );
   }
@@ -146,7 +147,7 @@ function DocumentReview() {
   if (propertyCheck === "pending") {
     return (
       <div className="container-page py-12">
-        <p className="text-muted-foreground">Checking property type…</p>
+        <LoadingLine text="Checking property type…" />
       </div>
     );
   }
