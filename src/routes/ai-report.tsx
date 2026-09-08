@@ -93,6 +93,17 @@ import {
   type ComparableStats,
 } from "@/lib/comps-analysis";
 import { estimateSavings } from "@/lib/savings-estimate";
+import {
+  computeSavingsAnalysis,
+  EMPTY_TAX_INPUTS,
+  type SavingsAnalysis,
+  type SavingsTaxInputs,
+} from "@/lib/savings-analysis";
+import {
+  getSavingsTaxInputs,
+  upsertSavingsTaxInputs,
+  type SavingsTaxInputsInput,
+} from "@/lib/savings-tax-inputs";
 import { getExecutiveSummary, getDefenseReadinessScore } from "@/lib/executive-summary";
 import {
   getPreFilingCheck,
@@ -1119,6 +1130,20 @@ function Report() {
             savings: savingsEstimate.amount,
             basis: savingsEstimate.basis,
             reductionPct: savingsEstimate.basis === "formula" ? savingsEstimate.reductionPct : null,
+            // Module 9's fuller deterministic result — see savings-analysis.ts.
+            ...(savingsAnalysis.sufficient
+              ? {
+                  annualSavings: savingsAnalysis.annualSavings,
+                  netBenefit: savingsAnalysis.netBenefit,
+                  protestCost: savingsAnalysis.protestCost,
+                  protestCostSource: savingsAnalysis.protestCostSource,
+                  savingsToCostMultiple: savingsAnalysis.savingsToCostMultiple,
+                  roiPct: savingsAnalysis.roiPct,
+                  indicatedRange: savingsAnalysis.indicatedRange,
+                  financialConfidence: savingsAnalysis.financialConfidence,
+                  topScenarioReductionPct: savingsAnalysis.scenarios[2]?.reductionPct,
+                }
+              : {}),
           };
         }
         if (existingProtest && resolvedProperty) {
@@ -1429,6 +1454,115 @@ function Report() {
   // property can produce a 6+ digit savings figure on any screen size.
   const savingsDigits = useMemo(() => currency(estimated.savings).length, [estimated.savings]);
 
+  // ── Module 9 (Estimated Savings) — the fuller deterministic financial
+  // analysis (src/lib/savings-analysis.ts). Additive to `estimated` above,
+  // which is shared with the intake savings screen and stays untouched. No
+  // AI call anywhere in this module.
+  const [savingsTaxInputs, setSavingsTaxInputs] = useState<SavingsTaxInputs | null>(null);
+  useEffect(() => {
+    if (!resolvedProperty) {
+      setSavingsTaxInputs(null);
+      return;
+    }
+    getSavingsTaxInputs(resolvedProperty.id)
+      .then((r) =>
+        setSavingsTaxInputs(
+          r
+            ? {
+                taxableValue: r.taxableValue,
+                exemptionsTotal: r.exemptionsTotal,
+                protestCostOverride: r.protestCostOverride,
+                projectionYears: r.projectionYears,
+              }
+            : null,
+        ),
+      )
+      .catch((err) => console.error("Could not load savings tax inputs:", err));
+  }, [resolvedProperty]);
+
+  const savingsAnalysis = useMemo<SavingsAnalysis>(() => {
+    const cs = computeComparableStats(
+      compsMap.data?.subject ?? null,
+      compsMap.data?.comps ?? [],
+      state.totalValue,
+    );
+    return computeSavingsAnalysis({
+      cadValue: state.totalValue ?? null,
+      taxYear: state.taxYear ?? null,
+      cad: state.cad ?? null,
+      estimate: savingsEstimate,
+      compsIndicated: cs.indicated
+        ? { min: cs.indicated.min, median: cs.indicated.median, max: cs.indicated.max }
+        : null,
+      taxInputs: savingsTaxInputs ?? EMPTY_TAX_INPUTS,
+    });
+  }, [
+    savingsEstimate,
+    savingsTaxInputs,
+    compsMap.data,
+    state.totalValue,
+    state.taxYear,
+    state.cad,
+  ]);
+
+  async function saveSavingsTaxInputs(input: SavingsTaxInputsInput) {
+    if (!user || !resolvedProperty) return;
+    setSavingsTaxInputs({
+      taxableValue: input.taxableValue ?? null,
+      exemptionsTotal: input.exemptionsTotal ?? null,
+      protestCostOverride: input.protestCostOverride ?? null,
+      projectionYears: input.projectionYears ?? null,
+    });
+    try {
+      await upsertSavingsTaxInputs(user.id, resolvedProperty.id, input);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      getSavingsTaxInputs(resolvedProperty.id)
+        .then((r) =>
+          setSavingsTaxInputs(
+            r
+              ? {
+                  taxableValue: r.taxableValue,
+                  exemptionsTotal: r.exemptionsTotal,
+                  protestCostOverride: r.protestCostOverride,
+                  projectionYears: r.projectionYears,
+                }
+              : null,
+          ),
+        )
+        .catch(() => {});
+    }
+  }
+
+  // Re-run Module 10 when the savings analysis changes (tax inputs edited,
+  // comps loaded, estimate resolved) — on the render after the memo settles,
+  // ref-guarded, never a cold fetch. Same pattern as the income digest.
+  const savingsDigest = savingsAnalysis.sufficient
+    ? [
+        savingsAnalysis.annualSavings,
+        savingsAnalysis.netBenefit,
+        savingsAnalysis.protestCost,
+        savingsAnalysis.reductionBase,
+        savingsAnalysis.financialConfidence,
+        savingsAnalysis.indicatedRange?.low ?? "",
+        savingsAnalysis.indicatedRange?.high ?? "",
+      ].join("|")
+    : "";
+  const savingsDigestRef = useRef<string>("");
+  useEffect(() => {
+    if (!savingsDigest) return;
+    if (savingsDigestRef.current === "") {
+      savingsDigestRef.current = savingsDigest;
+      return;
+    }
+    if (savingsDigestRef.current === savingsDigest) return;
+    savingsDigestRef.current = savingsDigest;
+    if (moduleData.executive?.data || moduleData.executive?.error) {
+      loadModule("executive", { force: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savingsDigest]);
+
   // Eager-loads real data for the module overview grid below (real scores,
   // checklists, etc. instead of generic teaser text) as soon as the property
   // is known. Free-preview modules (1-3) load for everyone; the rest only
@@ -1575,9 +1709,9 @@ function Report() {
     if (hasFullAccess || m.n <= FREE_MODULE_COUNT) {
       setOpenId(m.id);
       if (!m.requiresUserData) loadModule(m.id);
-      // Module 7 shows the comparable-sales range alongside its income value —
-      // load the same comps map Module 3 uses.
-      if (m.id === "comps" || m.id === "income") loadCompsMap();
+      // Modules 7 and 9 show the comparable-sales range alongside their own
+      // numbers — load the same comps map Module 3 uses.
+      if (m.id === "comps" || m.id === "income" || m.id === "savings") loadCompsMap();
       return;
     }
     setShowWall(true);
@@ -1813,6 +1947,7 @@ function Report() {
               improvementValue={state.improvementValue}
               overrides={overrides}
               incomeComputed={incomeComputed}
+              savingsAnalysis={savingsAnalysis}
               uploadingEvidence={uploadingEvidence}
               onUploadEvidence={handleUploadEvidence}
               onOpen={() => openModule(m)}
@@ -1882,6 +2017,9 @@ function Report() {
                 incomeComputed={incomeComputed}
                 onSaveIncomeAnalysis={() => {}}
                 onExtractIncome={extractIncome}
+                savingsAnalysis={savingsAnalysis}
+                savingsTaxInputs={savingsTaxInputs}
+                onSaveSavingsTaxInputs={() => {}}
               />
             </div>
           ));
@@ -1939,6 +2077,9 @@ function Report() {
             incomeComputed={incomeComputed}
             onSaveIncomeAnalysis={saveIncomeAnalysis}
             onExtractIncome={extractIncome}
+            savingsAnalysis={savingsAnalysis}
+            savingsTaxInputs={savingsTaxInputs}
+            onSaveSavingsTaxInputs={saveSavingsTaxInputs}
           />
           <div className="mt-6 flex gap-2 justify-end">
             <button onClick={() => setOpenId(null)} className="btn-outline">
@@ -2012,6 +2153,7 @@ function ModuleCard({
   improvementValue,
   overrides,
   incomeComputed,
+  savingsAnalysis,
   uploadingEvidence,
   onUploadEvidence,
   onOpen,
@@ -2036,6 +2178,7 @@ function ModuleCard({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  savingsAnalysis: SavingsAnalysis;
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onOpen: () => void;
@@ -2065,7 +2208,16 @@ function ModuleCard({
             ? "Error"
             : "Completed";
   const insight = unlocked
-    ? moduleInsight(m, moduleState, compsMap, estimated, totalValue, overrides, incomeComputed)
+    ? moduleInsight(
+        m,
+        moduleState,
+        compsMap,
+        estimated,
+        totalValue,
+        overrides,
+        incomeComputed,
+        savingsAnalysis,
+      )
     : null;
   // Module 2's own score for this module's strategy, once it's resolved — see
   // the priorityContext sequencing in loadModule()/the eager-load effects
@@ -2147,6 +2299,7 @@ function ModuleCard({
             improvementValue={improvementValue}
             overrides={overrides}
             incomeComputed={incomeComputed}
+            savingsAnalysis={savingsAnalysis}
             uploadingEvidence={uploadingEvidence}
             onUploadEvidence={onUploadEvidence}
             onOpen={onOpen}
@@ -2220,6 +2373,7 @@ function ModuleVisual({
   improvementValue,
   overrides,
   incomeComputed,
+  savingsAnalysis,
   uploadingEvidence,
   onUploadEvidence,
   onOpen,
@@ -2242,6 +2396,7 @@ function ModuleVisual({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  savingsAnalysis: SavingsAnalysis;
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onOpen: () => void;
@@ -2256,6 +2411,9 @@ function ModuleVisual({
   }
 
   if (m.id === "savings") {
+    if (estimated.savings > 0 && savingsAnalysis.sufficient) {
+      return <SavingsCardVisual a={savingsAnalysis} />;
+    }
     return (
       <div className="grid gap-1.5">
         <FormulaChain
@@ -4182,6 +4340,7 @@ function moduleInsight(
   totalValue: number | null | undefined,
   overrides: ModuleOverride[],
   incomeComputed?: IncomeApproach,
+  savingsAnalysis?: SavingsAnalysis,
 ): string | null {
   if (m.id === "income") {
     if (isModuleNotApplicable(overrides, "income")) return "Marked Not Applicable";
@@ -4197,7 +4356,16 @@ function moduleInsight(
         ? "Income supports CAD value"
         : "Income analysis inconclusive";
   }
-  if (m.id === "savings") return estimated.savings > 0 ? "Strong Potential Savings" : null;
+  if (m.id === "savings") {
+    if (estimated.savings <= 0) return null;
+    if (savingsAnalysis && !savingsAnalysis.sufficient) return "Additional data needed";
+    if (savingsAnalysis) {
+      return savingsAnalysis.netBenefit > 0
+        ? "Strong potential savings"
+        : "Marginal — review protest cost";
+    }
+    return "Strong Potential Savings";
+  }
   if (!moduleState?.data) return null;
   switch (m.id) {
     case "health": {
@@ -5982,6 +6150,585 @@ function CostBenefitRow({ savings }: { savings: number }) {
   );
 }
 
+// ── Module 9 (Estimated Savings) ─────────────────────────────────────────
+// Every figure here is the deterministic result from
+// src/lib/savings-analysis.ts — no AI value anywhere, identical on every
+// refresh.
+
+const SAVINGS_CONF_STYLE: Record<SavingsAnalysis["financialConfidence"], string> = {
+  High: "bg-success/15 text-success",
+  Moderate: "bg-warning/20 text-warning-foreground",
+  Limited: "bg-secondary text-muted-foreground",
+};
+
+function ConfPill({ level }: { level: SavingsAnalysis["financialConfidence"] }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${SAVINGS_CONF_STYLE[level]}`}
+    >
+      {level}
+    </span>
+  );
+}
+
+// Compact card visual — CAD → Indicated → Reduction → Annual Savings, then a
+// Net Benefit / ROI chip. Mirrors the reference infographic's compact form.
+function SavingsCardVisual({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div className="grid gap-2">
+      <div className="flex items-center justify-center gap-1">
+        <FormulaIcon
+          Icon={Building2}
+          value={compactCurrency(a.cadValue)}
+          label="CAD value"
+          tone="bg-destructive/10 text-destructive"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={Home}
+          value={
+            a.indicatedRange
+              ? `${compactCurrency(a.indicatedRange.low)}+`
+              : compactCurrency(a.indicatedValue)
+          }
+          label="indicated"
+          tone="bg-sky-500/15 text-sky-600"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={TrendingDown}
+          value={`${compactCurrency(a.reductionBase)}`}
+          label={`${a.reductionPct}% off`}
+          tone="bg-warning/20 text-warning-foreground"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={DollarSign}
+          value={`${compactCurrency(a.annualSavings)}/yr`}
+          label="tax savings"
+          tone="bg-success/15 text-success"
+        />
+      </div>
+      <div className="flex items-center justify-center gap-2 text-xs">
+        <span className="text-muted-foreground">Net benefit</span>
+        <span className="font-serif font-bold text-success">{compactCurrency(a.netBenefit)}</span>
+        {a.roiPct != null ? (
+          <span className="rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold text-success">
+            {a.roiPct}% ROI
+          </span>
+        ) : a.savingsToCostMultiple != null ? (
+          <span className="rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold text-success">
+            {a.savingsToCostMultiple}x
+          </span>
+        ) : (
+          <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+            no cost entered
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The Value Reduction Impact stepped strip.
+function SavingsFlowStrip({ a }: { a: SavingsAnalysis }) {
+  const indicated = a.indicatedRange
+    ? `${compactCurrency(a.indicatedRange.low)} – ${compactCurrency(a.indicatedRange.high)}`
+    : compactCurrency(a.indicatedValue);
+  const steps: { label: string; value: string; tone: string; Icon: LucideIcon }[] = [
+    {
+      label: "Current CAD Value",
+      value: currency(a.cadValue),
+      tone: "border-destructive/40 bg-destructive/5 text-destructive",
+      Icon: Building2,
+    },
+    {
+      label: a.indicatedRange ? "AI-Indicated Value Range" : "AI-Indicated Value",
+      value: indicated,
+      tone: "border-sky-500/40 bg-sky-500/5 text-sky-600",
+      Icon: Home,
+    },
+    {
+      label: "Potential Reduction",
+      value: `${compactCurrency(a.reductionBase)}  ·  ${a.reductionPct}%`,
+      tone: "border-warning/40 bg-warning/10 text-warning-foreground",
+      Icon: TrendingDown,
+    },
+    {
+      label: "Est. Annual Tax Savings",
+      value: currency(a.annualSavings),
+      tone: "border-success/40 bg-success/10 text-success",
+      Icon: DollarSign,
+    },
+  ];
+  return (
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+      {steps.map((s, i) => (
+        <Fragment key={s.label}>
+          <div
+            className={`flex min-w-[130px] flex-1 flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-center ${s.tone}`}
+          >
+            <s.Icon className="h-4 w-4" />
+            <div className="text-[9px] font-semibold uppercase tracking-wide opacity-80">
+              {s.label}
+            </div>
+            <div className="text-xs font-bold tabular-nums text-foreground">{s.value}</div>
+          </div>
+          {i < steps.length - 1 && (
+            <ArrowRight className="h-4 w-4 shrink-0 self-center text-muted-foreground" />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+const SAVINGS_DISCLAIMER =
+  "Estimated savings are based on the current valuation and tax assumptions available to CorvusPT. Actual savings depend on the final value the county sets and the applicable tax rates, exemptions, and taxable-value rules.";
+
+function SavingsSummaryList({ a }: { a: SavingsAnalysis }) {
+  const rows: [string, string][] = [
+    ["Current CAD Value", currency(a.cadValue)],
+    [
+      a.indicatedRange ? "AI-Indicated Value Range" : "AI-Indicated Value",
+      a.indicatedRange
+        ? `${currency(a.indicatedRange.low)} – ${currency(a.indicatedRange.high)}`
+        : currency(a.indicatedValue),
+    ],
+    ["Potential Value Reduction", currency(a.reductionBase)],
+    ["Potential Reduction", `${a.reductionPct}%`],
+    ["Estimated Annual Tax Savings", currency(a.annualSavings)],
+    ["Protest Cost", a.protestCostSource === "none" ? "Not entered" : currency(a.protestCost)],
+    ["Estimated Net Benefit", currency(a.netBenefit)],
+    [
+      "Savings-to-Cost Multiple",
+      a.savingsToCostMultiple != null ? `${a.savingsToCostMultiple}x` : "—",
+    ],
+  ];
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Financial Opportunity
+      </div>
+      <table className="w-full text-sm">
+        <tbody>
+          {rows.map(([k, v], i) => (
+            <tr key={k} className={i > 0 ? "border-t border-border/60" : ""}>
+              <td className="px-4 py-2 text-muted-foreground">{k}</td>
+              <td className="px-4 py-2 text-right font-medium tabular-nums">{v}</td>
+            </tr>
+          ))}
+          <tr className="border-t border-border/60">
+            <td className="px-4 py-2 text-muted-foreground">Financial Confidence</td>
+            <td className="px-4 py-2 text-right">
+              <ConfPill level={a.financialConfidence} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="border-t border-border/60 px-4 py-2 text-[11px] text-muted-foreground">
+        {SAVINGS_DISCLAIMER}
+      </p>
+    </div>
+  );
+}
+
+function SavingsScenarioCards({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Scenario Analysis
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {a.scenarios.map((s) => (
+          <div
+            key={s.key}
+            className={`rounded-lg border p-3 text-center ${
+              s.key === "base" ? "border-accent/40 bg-accent/5" : "border-border"
+            }`}
+          >
+            <div
+              className={`text-[10px] font-semibold uppercase tracking-wide ${
+                s.key === "base" ? "text-accent" : "text-muted-foreground"
+              }`}
+            >
+              {s.label} Scenario
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {s.reductionPct}% reduction
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              {compactCurrency(s.valueReduction)} off value
+            </div>
+            <div className="mt-1 font-serif text-lg font-bold text-success">
+              {currency(s.annualSavings)}
+              <span className="text-xs font-normal text-muted-foreground"> / yr</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        The High scenario is a supportable higher-end opportunity based on the available analysis —
+        not the expected outcome.
+      </p>
+    </div>
+  );
+}
+
+function SavingsRoiRow({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        ROI Analysis (Base Scenario)
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        <FormulaIcon
+          Icon={DollarSign}
+          value={currency(a.annualSavings)}
+          label="annual savings"
+          tone="bg-success/15 text-success"
+        />
+        <span className="text-sm text-muted-foreground">×</span>
+        <FormulaIcon
+          Icon={RefreshCw}
+          value={`${a.projectionYears} yrs`}
+          label="projection"
+          tone="bg-sky-500/15 text-sky-600"
+        />
+        <span className="text-sm text-muted-foreground">−</span>
+        <FormulaIcon
+          Icon={DollarSign}
+          value={a.protestCostSource === "none" ? "$0" : currency(a.protestCost)}
+          label="protest cost"
+          tone="bg-violet-500/15 text-violet-600"
+        />
+        <span className="text-sm text-muted-foreground">=</span>
+        <FormulaIcon
+          Icon={BarChart3}
+          value={currency(
+            a.multiYearSavings != null ? a.multiYearSavings - a.protestCost : a.netBenefit,
+          )}
+          label={a.multiYearSavings != null ? `net over ${a.projectionYears} yrs` : "net benefit"}
+          tone="bg-success/15 text-success"
+        />
+      </div>
+      <div className="mt-2 text-center text-sm">
+        {a.roiPct != null ? (
+          <>
+            <span className="text-muted-foreground">ROI </span>
+            <span className="font-serif text-lg font-bold text-success">{a.roiPct}%</span>
+            {a.savingsToCostMultiple != null && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                ({a.savingsToCostMultiple}x savings-to-cost)
+              </span>
+            )}
+          </>
+        ) : a.protestCostSource === "none" ? (
+          <span className="text-xs text-muted-foreground">
+            No direct protest cost entered — ROI not calculated. Net benefit equals the estimated
+            savings.
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            Protest cost needed to calculate ROI.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type SavingsFormState = {
+  taxableValue: string;
+  exemptionsTotal: string;
+  protestCostOverride: string;
+  projectionYears: string;
+};
+const savingsToForm = (t: SavingsTaxInputs | null): SavingsFormState => {
+  const s = (v: number | null | undefined) => (v != null ? String(v) : "");
+  return {
+    taxableValue: s(t?.taxableValue),
+    exemptionsTotal: s(t?.exemptionsTotal),
+    protestCostOverride: s(t?.protestCostOverride),
+    projectionYears: s(t?.projectionYears),
+  };
+};
+
+function SavingsTaxDetailsForm({
+  taxInputs,
+  onSave,
+}: {
+  taxInputs: SavingsTaxInputs | null;
+  onSave: (input: SavingsTaxInputsInput) => void;
+}) {
+  const [form, setForm] = useState<SavingsFormState>(() => savingsToForm(taxInputs));
+  const key = JSON.stringify(taxInputs ?? {});
+  useEffect(() => {
+    setForm(savingsToForm(taxInputs));
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (k: keyof SavingsFormState, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const parse = (v: string): number | null => {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return v.trim() !== "" && Number.isFinite(n) ? n : null;
+  };
+  const field = (label: string, k: keyof SavingsFormState, prefix?: string, suffix?: string) => (
+    <label className="grid gap-1 text-xs">
+      <span className="font-medium text-muted-foreground">{label}</span>
+      <span className="flex items-center rounded-md border border-border bg-background px-2 focus-within:border-accent">
+        {prefix && <span className="text-muted-foreground">{prefix}</span>}
+        <input
+          inputMode="decimal"
+          value={form[k]}
+          onChange={(e) => set(k, e.target.value)}
+          className="w-full bg-transparent py-1.5 text-sm outline-none"
+        />
+        {suffix && <span className="text-muted-foreground">{suffix}</span>}
+      </span>
+    </label>
+  );
+  return (
+    <details className="rounded-lg border border-border">
+      <summary className="cursor-pointer px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Adjust tax details
+      </summary>
+      <div className="border-t border-border/60 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {field("Taxable value (if different from appraised)", "taxableValue", "$")}
+          {field("Total exemptions", "exemptionsTotal", "$")}
+          {field("Protest cost (override — enter 0 for DIY)", "protestCostOverride", "$")}
+          {field("Projection years for multi-year estimate", "projectionYears")}
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button
+            type="button"
+            onClick={() =>
+              onSave({
+                taxableValue: parse(form.taxableValue),
+                exemptionsTotal: parse(form.exemptionsTotal),
+                protestCostOverride: parse(form.protestCostOverride),
+                projectionYears: parse(form.projectionYears),
+              })
+            }
+            className="btn-primary text-sm"
+          >
+            Save &amp; recalculate
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Every figure here is yours — nothing is estimated. Leave a field blank to use the default
+          assumption.
+        </p>
+      </div>
+    </details>
+  );
+}
+
+function SavingsViewDetails({ a }: { a: SavingsAnalysis }) {
+  const line = (k: string, v: string) => (
+    <div className="flex justify-between gap-4">
+      <span className="text-muted-foreground">{k}</span>
+      <span className="text-right font-medium tabular-nums">{v}</span>
+    </div>
+  );
+  return (
+    <details className="rounded-lg border border-border">
+      <summary className="cursor-pointer px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        View details
+      </summary>
+      <div className="grid gap-4 border-t border-border/60 p-4 text-xs">
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Valuation Reconciliation</div>
+          {line("Current CAD value", currency(a.cadValue))}
+          {line(
+            a.indicatedRange ? "AI-indicated range" : "AI-indicated value",
+            a.indicatedRange
+              ? `${currency(a.indicatedRange.low)} – ${currency(a.indicatedRange.high)}`
+              : currency(a.indicatedValue),
+          )}
+          {line("Potential reduction", `${currency(a.reductionBase)} (${a.reductionPct}%)`)}
+          {line("Value reduction basis", a.valueBasisLabel)}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Tax Assumptions</div>
+          {line("Tax year", a.taxYear != null ? String(a.taxYear) : "—")}
+          {line("Combined tax rate", `${a.taxRate.pct}%`)}
+          {line("Tax rate unit", "decimal (fraction of value)")}
+          {line(
+            "Taxable value used",
+            `${currency(a.taxableValueUsed)}${a.taxableValueAssumed ? " (assumed = appraised)" : ""}`,
+          )}
+          {line(
+            "Exemptions applied",
+            a.exemptionsApplied > 0 ? currency(a.exemptionsApplied) : "none on file",
+          )}
+          {line("Rate source", a.taxRate.source)}
+          {line("Rate effective year", String(a.taxRate.effectiveYear))}
+          {line("Taxing-entity detail", "combined county rate used — entity detail not available")}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Financial Analysis</div>
+          {line("Estimated annual tax savings", currency(a.annualSavings))}
+          {line(
+            "Protest cost",
+            a.protestCostSource === "none" ? "not entered" : currency(a.protestCost),
+          )}
+          {line("Net benefit", currency(a.netBenefit))}
+          {line("ROI", a.roiPct != null ? `${a.roiPct}%` : "n/a (cost 0 or unknown)")}
+          {line(
+            "Savings-to-cost multiple",
+            a.savingsToCostMultiple != null ? `${a.savingsToCostMultiple}x` : "n/a",
+          )}
+          {a.multiYearSavings != null &&
+            line(
+              "Potential multi-year savings",
+              `${currency(a.multiYearSavings)} over ${a.projectionYears} yrs (estimate)`,
+            )}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Confidence</div>
+          {line("Valuation confidence", a.valuationConfidence)}
+          {line("Tax data confidence", a.taxDataConfidence)}
+          {line("Financial confidence", a.financialConfidence)}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Calculation Methodology</div>
+          <p className="text-muted-foreground">
+            Annual tax savings = value reduction × combined tax rate ={" "}
+            {currency(Math.min(a.reductionBase, a.taxableValueUsed))} × {a.taxRate.pct}% ={" "}
+            {currency(a.annualSavings)}.
+          </p>
+          {a.protestCostSource === "contingency" && (
+            <p className="text-muted-foreground">
+              Protest cost = 25% × annual savings = {currency(a.protestCost)}. Net benefit ={" "}
+              {currency(a.annualSavings)} − {currency(a.protestCost)} = {currency(a.netBenefit)}.
+            </p>
+          )}
+          {a.roiPct != null && (
+            <p className="text-muted-foreground">
+              ROI = net benefit ÷ protest cost × 100 = {currency(a.netBenefit)} ÷{" "}
+              {currency(a.protestCost)} × 100 = {a.roiPct}%.
+            </p>
+          )}
+          <ul className="mt-1 grid list-disc gap-0.5 pl-4 text-muted-foreground">
+            {a.assumptions.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function SavingsWorkspace({
+  analysis: a,
+  taxInputs,
+  allowEdit,
+  onSaveTaxInputs,
+  onOpenModule,
+  headlineSavings,
+  currentValue,
+  reducedValue,
+  rationale,
+  incomeNote,
+}: {
+  analysis: SavingsAnalysis;
+  taxInputs: SavingsTaxInputs | null;
+  allowEdit: boolean;
+  onSaveTaxInputs: (input: SavingsTaxInputsInput) => void;
+  onOpenModule: (moduleId: string) => void;
+  headlineSavings: number;
+  currentValue: number;
+  reducedValue: number;
+  rationale: string | null;
+  incomeNote: string | null;
+}) {
+  if (!a.sufficient) {
+    return (
+      <div className="mt-4 rounded-lg border border-warning/40 bg-warning/10 p-4">
+        <div className="text-sm font-semibold text-warning-foreground">Additional Data Needed</div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The financial opportunity can't be calculated yet. Missing:
+        </p>
+        <ul className="mt-2 grid list-disc gap-1 pl-5 text-sm">
+          {a.missing.map((x) => (
+            <li key={x}>{x}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 grid gap-4">
+      <div className="text-center">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Estimated Annual Tax Savings
+        </div>
+        <div className="font-serif text-4xl font-bold text-success">
+          <AnimatedNumber value={headlineSavings} format={currency} duration={900} />
+        </div>
+      </div>
+
+      {a.conflicts.length > 0 && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <div className="text-xs font-semibold text-destructive">
+            Data Conflict — Review Required
+          </div>
+          <ul className="mt-1 grid list-disc gap-0.5 pl-5 text-xs text-muted-foreground">
+            {a.conflicts.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <SavingsFlowStrip a={a} />
+      <ValueComparisonChart current={currentValue} reduced={reducedValue} />
+      <SavingsSummaryList a={a} />
+      <SavingsScenarioCards a={a} />
+      <SavingsRoiRow a={a} />
+
+      {a.multiYearSavings != null && (
+        <p className="rounded-lg bg-secondary/40 p-3 text-xs text-muted-foreground">
+          <span className="font-semibold text-foreground">
+            Potential multi-year savings (estimate): {currency(a.multiYearSavings)} over{" "}
+            {a.projectionYears} years.
+          </span>{" "}
+          Assumes the reduced value holds as the base. Not guaranteed — actual carry-over depends on
+          the county's re-appraisal.
+        </p>
+      )}
+
+      <div className="rounded-lg bg-secondary/40 p-3 text-xs">
+        <div className="font-semibold text-foreground">
+          How this connects to the protest strategy
+        </div>
+        <p className="mt-1 text-muted-foreground">
+          CAD value is {compactCurrency(a.reductionBase)} above the AI-indicated value → potential
+          reduction {compactCurrency(a.reductionBase)} → est. annual tax savings{" "}
+          {compactCurrency(a.annualSavings)} → protest cost{" "}
+          {a.protestCostSource === "none" ? "$0" : compactCurrency(a.protestCost)} → est. net
+          benefit {compactCurrency(a.netBenefit)}.
+        </p>
+        {rationale && <p className="mt-1 text-muted-foreground">{rationale}</p>}
+        {incomeNote && <p className="mt-1 text-muted-foreground">{incomeNote}</p>}
+      </div>
+
+      {allowEdit && <SavingsTaxDetailsForm taxInputs={taxInputs} onSave={onSaveTaxInputs} />}
+      <SavingsViewDetails a={a} />
+
+      <button
+        type="button"
+        onClick={() => onOpenModule("executive")}
+        className="btn-primary flex items-center justify-center gap-2 text-sm"
+      >
+        View Final Protest Recommendation
+        <ArrowRight className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
 function SkeletonVisual() {
   return (
     <div className="grid gap-2">
@@ -6500,6 +7247,9 @@ function ModulePreviewContent({
   incomeComputed,
   onSaveIncomeAnalysis,
   onExtractIncome,
+  savingsAnalysis,
+  savingsTaxInputs,
+  onSaveSavingsTaxInputs,
 }: {
   m: Module;
   estimated: {
@@ -6553,6 +7303,12 @@ function ModulePreviewContent({
   incomeComputed: IncomeApproach;
   onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
   onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  // Module 9 (Estimated Savings) — the deterministic financial analysis
+  // (savings-analysis.ts) and the optional tax-inputs saver (a no-op in the
+  // printable report view).
+  savingsAnalysis: SavingsAnalysis;
+  savingsTaxInputs: SavingsTaxInputs | null;
+  onSaveSavingsTaxInputs: (input: SavingsTaxInputsInput) => void;
 }) {
   // Real AI analysis of the customer's own uploaded evidence — see Module
   // 8's "evidence" case below and analyzeEvidence() in protest-reason.ts.
@@ -6645,31 +7401,26 @@ function ModulePreviewContent({
       );
     }
     return (
-      <div className="mt-4 grid gap-3">
-        <div className="text-center">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            Estimated Tax Savings
-          </div>
-          <div className="font-serif text-4xl font-bold text-success">
-            <AnimatedNumber value={estimated.savings} format={currency} duration={900} />
-          </div>
-        </div>
-        <ValueComparisonChart current={current} reduced={reduced} />
-        <div className="flex justify-center">
-          <CostBenefitRow savings={estimated.savings} />
-        </div>
-        <p className="text-center text-xs text-muted-foreground">
-          {estimated.rationale ?? "Based on your county's real effective tax rate."}
-        </p>
-        {incomeComputed.complete && incomeComputed.indicatedValue != null && (
-          <p className="text-center text-xs text-muted-foreground">
-            Income approach also indicates {compactCurrency(incomeComputed.indicatedValue)}
-            {incomeComputed.gapPct != null &&
-              ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`}
-            . This estimate is unchanged — see Module 7 for the income analysis.
-          </p>
-        )}
-      </div>
+      <SavingsWorkspace
+        analysis={savingsAnalysis}
+        taxInputs={savingsTaxInputs}
+        allowEdit={allowEvidenceUpload}
+        onSaveTaxInputs={onSaveSavingsTaxInputs}
+        onOpenModule={onOpenModule}
+        headlineSavings={estimated.savings}
+        currentValue={current}
+        reducedValue={reduced}
+        rationale={estimated.rationale}
+        incomeNote={
+          incomeComputed.complete && incomeComputed.indicatedValue != null
+            ? `Income approach also indicates ${compactCurrency(incomeComputed.indicatedValue)}${
+                incomeComputed.gapPct != null
+                  ? ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`
+                  : ""
+              }. See Module 7.`
+            : null
+        }
+      />
     );
   }
 
