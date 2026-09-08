@@ -116,6 +116,18 @@ export type ModuleAnalysisInput = {
     savings: number;
     basis: "comps" | "formula";
     reductionPct: number | null;
+    // Module 9's fuller financial-opportunity result (all deterministic —
+    // see src/lib/savings-analysis.ts). Optional so a stale caller still
+    // type-checks; the executive prompt weighs these when present.
+    annualSavings?: number;
+    netBenefit?: number;
+    protestCost?: number;
+    protestCostSource?: "contingency" | "override" | "none";
+    savingsToCostMultiple?: number | null;
+    roiPct?: number | null;
+    indicatedRange?: { low: number; high: number } | null;
+    financialConfidence?: "High" | "Moderate" | "Limited";
+    topScenarioReductionPct?: number;
   } | null;
   // Only present once a real protest case exists for this property (see
   // getPreFilingCheck() in pre-filing-check.ts) — omitted, not fabricated,

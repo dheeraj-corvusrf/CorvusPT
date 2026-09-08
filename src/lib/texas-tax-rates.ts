@@ -30,6 +30,36 @@ export function getEffectiveTaxRate(cad?: string | null): number {
   return STATEWIDE_AVERAGE_EFFECTIVE_TAX_RATE;
 }
 
+export type TaxRateMeta = {
+  // The blended combined rate as a decimal fraction of value (never "per $100").
+  rate: number;
+  pct: number; // rate * 100, one decimal
+  unit: "decimal";
+  source: string;
+  effectiveYear: number;
+  // True when this is a real per-county entry, false when it fell back to the
+  // statewide average (e.g. Dallas, which has no CAD data source at all).
+  countySpecific: boolean;
+};
+
+// Metadata for Module 9's tax-assumption disclosure — where the rate came
+// from and whether it's county-specific. No behaviour change to
+// getEffectiveTaxRate; this just describes what that returned.
+export function getTaxRateMeta(cad?: string | null): TaxRateMeta {
+  const countySpecific = !!cad && cad in COUNTY_EFFECTIVE_TAX_RATE;
+  const rate = getEffectiveTaxRate(cad);
+  return {
+    rate,
+    pct: Math.round(rate * 1000) / 10,
+    unit: "decimal",
+    source: countySpecific
+      ? "2025 blended county rate surveys (county + school + city/MUD + special districts)"
+      : "Texas statewide average effective property tax rate",
+    effectiveYear: 2025,
+    countySpecific,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic reduction-percentage model. No AI is involved anywhere below —
 // every number here is either a real published statistic or an arithmetic
@@ -172,7 +202,10 @@ const COMMERCIAL_FALLBACK_PCT = 0.0526;
 // than silently defaulting to the higher residential number without evidence.
 const UNKNOWN_CATEGORY_PCT = (RESIDENTIAL_FALLBACK_PCT + COMMERCIAL_FALLBACK_PCT) / 2;
 
-export function getBaseReductionPct(cad: string | null | undefined, category: PropertyCategory): number {
+export function getBaseReductionPct(
+  cad: string | null | undefined,
+  category: PropertyCategory,
+): number {
   const countySpecific = cad ? COUNTY_REDUCTION_PCT[cad]?.[category] : undefined;
   if (countySpecific != null) return countySpecific;
   if (category === "residential") return RESIDENTIAL_FALLBACK_PCT;
@@ -218,7 +251,12 @@ export function applyValueTrendAdjustment(
   baseReductionPct: number,
   valueHistory?: Array<{ year: number; value: number | null }> | null,
 ): ValueTrendResult {
-  const none = { reductionPct: baseReductionPct, jumpTriggered: false, jumpPct: null, trailingCagrPct: null };
+  const none = {
+    reductionPct: baseReductionPct,
+    jumpTriggered: false,
+    jumpPct: null,
+    trailingCagrPct: null,
+  };
   if (!valueHistory || valueHistory.length < 2) return none;
   const sorted = [...valueHistory]
     .filter((h): h is { year: number; value: number } => h.value != null && h.value > 0)
@@ -250,8 +288,12 @@ export function applyValueTrendAdjustment(
     anomalyTriggered = jumpPct > VALUE_JUMP_THRESHOLD_PCT;
   }
 
-  if (!anomalyTriggered) return { reductionPct: baseReductionPct, jumpTriggered: false, jumpPct, trailingCagrPct };
-  const boosted = Math.min(VALUE_JUMP_CEILING_PCT, Math.max(VALUE_JUMP_FLOOR_PCT, baseReductionPct + VALUE_JUMP_BOOST_PCT));
+  if (!anomalyTriggered)
+    return { reductionPct: baseReductionPct, jumpTriggered: false, jumpPct, trailingCagrPct };
+  const boosted = Math.min(
+    VALUE_JUMP_CEILING_PCT,
+    Math.max(VALUE_JUMP_FLOOR_PCT, baseReductionPct + VALUE_JUMP_BOOST_PCT),
+  );
   return { reductionPct: boosted, jumpTriggered: true, jumpPct, trailingCagrPct };
 }
 
@@ -274,17 +316,49 @@ export function applyValueTrendAdjustment(
 // Tarrant/Harris/Montgomery = 2025 study (each CAD is studied at least once
 // every two years per statute, not necessarily the same year for every
 // county).
-const ASSESSMENT_RATIO: Partial<Record<string, Partial<Record<PropertyCategory, { medianPct: number; cod: number }>>>> = {
-  "Collin Central Appraisal District": { residential: { medianPct: 1.0, cod: 4.41 }, commercial: { medianPct: 1.0, cod: 13.24 } },
-  "Denton Central Appraisal District": { residential: { medianPct: 1.0, cod: 6.16 }, commercial: { medianPct: 1.07, cod: 17.96 } },
-  "Tarrant Appraisal District": { residential: { medianPct: 0.97, cod: 10.14 }, commercial: { medianPct: 0.97, cod: 12.46 } },
-  "Harris Central Appraisal District": { residential: { medianPct: 1.0, cod: 7.48 }, commercial: { medianPct: 0.96, cod: 14.49 } },
-  "Fort Bend Central Appraisal District": { residential: { medianPct: 1.0, cod: 6.77 }, commercial: { medianPct: 1.0, cod: 10.43 } },
-  "Williamson Central Appraisal District": { residential: { medianPct: 0.96, cod: 7.57 }, commercial: { medianPct: 0.97, cod: 11.22 } },
-  "Travis Central Appraisal District": { residential: { medianPct: 1.0, cod: 7.59 }, commercial: { medianPct: 1.0, cod: 12.56 } },
-  "Bexar Appraisal District": { residential: { medianPct: 1.0, cod: 7.89 }, commercial: { medianPct: 1.0, cod: 10.28 } },
-  "Montgomery Central Appraisal District": { residential: { medianPct: 1.0, cod: 8.22 }, commercial: { medianPct: 1.05, cod: 14.27 } },
-  "Grayson Central Appraisal District": { residential: { medianPct: 1.0, cod: 5.51 }, commercial: { medianPct: 1.02, cod: 10.26 } },
+const ASSESSMENT_RATIO: Partial<
+  Record<string, Partial<Record<PropertyCategory, { medianPct: number; cod: number }>>>
+> = {
+  "Collin Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 4.41 },
+    commercial: { medianPct: 1.0, cod: 13.24 },
+  },
+  "Denton Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 6.16 },
+    commercial: { medianPct: 1.07, cod: 17.96 },
+  },
+  "Tarrant Appraisal District": {
+    residential: { medianPct: 0.97, cod: 10.14 },
+    commercial: { medianPct: 0.97, cod: 12.46 },
+  },
+  "Harris Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 7.48 },
+    commercial: { medianPct: 0.96, cod: 14.49 },
+  },
+  "Fort Bend Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 6.77 },
+    commercial: { medianPct: 1.0, cod: 10.43 },
+  },
+  "Williamson Central Appraisal District": {
+    residential: { medianPct: 0.96, cod: 7.57 },
+    commercial: { medianPct: 0.97, cod: 11.22 },
+  },
+  "Travis Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 7.59 },
+    commercial: { medianPct: 1.0, cod: 12.56 },
+  },
+  "Bexar Appraisal District": {
+    residential: { medianPct: 1.0, cod: 7.89 },
+    commercial: { medianPct: 1.0, cod: 10.28 },
+  },
+  "Montgomery Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 8.22 },
+    commercial: { medianPct: 1.05, cod: 14.27 },
+  },
+  "Grayson Central Appraisal District": {
+    residential: { medianPct: 1.0, cod: 5.51 },
+    commercial: { medianPct: 1.02, cod: 10.26 },
+  },
 };
 
 // IAAO Standard on Ratio Studies (2013) published acceptable COD ceilings by
@@ -312,7 +386,10 @@ const COD_ADJUSTMENT_CAP_PCT = 0.02;
 
 export type AssessmentRatioInfo = { medianPct: number; cod: number; codOverCeiling: number } | null;
 
-export function getAssessmentRatioInfo(cad: string | null | undefined, category: PropertyCategory): AssessmentRatioInfo {
+export function getAssessmentRatioInfo(
+  cad: string | null | undefined,
+  category: PropertyCategory,
+): AssessmentRatioInfo {
   if (category === "unknown" || !cad) return null;
   const entry = ASSESSMENT_RATIO[cad]?.[category];
   if (!entry) return null;
@@ -323,8 +400,14 @@ export function getAssessmentRatioInfo(cad: string | null | undefined, category:
   };
 }
 
-export function applyAssessmentRatioAdjustment(baseReductionPct: number, ratioInfo: AssessmentRatioInfo): number {
+export function applyAssessmentRatioAdjustment(
+  baseReductionPct: number,
+  ratioInfo: AssessmentRatioInfo,
+): number {
   if (!ratioInfo) return baseReductionPct;
-  const bounded = Math.min(COD_ADJUSTMENT_CAP_PCT, ratioInfo.codOverCeiling * COD_ADJUSTMENT_PER_POINT);
+  const bounded = Math.min(
+    COD_ADJUSTMENT_CAP_PCT,
+    ratioInfo.codOverCeiling * COD_ADJUSTMENT_PER_POINT,
+  );
   return baseReductionPct + bounded;
 }

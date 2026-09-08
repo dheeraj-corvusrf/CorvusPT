@@ -99,6 +99,18 @@ type ModulesInput = {
     savings: number;
     basis: "comps" | "formula";
     reductionPct: number | null;
+    // Module 9's fuller deterministic financial-opportunity result — the
+    // executive module weighs the net benefit / confidence, not just the
+    // gross savings. All optional so a stale caller still parses.
+    annualSavings?: number;
+    netBenefit?: number;
+    protestCost?: number;
+    protestCostSource?: "contingency" | "override" | "none";
+    savingsToCostMultiple?: number | null;
+    roiPct?: number | null;
+    indicatedRange?: { low: number; high: number } | null;
+    financialConfidence?: "High" | "Moderate" | "Limited";
+    topScenarioReductionPct?: number;
   } | null;
   preFilingStatus?: { missingBlocking: string[] } | null;
   // Only for moduleId "site" — real point data the site-gis edge function
@@ -1398,11 +1410,24 @@ function buildRecord(input: ModulesInput): string {
   }
   if (input.financialSummary) {
     const f = input.financialSummary;
+    const m = (v: number | undefined) => (v != null ? `$${Math.round(v).toLocaleString()}` : null);
     lines.push(
       `The Estimated Savings module already calculated a real potential annual tax savings of ` +
         `$${f.savings.toLocaleString()} (${f.basis === "comps" ? "based on real comparable properties" : "based on real county/category adjustments"}` +
         (f.reductionPct != null ? `, ${f.reductionPct}% value reduction` : "") +
-        "). Use this exact figure — never recalculate or invent a different savings number.",
+        (m(f.netBenefit)
+          ? `; after an estimated protest cost of ${m(f.protestCost)} (${f.protestCostSource ?? "estimated"}), the net benefit is ${m(f.netBenefit)}` +
+            (f.savingsToCostMultiple != null
+              ? `, a ${f.savingsToCostMultiple}x savings-to-cost multiple`
+              : "") +
+            (f.roiPct != null ? `, ${f.roiPct}% ROI` : "")
+          : "") +
+        (f.indicatedRange
+          ? `; comparable-sales indicated value range ${m(f.indicatedRange.low)}-${m(f.indicatedRange.high)}`
+          : "") +
+        (f.financialConfidence ? `; financial confidence ${f.financialConfidence}` : "") +
+        `). Use these exact figures — never recalculate or invent a different savings number. ` +
+        `Weigh the net benefit and financial confidence, not just the gross savings.`,
     );
   }
   if (input.preFilingStatus) {

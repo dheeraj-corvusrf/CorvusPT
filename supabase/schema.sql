@@ -1787,6 +1787,53 @@ create policy "Admins can view all income analysis"
   on public.income_analysis for select
   using (public.is_admin());
 
+-- Optional owner-supplied tax inputs for Module 9 (Estimated Savings) — a
+-- real taxable value, total exemptions, a flat protest-cost override, and a
+-- multi-year projection length that refine the deterministic savings
+-- analysis (src/lib/savings-analysis.ts). One row per property. Mirrors
+-- income_analysis above.
+create table if not exists public.savings_tax_inputs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid not null references public.properties (id) on delete cascade,
+  taxable_value numeric,
+  exemptions_total numeric,
+  protest_cost_override numeric,
+  projection_years integer,
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (property_id)
+);
+
+alter table public.savings_tax_inputs enable row level security;
+
+drop policy if exists "Users can view their own savings tax inputs" on public.savings_tax_inputs;
+create policy "Users can view their own savings tax inputs"
+  on public.savings_tax_inputs for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own savings tax inputs" on public.savings_tax_inputs;
+create policy "Users can insert their own savings tax inputs"
+  on public.savings_tax_inputs for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own savings tax inputs" on public.savings_tax_inputs;
+create policy "Users can update their own savings tax inputs"
+  on public.savings_tax_inputs for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete their own savings tax inputs" on public.savings_tax_inputs;
+create policy "Users can delete their own savings tax inputs"
+  on public.savings_tax_inputs for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all savings tax inputs" on public.savings_tax_inputs;
+create policy "Admins can view all savings tax inputs"
+  on public.savings_tax_inputs for select
+  using (public.is_admin());
+
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
 -- by itself, substituting your real email, to make that account an admin:
