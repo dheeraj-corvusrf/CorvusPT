@@ -472,6 +472,31 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incomeReloadKey, openId]);
 
+  // Re-run Module 2 whenever a per-strategy evidence doc is added (from the
+  // card's "Data Needed" upload chip or the modal's StrategyDetail), on the
+  // render after evidenceDocs updates so loadModule sees the new file. Only
+  // when Module 2 has already run — never a cold fetch. Starts from the
+  // mount count so an initial load doesn't re-trigger it.
+  const strategyEvidenceCount = evidenceDocs.filter((d) =>
+    d.documentType?.startsWith("Strategy Evidence: "),
+  ).length;
+  const strategyEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (strategyEvidenceSeenRef.current === null) {
+      strategyEvidenceSeenRef.current = strategyEvidenceCount;
+      return;
+    }
+    if (strategyEvidenceCount <= strategyEvidenceSeenRef.current) {
+      strategyEvidenceSeenRef.current = strategyEvidenceCount;
+      return;
+    }
+    strategyEvidenceSeenRef.current = strategyEvidenceCount;
+    if (moduleData.strategy?.data || moduleData.strategy?.error) {
+      loadModule("strategy", { force: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyEvidenceCount]);
+
   // Save owner-confirmed income figures. Optimistic; the effect above then
   // re-runs Module 7 with the fresh numbers. The form always sends the
   // complete field set (values or explicit null), so this is a passthrough.
@@ -1788,6 +1813,8 @@ function Report() {
               improvementValue={state.improvementValue}
               overrides={overrides}
               incomeComputed={incomeComputed}
+              uploadingEvidence={uploadingEvidence}
+              onUploadEvidence={handleUploadEvidence}
               onOpen={() => openModule(m)}
               onForceReload={() => loadModule(m.id, { force: true })}
             />
@@ -1985,6 +2012,8 @@ function ModuleCard({
   improvementValue,
   overrides,
   incomeComputed,
+  uploadingEvidence,
+  onUploadEvidence,
   onOpen,
   onForceReload,
 }: {
@@ -2007,6 +2036,8 @@ function ModuleCard({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onOpen: () => void;
   onForceReload: () => void;
 }) {
@@ -2116,6 +2147,8 @@ function ModuleCard({
             improvementValue={improvementValue}
             overrides={overrides}
             incomeComputed={incomeComputed}
+            uploadingEvidence={uploadingEvidence}
+            onUploadEvidence={onUploadEvidence}
             onOpen={onOpen}
           />
         </div>
@@ -2187,6 +2220,8 @@ function ModuleVisual({
   improvementValue,
   overrides,
   incomeComputed,
+  uploadingEvidence,
+  onUploadEvidence,
   onOpen,
 }: {
   m: Module;
@@ -2207,6 +2242,8 @@ function ModuleVisual({
   improvementValue?: number | null;
   overrides: ModuleOverride[];
   incomeComputed: IncomeApproach;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onOpen: () => void;
 }) {
   if (!unlocked) {
@@ -2393,7 +2430,15 @@ function ModuleVisual({
     case "strategy": {
       const d = moduleState.data as ModuleResultMap["strategy"];
       if (d.strategies.length === 0) return null;
-      return <StrategyRankList strategies={d.strategies} color={m.color} max={5} />;
+      return (
+        <StrategyRankList
+          strategies={d.strategies}
+          color={m.color}
+          max={5}
+          uploading={uploadingEvidence}
+          onUploadFor={(s, files) => onUploadEvidence(files, strategySlug(s.name))}
+        />
+      );
     }
     case "comps": {
       const d = moduleState.data as ModuleResultMap["comps"];
@@ -4569,7 +4614,18 @@ function evidenceItemSlug(item: string): string {
 // Compact ranked row for the card preview — used by both ModuleVisual's
 // "strategy" case and StrategyDetail's header below. Row order itself
 // already conveys rank (top = strongest), so no separate number badge.
-function StrategyBar({ s }: { s: StrategyEntry }) {
+function StrategyBar({
+  s,
+  onUpload,
+  uploading,
+}: {
+  s: StrategyEntry;
+  // When provided, a "Data Needed" row shows an inline upload control that
+  // tags the file for this strategy (same path as StrategyDetail's own
+  // upload) and lets Module 2 re-run with it.
+  onUpload?: (s: StrategyEntry, files: File[]) => void;
+  uploading?: boolean;
+}) {
   const Icon = strategyIcon(s);
   return (
     <div className="flex items-center gap-2.5">
@@ -4583,18 +4639,45 @@ function StrategyBar({ s }: { s: StrategyEntry }) {
           />
         </div>
       </div>
-      {s.dataSufficient ? (
+      <div className="flex shrink-0 items-center gap-1.5">
+        {/* Score always shows — the row still reads as ranked even when the
+            AI wants more evidence. */}
         <span
-          className="w-7 shrink-0 text-right text-xs font-semibold"
-          style={{ color: scoreColor(s.strengthScore) }}
+          className="w-6 text-right text-xs font-semibold"
+          style={{ color: s.dataSufficient ? scoreColor(s.strengthScore) : undefined }}
         >
           {s.strengthScore}
         </span>
-      ) : (
-        <span className="shrink-0 whitespace-nowrap rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
-          Data Needed
-        </span>
-      )}
+        {!s.dataSufficient &&
+          (onUpload ? (
+            // Upload control ONLY on a row the AI flagged as needing data.
+            <label
+              title="Data needed — upload supporting evidence"
+              className={`inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-full border border-accent/40 px-2 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
+                uploading ? "pointer-events-none opacity-60" : ""
+              }`}
+            >
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                multiple
+                disabled={uploading}
+                className="hidden"
+                onChange={(e) => {
+                  const sel = Array.from(e.target.files ?? []);
+                  e.target.value = "";
+                  if (sel.length > 0) onUpload(s, sel);
+                }}
+              />
+              <Upload className="h-3 w-3" />
+              {uploading ? "…" : "Upload"}
+            </label>
+          ) : (
+            <span className="whitespace-nowrap rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
+              Data Needed
+            </span>
+          ))}
+      </div>
     </div>
   );
 }
@@ -4603,16 +4686,20 @@ function StrategyRankList({
   strategies,
   color,
   max,
+  onUploadFor,
+  uploading,
 }: {
   strategies: StrategyEntry[];
   color: IconColor;
   max?: number;
+  onUploadFor?: (s: StrategyEntry, files: File[]) => void;
+  uploading?: boolean;
 }) {
   const shown = max ? strategies.slice(0, max) : strategies;
   return (
     <div className="grid gap-2 [&>*]:min-w-0">
       {shown.map((s) => (
-        <StrategyBar key={s.name} s={s} />
+        <StrategyBar key={s.name} s={s} onUpload={onUploadFor} uploading={uploading} />
       ))}
     </div>
   );
