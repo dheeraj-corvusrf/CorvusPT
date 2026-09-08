@@ -24,6 +24,7 @@ type HealthScoreInput = {
   compsSummary?: { median: number; min: number; max: number; count: number } | null;
   assessmentRatio?: { medianPct: number; cod: number; codOverCeiling: number } | null;
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
+  valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
 };
 
@@ -189,6 +190,18 @@ Deno.serve(async (req: Request) => {
             ? ` (${r.codOverCeiling.toFixed(1)} points above the IAAO standard)`
             : " (within the IAAO standard)"),
       );
+    }
+    if (input.valueHistory && input.valueHistory.length > 0) {
+      const hist = [...input.valueHistory]
+        .filter((h) => h && typeof h.year === "number" && typeof h.total === "number")
+        .sort((a, b) => a.year - b.year);
+      if (hist.length > 0) {
+        lines.push(
+          `Assessed value history (from the CAD): ${hist
+            .map((h) => `${h.year} $${h.total.toLocaleString()}`)
+            .join("; ")}.`,
+        );
+      }
     }
     if (input.valueTrend?.jumpTriggered) {
       lines.push(

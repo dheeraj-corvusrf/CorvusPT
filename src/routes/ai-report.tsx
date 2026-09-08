@@ -653,6 +653,12 @@ function Report() {
         classifyPropertyCategory(state.propertyType),
       );
       input.valueTrend = buildValueTrend(state.valueHistory);
+      if (id === "health") {
+        input.valueHistory = (state.valueHistory ?? [])
+          .map((h) => ({ year: h.year, total: h.appraisedValue ?? h.marketValue ?? null }))
+          .filter((h): h is { year: number; total: number } => h.total != null)
+          .sort((a, b) => a.year - b.year);
+      }
       input.evidenceFileNames = evidenceDocs.map((d) => d.fileName);
     }
 

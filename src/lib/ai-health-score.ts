@@ -14,6 +14,10 @@ export type HealthScoreInput = {
   compsSummary?: { median: number; min: number; max: number; count: number } | null;
   assessmentRatio?: { medianPct: number; cod: number; codOverCeiling: number } | null;
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
+  // The actual year-by-year CAD value history (not just the jump flag in
+  // valueTrend) so the score can speak to real historical trends instead of
+  // reporting them as missing.
+  valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
 };
 
