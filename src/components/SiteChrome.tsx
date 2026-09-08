@@ -299,8 +299,16 @@ export function SiteFooter() {
   return (
     <footer className="border-t border-border/70 bg-secondary/40">
       <div className="container-page py-5 text-xs text-muted-foreground flex flex-wrap justify-between gap-2">
-        <span>
-          © {new Date().getFullYear()} CorvusPT — Texas Property Tax AI. All rights reserved.
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>
+            © {new Date().getFullYear()} CorvusPT — Texas Property Tax AI. All rights reserved.
+          </span>
+          <Link to="/terms" className="underline underline-offset-2 hover:text-foreground">
+            Terms of Service
+          </Link>
+          <Link to="/privacy" className="underline underline-offset-2 hover:text-foreground">
+            Privacy Policy
+          </Link>
         </span>
         {/* Matches supabase/functions/cad-lookup/index.ts's countyQueriesInOrder
             (Collin, Montgomery, Denton, Harris, Tarrant, Fort Bend, Williamson,

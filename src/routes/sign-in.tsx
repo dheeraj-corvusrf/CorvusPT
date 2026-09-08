@@ -5,6 +5,14 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import type { CadRecord } from "@/lib/cad-lookup";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
+import {
+  TERMS_VERSION,
+  PRIVACY_VERSION,
+  SIGNUP_ACK_VERSION,
+  SIGNUP_ACK_INTRO,
+  SIGNUP_ACK_ITEMS,
+  SIGNUP_ACK_CONFIRM,
+} from "@/lib/legal";
 
 export const Route = createFileRoute("/sign-in")({
   head: () => ({
@@ -95,6 +103,7 @@ function SignIn() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [wantsBeta, setWantsBeta] = useState(searchParams.beta === "1");
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkEmail, setCheckEmail] = useState(false);
@@ -139,6 +148,10 @@ function SignIn() {
       setError("Password must be at least 6 characters.");
       return;
     }
+    if (mode === "signup" && !termsAccepted) {
+      setError("Please accept the Terms of Service and Privacy Policy to continue.");
+      return;
+    }
     if (!isSupabaseConfigured) {
       setError("Accounts aren't set up in this deployment yet. Please check back soon.");
       return;
@@ -162,6 +175,11 @@ function SignIn() {
               // Same pattern — the raw code from ?ref=, resolved into a real
               // referred_by user id by handle_new_user(), not here.
               referral_code_used: searchParams.ref ?? null,
+              // Terms/Privacy acceptance versions — handle_new_user() writes
+              // the terms_acceptances row from these (see schema.sql).
+              terms_version: TERMS_VERSION,
+              privacy_version: PRIVACY_VERSION,
+              ack_version: SIGNUP_ACK_VERSION,
             },
           },
         });
@@ -408,9 +426,56 @@ function SignIn() {
               </label>
             </div>
           )}
+          {mode === "signup" && (
+            <div className="grid gap-2 rounded-lg border border-border p-3 text-sm">
+              <label className="flex items-start gap-2 font-medium">
+                <input
+                  type="checkbox"
+                  checked={termsAccepted}
+                  onChange={(e) => setTermsAccepted(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  I have read and agree to the{" "}
+                  <a
+                    href="/terms"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent-foreground underline underline-offset-2"
+                  >
+                    Terms of Service
+                  </a>{" "}
+                  and{" "}
+                  <a
+                    href="/privacy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent-foreground underline underline-offset-2"
+                  >
+                    Privacy Policy
+                  </a>
+                  .
+                </span>
+              </label>
+              <p className="text-muted-foreground text-xs">{SIGNUP_ACK_INTRO}</p>
+              <ul className="text-muted-foreground grid list-disc gap-1 pl-5 text-xs">
+                {SIGNUP_ACK_ITEMS.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+              <p className="text-muted-foreground text-xs">{SIGNUP_ACK_CONFIRM}</p>
+            </div>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
-          <button disabled={loading} className="btn-primary btn-primary-hover disabled:opacity-60">
-            {loading ? "Please wait…" : mode === "signin" ? "Sign In" : "Create Account"}
+          <button
+            disabled={loading || (mode === "signup" && !termsAccepted)}
+            className="btn-primary btn-primary-hover disabled:opacity-60"
+          >
+            {loading
+              ? "Please wait…"
+              : mode === "signin"
+                ? "Sign In"
+                : "Agree & Create Account"}
           </button>
           <button
             type="button"

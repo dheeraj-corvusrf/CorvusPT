@@ -127,6 +127,25 @@ begin
     upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8)),
     referrer_id
   );
+
+  -- Signup Terms & Conditions acceptance — sign-in.tsx passes terms_version /
+  -- privacy_version / ack_version through the same options.data mechanism.
+  -- Wrapped so a problem here can never block account creation; a later
+  -- re-acceptance (LegalGate) records its own row with the request IP via
+  -- the record-terms-acceptance edge function.
+  begin
+    insert into public.terms_acceptances (user_id, email, terms_version, privacy_version, ack_version, source)
+    values (
+      new.id,
+      new.email,
+      coalesce(new.raw_user_meta_data ->> 'terms_version', 'unknown'),
+      coalesce(new.raw_user_meta_data ->> 'privacy_version', 'unknown'),
+      coalesce(new.raw_user_meta_data ->> 'ack_version', 'unknown'),
+      'signup'
+    );
+  exception when others then null;
+  end;
+
   -- Clears this address off the admin panel's "Invited Users" tab the moment
   -- a real account actually exists for it — security definer, so this runs
   -- regardless of the new user's own RLS grants (they have none on
@@ -1110,6 +1129,72 @@ create policy "Users can view their own service agreements"
 drop policy if exists "Admins can view all service agreements" on public.service_agreement_acceptances;
 create policy "Admins can view all service agreements"
   on public.service_agreement_acceptances for select
+  using (public.is_admin());
+
+-- Terms of Service / Privacy Policy acceptance. One row per acceptance:
+-- signup (recorded by handle_new_user, no IP) and every later re-acceptance
+-- prompted by LegalGate when the stored versions fall behind the current
+-- ones (recorded by the record-terms-acceptance edge function, with the
+-- request IP + user agent). The version strings are constants in
+-- src/lib/legal.ts — bump one to force everyone to re-accept.
+create table if not exists public.terms_acceptances (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  email text,
+  terms_version text not null,
+  privacy_version text not null,
+  ack_version text not null,
+  ip_address text,
+  user_agent text,
+  source text not null default 'signup',
+  accepted_at timestamptz not null default now()
+);
+
+alter table public.terms_acceptances enable row level security;
+
+drop policy if exists "Users can view their own terms acceptances" on public.terms_acceptances;
+create policy "Users can view their own terms acceptances"
+  on public.terms_acceptances for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own terms acceptances" on public.terms_acceptances;
+create policy "Users can insert their own terms acceptances"
+  on public.terms_acceptances for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all terms acceptances" on public.terms_acceptances;
+create policy "Admins can view all terms acceptances"
+  on public.terms_acceptances for select
+  using (public.is_admin());
+
+-- "Review Before Proceeding" AI acknowledgement — shown in
+-- ProtestAuthorizationFlow right before the owner signs / submits a protest
+-- (the "about to rely on AI-generated analysis" moment). One row per time it
+-- is confirmed.
+create table if not exists public.ai_acknowledgements (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid references public.properties (id) on delete cascade,
+  protest_id uuid references public.protests (id) on delete set null,
+  ack_version text not null,
+  acknowledged_at timestamptz not null default now()
+);
+
+alter table public.ai_acknowledgements enable row level security;
+
+drop policy if exists "Users can view their own ai acknowledgements" on public.ai_acknowledgements;
+create policy "Users can view their own ai acknowledgements"
+  on public.ai_acknowledgements for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own ai acknowledgements" on public.ai_acknowledgements;
+create policy "Users can insert their own ai acknowledgements"
+  on public.ai_acknowledgements for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all ai acknowledgements" on public.ai_acknowledgements;
+create policy "Admins can view all ai acknowledgements"
+  on public.ai_acknowledgements for select
   using (public.is_admin());
 
 -- Per-tax-year bill/payment/refund history for a property — closes the loop on the

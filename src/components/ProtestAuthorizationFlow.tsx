@@ -20,6 +20,8 @@ import {
   type ServiceAgreementAcceptance,
 } from "@/lib/service-agreement";
 import { getMyProfile } from "@/lib/profile";
+import { recordAiAcknowledgement } from "@/lib/legal-acceptance";
+import { AI_ACK_CHECKBOX, AI_ACK_BODY, AI_ACK_VERSION } from "@/lib/legal";
 import type { PropertyRecord } from "@/lib/properties";
 import { getErrorMessage } from "@/lib/error-message";
 
@@ -33,7 +35,7 @@ export const AGREEMENT = {
   venue: "Dallas County, Texas",
 };
 
-type Step = "agreement" | "owner" | "purchase" | "review";
+type Step = "agreement" | "owner" | "purchase" | "aiack" | "review";
 const ENTITY_TYPES = ["LLC", "Corporation", "Partnership", "Estate", "Trust", "Other"] as const;
 
 // The owner-identity fields carried from one property to the next when this
@@ -108,6 +110,8 @@ export function ProtestAuthorizationFlow({
     initialOwnerInfo?.entityType ?? "",
   );
   const [purchasedRecently, setPurchasedRecently] = useState<boolean | null>(null);
+  const [aiAcked, setAiAcked] = useState(false);
+  const [recordingAiAck, setRecordingAiAck] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [signature, setSignature] = useState<SignatureValue | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -142,6 +146,8 @@ export function ProtestAuthorizationFlow({
     setEntityRelationship(initialOwnerInfo?.entityRelationship ?? "");
     setEntityType(initialOwnerInfo?.entityType ?? "");
     setPurchasedRecently(null);
+    setAiAcked(false);
+    setRecordingAiAck(false);
     setAgreed(false);
     setSignature(null);
     setError(null);
@@ -171,6 +177,25 @@ export function ProtestAuthorizationFlow({
       toast.error(message);
     } finally {
       setRecordingAgreement(false);
+    }
+  }
+
+  async function handleAiAck() {
+    if (!aiAcked || recordingAiAck) return;
+    setRecordingAiAck(true);
+    setError(null);
+    try {
+      await recordAiAcknowledgement({ propertyId: property.id });
+      setStep("review");
+    } catch (err) {
+      const message = getErrorMessage(
+        err,
+        "Could not record your acknowledgement. Please try again.",
+      );
+      setError(message);
+      toast.error(message);
+    } finally {
+      setRecordingAiAck(false);
     }
   }
 
@@ -239,6 +264,7 @@ export function ProtestAuthorizationFlow({
             {step === "agreement" && "CorvusPT Service Agreement"}
             {step === "owner" && "Property Owner Details"}
             {step === "purchase" && "One More Question"}
+            {step === "aiack" && "Review Before Proceeding"}
             {step === "review" && "Review & Sign"}
           </DialogTitle>
           <DialogDescription>
@@ -505,10 +531,45 @@ export function ProtestAuthorizationFlow({
               </button>
               <button
                 disabled={purchasedRecently === null}
-                onClick={() => setStep("review")}
+                onClick={() => setStep("aiack")}
                 className="btn-primary btn-primary-hover disabled:opacity-50"
               >
                 Next
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === "aiack" && (
+          <div className="grid gap-4">
+            <p className="text-sm text-muted-foreground">
+              Before you sign and submit this protest, please review how CorvusPT&apos;s AI-assisted
+              analysis should be used.
+            </p>
+            <div className="space-y-3 rounded-lg border border-border p-4 text-sm text-muted-foreground">
+              <p>{AI_ACK_BODY}</p>
+              <p className="text-xs">Acknowledgement version {AI_ACK_VERSION}.</p>
+            </div>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={aiAcked}
+                onChange={(e) => setAiAcked(e.target.checked)}
+                className="mt-0.5"
+              />
+              {AI_ACK_CHECKBOX}
+            </label>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex gap-2">
+              <button onClick={() => setStep("purchase")} className="btn-outline">
+                Go Back
+              </button>
+              <button
+                disabled={!aiAcked || recordingAiAck}
+                onClick={handleAiAck}
+                className="btn-primary btn-primary-hover disabled:opacity-50"
+              >
+                {recordingAiAck ? "Recording…" : "Confirm & Continue"}
               </button>
             </div>
           </div>
@@ -569,7 +630,7 @@ export function ProtestAuthorizationFlow({
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex gap-2">
-              <button onClick={() => setStep("purchase")} className="btn-outline">
+              <button onClick={() => setStep("aiack")} className="btn-outline">
                 Back
               </button>
               <button

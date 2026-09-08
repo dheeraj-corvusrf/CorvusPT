@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
@@ -250,6 +250,33 @@ function Settings() {
             {changingPassword ? "Updating…" : "Update Password"}
           </button>
         </form>
+      )}
+
+      {!loading && (
+        <div className="mt-8 card-elev max-w-xl p-6">
+          <h2 className="font-semibold">Legal</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            The documents you accepted when creating your account.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-4 text-sm">
+            <Link
+              to="/terms"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent-foreground underline underline-offset-2"
+            >
+              Terms of Service
+            </Link>
+            <Link
+              to="/privacy"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent-foreground underline underline-offset-2"
+            >
+              Privacy Policy
+            </Link>
+          </div>
+        </div>
       )}
 
       {!loading && (
