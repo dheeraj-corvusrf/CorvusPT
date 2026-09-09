@@ -585,6 +585,30 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [improvementEvidenceCount]);
 
+  // Same, for Module 6 (Zoning & Classification) — a doc uploaded from the
+  // card's per-aspect "Needs data" chip (tagged "Zoning: <aspect>") re-runs
+  // the classification check + its dependents.
+  const zoningEvidenceCount = evidenceDocs.filter((d) =>
+    d.documentType?.startsWith("Zoning: "),
+  ).length;
+  const zoningEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (zoningEvidenceSeenRef.current === null) {
+      zoningEvidenceSeenRef.current = zoningEvidenceCount;
+      return;
+    }
+    if (zoningEvidenceCount <= zoningEvidenceSeenRef.current) {
+      zoningEvidenceSeenRef.current = zoningEvidenceCount;
+      return;
+    }
+    zoningEvidenceSeenRef.current = zoningEvidenceCount;
+    if (moduleData.zoning?.data || moduleData.zoning?.error) {
+      loadModule("zoning", { force: true });
+      reloadDependentModules("zoning");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoningEvidenceCount]);
+
   // Save owner-confirmed income figures. Optimistic; the effect above then
   // re-runs Module 7 with the fresh numbers. The form always sends the
   // complete field set (values or explicit null), so this is a passthrough.
@@ -2908,7 +2932,18 @@ function ModuleVisual({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      return <ZoningAspectTiles aspects={d.aspects} matches={d.matches} />;
+      return (
+        <ZoningAspectTiles
+          aspects={d.aspects}
+          matches={d.matches}
+          uploading={uploadingEvidence}
+          onUpload={
+            hasFullAccess
+              ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
+              : undefined
+          }
+        />
+      );
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
@@ -5586,9 +5621,13 @@ function ZoningClassificationTable({
 function ZoningAspectTiles({
   aspects,
   matches,
+  onUpload,
+  uploading,
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
+  onUpload?: (aspectLabel: string, files: File[]) => void;
+  uploading?: boolean;
 }) {
   const consistent = matches === "consistent";
   const uncertain = matches === "uncertain";
@@ -5598,6 +5637,7 @@ function ZoningAspectTiles({
         {aspects.map((a) => {
           const st = ZONING_ASPECT_STATUS[a.status];
           const Icon = ZONING_ASPECT_ICON[a.label] ?? FileText;
+          const needsData = a.status === "Additional Data Needed";
           return (
             <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
               <Icon className="mx-auto h-4 w-4 text-muted-foreground" />
@@ -5609,6 +5649,27 @@ function ZoningAspectTiles({
               >
                 {st.label}
               </span>
+              {onUpload && needsData && (
+                <label
+                  className="mt-1 flex cursor-pointer items-center justify-center gap-0.5 rounded-full border border-accent/40 px-1.5 py-0.5 text-[8px] font-semibold text-accent hover:bg-accent/10"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    multiple
+                    disabled={uploading}
+                    className="hidden"
+                    onChange={(e) => {
+                      const sel = Array.from(e.target.files ?? []);
+                      if (sel.length > 0) onUpload(a.label, sel);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Upload className="h-2.5 w-2.5" />
+                  {uploading ? "Uploading…" : "Upload"}
+                </label>
+              )}
             </div>
           );
         })}
