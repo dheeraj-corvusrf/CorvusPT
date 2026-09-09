@@ -39,6 +39,21 @@ import {
   type EscalationEvaluation,
 } from "@/lib/escalation-eval";
 import {
+  getCaseRecord,
+  caseRecordStage,
+  outstandingProofPrompts,
+  caseRecordCompletion,
+  type CaseRecordItem,
+} from "@/lib/case-record";
+import {
+  logCaseEvent,
+  getCaseAuditTrail,
+  caseAuditKindLabel,
+  type CaseAuditEvent,
+} from "@/lib/case-audit";
+import { saveCaseRecordFields } from "@/lib/protest-case";
+import { listDocuments } from "@/lib/documents";
+import {
   getCountyProtestInfo,
   COUNTY_PROTEST_INFO,
   type CountyProtestInfo,
@@ -316,6 +331,15 @@ export function CaseDetailView({
             caseData={caseData}
             onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
           />
+
+          <CaseRecordSection
+            userId={userId}
+            protest={current}
+            property={property}
+            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+          />
+
+          <CaseAuditTrailSection protestId={protest.id} />
 
           <NextStepFooter
             property={property}
@@ -3001,6 +3025,383 @@ function SettlementSignatureSection({
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// The complete case record — every proof/record item a fully-documented
+// protest should hold (see src/lib/case-record.ts), what's on file, and what
+// is still outstanding *for a stage the case has already reached*. Those are
+// surfaced first as "needed now" prompts so the user uploads proof at each
+// stage rather than scrambling at the end.
+const RECORD_STAGE_LABEL: Record<string, string> = {
+  filing: "Filing",
+  informal: "Informal review",
+  hearing: "Formal hearing",
+  decision: "Decision",
+  escalation: "Escalation",
+  resolved: "Resolved",
+};
+
+function CaseRecordSection({
+  userId,
+  protest,
+  property,
+  onUpdate,
+}: {
+  userId: string;
+  protest: ProtestRecord;
+  property: PropertyRecord;
+  onUpdate: (patch: Partial<ProtestRecord>) => void;
+}) {
+  const [docs, setDocs] = useState<DocumentRecord[]>([]);
+  const [countyCommLogged, setCountyCommLogged] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confNum, setConfNum] = useState(protest.filingConfirmationNumber ?? "");
+  const [channel, setChannel] = useState(protest.filingChannel ?? "");
+  const [tracking, setTracking] = useState(protest.certifiedMailTracking ?? "");
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    Promise.all([listDocuments(userId), getCaseAuditTrail(protest.id)])
+      .then(([allDocs, events]) => {
+        if (!live) return;
+        setDocs(allDocs.filter((d) => d.propertyId === property.id));
+        setCountyCommLogged(events.some((e) => e.kind === "county_communication"));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [userId, property.id, protest.id, reloadKey]);
+
+  const stage = caseRecordStage(protest);
+  const items = getCaseRecord(protest, {
+    documents: docs,
+    hearingNoticeOnFile: !!(protest.hearingLocation || protest.hearingTime),
+    countyCommunicationLogged: countyCommLogged,
+  });
+  const prompts = outstandingProofPrompts(items, stage);
+  const { onFile, applicable } = caseRecordCompletion(items);
+
+  async function uploadFor(item: CaseRecordItem, files: File[]) {
+    if (!item.docType || files.length === 0) return;
+    setBusy(item.id);
+    try {
+      for (const file of files) {
+        const doc = await uploadDocument(userId, property.id, file, item.docType);
+        void logCaseEvent(protest.id, "document_added", `${item.label}: uploaded ${doc.fileName}.`);
+      }
+      toast.success("Added to the case record.");
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not upload this file.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveField(patch: Parameters<typeof saveCaseRecordFields>[1], label: string) {
+    setBusy(label);
+    try {
+      await saveCaseRecordFields(protest.id, patch);
+      onUpdate(patch as Partial<ProtestRecord>);
+      toast.success("Saved to the case record.");
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save this.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const byStage = new Map<string, CaseRecordItem[]>();
+  for (const it of items) {
+    byStage.set(it.stage, [...(byStage.get(it.stage) ?? []), it]);
+  }
+
+  return (
+    <div id="case-record" className="mt-5 border-t border-border pt-5">
+      <div className="flex items-baseline justify-between gap-2">
+        <h4 className="text-sm font-semibold">Case Record</h4>
+        <span className="text-xs text-muted-foreground">
+          {onFile}/{applicable} on file
+        </span>
+      </div>
+
+      {prompts.length > 0 && (
+        <div className="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3">
+          <p className="text-xs font-semibold text-warning-foreground">
+            Upload proof for the current stage
+          </p>
+          <ul className="mt-1.5 space-y-1.5">
+            {prompts.map((p) => (
+              <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="text-warning-foreground">{p.label}</span>
+                {p.fulfil === "document" && p.docType && (
+                  <label className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-accent/40 bg-background px-2.5 py-1 font-semibold text-accent hover:bg-accent/10">
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={busy === p.id}
+                      className="hidden"
+                      onChange={(e) => {
+                        void uploadFor(p, Array.from(e.target.files ?? []));
+                        e.target.value = "";
+                      }}
+                    />
+                    {busy === p.id ? "Uploading…" : "Upload"}
+                  </label>
+                )}
+                {p.fulfil === "field" && (
+                  <span className="shrink-0 text-[11px] text-muted-foreground">Enter it below</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Field entry for the structured items */}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <label className="text-xs font-medium text-muted-foreground">
+          Filing confirmation number
+          <div className="mt-1 flex gap-1">
+            <input
+              value={confNum}
+              onChange={(e) => setConfNum(e.target.value)}
+              placeholder="Portal / email / clerk number"
+              className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
+            />
+            <button
+              type="button"
+              disabled={busy === "conf" || confNum === (protest.filingConfirmationNumber ?? "")}
+              onClick={() =>
+                saveField(
+                  {
+                    filingConfirmationNumber: confNum,
+                    ...(channel
+                      ? {
+                          filingChannel: channel as "online" | "mail" | "in_person" | "email",
+                        }
+                      : {}),
+                  },
+                  "conf",
+                )
+              }
+              className="btn-outline shrink-0 text-xs disabled:opacity-50"
+            >
+              Save
+            </button>
+          </div>
+        </label>
+        <label className="text-xs font-medium text-muted-foreground">
+          Filed by
+          <select
+            value={channel}
+            onChange={(e) => {
+              setChannel(e.target.value);
+              if (e.target.value)
+                saveField(
+                  {
+                    filingChannel: e.target.value as "online" | "mail" | "in_person" | "email",
+                  },
+                  "channel",
+                );
+            }}
+            className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
+          >
+            <option value="">—</option>
+            <option value="online">Online portal</option>
+            <option value="mail">Mail</option>
+            <option value="in_person">In person</option>
+            <option value="email">Email</option>
+          </select>
+        </label>
+        {(channel === "mail" || channel === "" || protest.filingChannel === "mail") && (
+          <label className="text-xs font-medium text-muted-foreground">
+            Certified-mail tracking number
+            <div className="mt-1 flex gap-1">
+              <input
+                value={tracking}
+                onChange={(e) => setTracking(e.target.value)}
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
+              />
+              <button
+                type="button"
+                disabled={busy === "tracking" || tracking === (protest.certifiedMailTracking ?? "")}
+                onClick={() => saveField({ certifiedMailTracking: tracking }, "tracking")}
+                className="btn-outline shrink-0 text-xs disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </label>
+        )}
+        {!protest.evidenceSubmittedConfirmedAt && stage !== "filing" && (
+          <div className="text-xs font-medium text-muted-foreground">
+            Evidence submitted to the ARB?
+            <button
+              type="button"
+              disabled={busy === "evsub"}
+              onClick={() =>
+                saveField({ evidenceSubmittedConfirmedAt: new Date().toISOString() }, "evsub")
+              }
+              className="btn-outline mt-1 block text-xs disabled:opacity-50"
+            >
+              Yes — I submitted it before the deadline
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Full record, grouped by stage */}
+      <div className="mt-4 space-y-3">
+        {["filing", "informal", "hearing", "decision", "escalation", "resolved"]
+          .filter((s) => (byStage.get(s) ?? []).length > 0)
+          .map((s) => (
+            <div key={s}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {RECORD_STAGE_LABEL[s]}
+              </p>
+              <ul className="mt-1 space-y-1">
+                {(byStage.get(s) ?? []).map((it) => (
+                  <li key={it.id} className="flex items-start gap-2 text-xs">
+                    <span
+                      className={
+                        it.status === "on_file"
+                          ? "text-success"
+                          : it.status === "outstanding"
+                            ? "text-warning-foreground"
+                            : "text-muted-foreground"
+                      }
+                    >
+                      {it.status === "on_file" ? "●" : it.status === "outstanding" ? "○" : "–"}
+                    </span>
+                    <span className="flex-1">
+                      <span className="font-medium text-foreground">{it.label}</span>
+                      <span className="text-muted-foreground"> — {it.detail}</span>
+                    </span>
+                    {it.status === "outstanding" && it.fulfil === "document" && it.docType && (
+                      <label className="shrink-0 cursor-pointer text-accent hover:underline">
+                        <input
+                          type="file"
+                          accept="image/*,.pdf"
+                          multiple
+                          disabled={busy === it.id}
+                          className="hidden"
+                          onChange={(e) => {
+                            void uploadFor(it, Array.from(e.target.files ?? []));
+                            e.target.value = "";
+                          }}
+                        />
+                        {busy === it.id ? "Uploading…" : "Upload"}
+                      </label>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+// Append-only audit trail for this case (public.case_audit_events) — every
+// status change, document, form, signature, submission, deadline, county
+// communication and value recorded, newest first. Plus a control to log a
+// county call/email that has no other home.
+function CaseAuditTrailSection({ protestId }: { protestId: string }) {
+  const [events, setEvents] = useState<CaseAuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    getCaseAuditTrail(protestId)
+      .then((e) => {
+        if (live) setEvents(e);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [protestId, reloadKey]);
+
+  async function logCommunication(e: FormEvent) {
+    e.preventDefault();
+    if (!note.trim()) return;
+    setBusy(true);
+    try {
+      await logCaseEvent(protestId, "county_communication", note.trim());
+      setNote("");
+      setReloadKey((k) => k + 1);
+      toast.success("Logged.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div id="case-audit-trail" className="mt-5 border-t border-border pt-5">
+      <h4 className="text-sm font-semibold">Audit Trail</h4>
+
+      <form onSubmit={logCommunication} className="mt-2 flex gap-1">
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Log a county call or email (who, when, what was said)"
+          className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
+        />
+        <button
+          type="submit"
+          disabled={busy || !note.trim()}
+          className="btn-outline shrink-0 text-xs disabled:opacity-50"
+        >
+          {busy ? "Logging…" : "Log"}
+        </button>
+      </form>
+
+      {loading ? (
+        <div className="mt-3 grid gap-2">
+          <Skeleton className="h-3 w-40" />
+          <Skeleton className="h-3 w-56" />
+        </div>
+      ) : events.length === 0 ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No recorded events yet — case actions you take here are logged automatically.
+        </p>
+      ) : (
+        <ol className="mt-3 space-y-2">
+          {events.map((ev) => (
+            <li key={ev.id} className="flex gap-2 text-xs">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+              <span className="flex-1">
+                <span className="text-foreground">{ev.summary}</span>
+                <span className="block text-[10px] text-muted-foreground">
+                  {caseAuditKindLabel(ev.kind)} ·{" "}
+                  {new Date(ev.occurredAt).toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
       )}
     </div>
   );

@@ -29,6 +29,15 @@ export const SETTLEMENT_SIGNED_DOCUMENT_TYPE = "Settlement Agreement — Signed"
 // revised value notice, etc.) — see decision-notice.ts.
 export const DECISION_DOCUMENT_TYPE = "Hearing Decision Document";
 
+// Case-record document types (see src/lib/case-record.ts) — the proof items
+// a complete case file should hold that don't fit any category above. All
+// free-text, same convention as the constants above.
+export const CONFIRMATION_DOCUMENT_TYPE = "Filing Confirmation"; // portal/email confirmation, screenshots, certified-mail receipt
+export const CORRESPONDENCE_DOCUMENT_TYPE = "County Correspondence"; // informal correspondence, county staff notes
+export const EVIDENCE_SUBMISSION_DOCUMENT_TYPE = "Evidence Submission Confirmation";
+export const ARB_ORDER_DOCUMENT_TYPE = "ARB Order";
+export const ESCALATION_DOCUMENT_TYPE = "Escalation Document";
+
 export type AiVerdict = "valid" | "issues" | "invalid";
 
 export type DocumentRecord = {

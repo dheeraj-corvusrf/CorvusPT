@@ -89,6 +89,13 @@ export type ProtestRecord = {
   informalReviewDate: string | null;
   informalAppraiserCategory: AppraiserCategory | null;
   attendanceType: AttendanceType | null;
+  // Case-record fields — see src/lib/case-record.ts. Optional (not just
+  // nullable) so the many ProtestRecord fixtures/builders that predate them
+  // don't all need updating; fromRow (the real path) always populates them.
+  filingConfirmationNumber?: string | null;
+  filingChannel?: "online" | "mail" | "in_person" | "email" | null;
+  certifiedMailTracking?: string | null;
+  evidenceSubmittedConfirmedAt?: string | null;
 };
 
 type ProtestRow = {
@@ -116,10 +123,14 @@ type ProtestRow = {
   informal_review_date: string | null;
   informal_appraiser_category: AppraiserCategory | null;
   attendance_type: AttendanceType | null;
+  filing_confirmation_number: string | null;
+  filing_channel: "online" | "mail" | "in_person" | "email" | null;
+  certified_mail_tracking: string | null;
+  evidence_submitted_confirmed_at: string | null;
 };
 
 const SELECT_COLUMNS =
-  "id, property_id, status, notes, requested_at, updated_at, original_value, settlement_offer_value, settlement_offer_received_at, hearing_date, hearing_time, hearing_location, hearing_mode, arb_decision, arb_decision_date, final_value, escalation_path, closed_at, tax_year, corvus_guidance_ack_at, informal_status, informal_review_date, informal_appraiser_category, attendance_type";
+  "id, property_id, status, notes, requested_at, updated_at, original_value, settlement_offer_value, settlement_offer_received_at, hearing_date, hearing_time, hearing_location, hearing_mode, arb_decision, arb_decision_date, final_value, escalation_path, closed_at, tax_year, corvus_guidance_ack_at, informal_status, informal_review_date, informal_appraiser_category, attendance_type, filing_confirmation_number, filing_channel, certified_mail_tracking, evidence_submitted_confirmed_at";
 
 function fromRow(row: ProtestRow): ProtestRecord {
   return {
@@ -147,6 +158,10 @@ function fromRow(row: ProtestRow): ProtestRecord {
     informalReviewDate: row.informal_review_date,
     informalAppraiserCategory: row.informal_appraiser_category,
     attendanceType: row.attendance_type,
+    filingConfirmationNumber: row.filing_confirmation_number,
+    filingChannel: row.filing_channel,
+    certifiedMailTracking: row.certified_mail_tracking,
+    evidenceSubmittedConfirmedAt: row.evidence_submitted_confirmed_at,
   };
 }
 
