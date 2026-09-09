@@ -16,7 +16,7 @@ import type { BatchModuleId, ModuleAnalysisInput } from "./ai-report-modules";
 // Bump when the report model or the prompt/schema shape changes in a way that
 // should invalidate every cached result. Folded into every hash, so bumping
 // it makes every stored row miss on the next visit and regenerate once.
-export const MODEL_TAG = "gemini-3.6-flash/thinking-2048/v1";
+export const MODEL_TAG = "gemini-3.1-pro-preview/thinking-2048/v1";
 
 // Stable, order-independent JSON — sort object keys recursively so
 // {a,b} and {b,a} hash the same. Arrays keep their order (order is meaningful
