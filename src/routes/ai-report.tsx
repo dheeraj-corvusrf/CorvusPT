@@ -395,8 +395,16 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, state.address, state.cad, state.accountNumber]);
 
+  // Gates the eager module loads below — health/strategy/evidence include the
+  // uploaded-evidence file names in their input (and therefore in the cache
+  // hash), so they must not fire until this list has settled, or a reload
+  // races it and a cached result misses just because the docs weren't in yet.
+  const [evidenceDocsLoaded, setEvidenceDocsLoaded] = useState(false);
   useEffect(() => {
-    if (!user || !resolvedProperty) return;
+    if (!user || !resolvedProperty) {
+      setEvidenceDocsLoaded(!resolvedProperty); // no property => nothing to wait for
+      return;
+    }
     listDocuments(user.id)
       .then((docs) =>
         setEvidenceDocs(
@@ -413,7 +421,8 @@ function Report() {
           ),
         ),
       )
-      .catch((err) => console.error("Could not load uploaded evidence for this property:", err));
+      .catch((err) => console.error("Could not load uploaded evidence for this property:", err))
+      .finally(() => setEvidenceDocsLoaded(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, resolvedProperty]);
 
@@ -1663,7 +1672,18 @@ function Report() {
   // the dedicated effect below.
 
   useEffect(() => {
-    if (!state.totalValue) return;
+    // evidenceDocsLoaded: health/strategy/evidence fold the evidence file
+    // names into their cache hash — wait for that list so a reload's hash
+    // matches the stored one instead of racing the fetch.
+    // compsMap settled (attempted && !loading): health/strategy also fold
+    // buildCompsSummary(compsMap.data) into the hash, so they must not fire
+    // while that fetch is still in flight — otherwise a reload where the
+    // fetch wins/loses the race by a different margin hashes differently and
+    // regenerates for nothing. loadCompsMap() is kicked off by the effect
+    // just below (also keyed on state.totalValue); this one is defined
+    // first, so on the first pass compsMap.attempted is false and we wait
+    // one render for it to settle.
+    if (!state.totalValue || !evidenceDocsLoaded || !compsMap.attempted || compsMap.loading) return;
     for (const m of MODULES) {
       if (
         m.id === "savings" ||
@@ -1682,7 +1702,7 @@ function Report() {
     // bug earlier. Property identity and access level are the only real
     // triggers for "should we start loading modules."
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.totalValue, hasFullAccess]);
+  }, [state.totalValue, hasFullAccess, evidenceDocsLoaded, compsMap.attempted, compsMap.loading]);
 
   // comps/site/improvement/zoning wait for Module 2 (Strategy) to resolve —
   // or a capped 6s timeout, so a slow/failed Strategy call never stalls the
@@ -1703,11 +1723,14 @@ function Report() {
         // above is fire-and-forget, so without this check "comps" could
         // fire in the very same tick as loadCompsMap() itself, well before
         // that fetch resolves (confirmed live: compsMap.data was still null
-        // at the exact moment this ran). compsMap.loading is in the
-        // dependency array below specifically so this effect re-runs once
-        // that fetch actually settles, giving "comps" a second real chance
-        // to fire with real data instead of silently going out ungrounded.
-        if (id === "comps" && compsMap.loading) continue;
+        // at the exact moment this ran). `!compsMap.attempted` (not just
+        // `.loading`, which is also false before the fetch starts) is the
+        // real "not settled yet" test: on a reload strategy is served
+        // instantly from cache, so without it this effect fires "comps"
+        // before loadCompsMap() has even flipped `.loading` true, and the
+        // AI call goes out with no comps to reason over. Both flags are in
+        // the dependency array below so this re-runs once the fetch settles.
+        if (id === "comps" && (!compsMap.attempted || compsMap.loading)) continue;
         // "site" needs real coordinates settled (either a CAD subject or the
         // geocode fallback — see siteCoordsSettled above) AND, only when
         // coordinates actually exist, siteGisMap itself settled too —
@@ -1748,6 +1771,7 @@ function Report() {
     hasFullAccess,
     moduleData.strategy?.data,
     moduleData.strategy?.error,
+    compsMap.attempted,
     compsMap.loading,
     compsMap.data,
     geocodedSubject.attempted,
