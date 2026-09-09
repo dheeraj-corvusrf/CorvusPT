@@ -11,6 +11,7 @@ import { verdictMeta, type DocumentRecord } from "@/lib/documents";
 import { reviewDocument, askDocument } from "@/lib/document-review";
 import { getErrorMessage } from "@/lib/error-message";
 import { LoadingLine } from "@/components/LoadingLine";
+import { MarkdownLite } from "@/components/MarkdownLite";
 
 // AI Review for one document — the verdict + notes from analyze-document, the
 // long-form explanation from review-document, and a Q&A box grounded in the
@@ -118,9 +119,7 @@ export function DocumentReviewModal({
               {loadingExplanation ? (
                 <LoadingLine text="Reading the document…" />
               ) : explanation ? (
-                <div className="grid gap-2 whitespace-pre-wrap text-foreground/90">
-                  {explanation}
-                </div>
+                <MarkdownLite text={explanation} className="text-foreground/90" />
               ) : (
                 <p className="text-muted-foreground">No explanation available.</p>
               )}
@@ -135,9 +134,7 @@ export function DocumentReviewModal({
                   {thread.map((t, i) => (
                     <div key={i} className="rounded-md bg-secondary/40 p-2">
                       <p className="text-xs font-medium">{t.q}</p>
-                      <p className="text-muted-foreground mt-1 whitespace-pre-wrap text-xs">
-                        {t.a}
-                      </p>
+                      <MarkdownLite text={t.a} className="text-muted-foreground mt-1 text-xs" />
                     </div>
                   ))}
                 </div>

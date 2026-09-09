@@ -38,7 +38,23 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { ChevronDown, Eye, Download, Trash2, Sparkles, Pencil, FileEdit } from "lucide-react";
+import {
+  ChevronDown,
+  Eye,
+  Download,
+  Trash2,
+  Sparkles,
+  Pencil,
+  FileEdit,
+  MoreHorizontal,
+} from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { DocumentReviewModal } from "@/components/DocumentReviewModal";
 import { DocumentEditorModal, isEditableDoc } from "@/components/DocumentEditorModal";
 
@@ -1091,44 +1107,43 @@ function DocRow({
             </div>
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-1">
-          <button onClick={onView} className={ROW_ICON_BTN} aria-label={`View ${doc.fileName}`}>
-            <Eye className="h-3.5 w-3.5" /> View
-          </button>
-          <button
-            onClick={onReview}
-            className={ROW_ICON_BTN}
-            aria-label={`AI review ${doc.fileName}`}
-          >
-            <Sparkles className="h-3.5 w-3.5" /> AI Review
-          </button>
-          {editable && (
-            <button onClick={onEdit} className={ROW_ICON_BTN} aria-label={`Edit ${doc.fileName}`}>
-              <FileEdit className="h-3.5 w-3.5" /> Edit
-            </button>
-          )}
-          <button
-            onClick={() => setRenaming(true)}
-            className={ROW_ICON_BTN}
-            aria-label={`Rename ${doc.fileName}`}
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={onDownload}
-            className={ROW_ICON_BTN}
-            aria-label={`Download ${doc.fileName}`}
-          >
-            <Download className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={onDelete}
-            disabled={deleting}
-            className="btn-outline text-destructive text-sm disabled:opacity-50"
-            aria-label={`Delete ${doc.fileName}`}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={ROW_ICON_BTN}
+              aria-label={`Actions for ${doc.fileName}`}
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" /> Actions
+              <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onClick={onView}>
+                <Eye className="mr-2 h-4 w-4" /> View
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onReview}>
+                <Sparkles className="mr-2 h-4 w-4" /> AI Review
+              </DropdownMenuItem>
+              {editable && (
+                <DropdownMenuItem onClick={onEdit}>
+                  <FileEdit className="mr-2 h-4 w-4" /> Edit
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onClick={() => setRenaming(true)}>
+                <Pencil className="mr-2 h-4 w-4" /> Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onDownload}>
+                <Download className="mr-2 h-4 w-4" /> Download
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={onDelete}
+                disabled={deleting}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="mr-2 h-4 w-4" /> Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </div>
