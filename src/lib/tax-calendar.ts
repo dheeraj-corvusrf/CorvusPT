@@ -2,6 +2,7 @@ import { listProperties, type PropertyRecord } from "./properties";
 import { listProtests, type ProtestRecord } from "./protests";
 import { listTaxBills, type TaxBillRecord } from "./tax-bills";
 import { listBppAccounts, type BppAccountRecord } from "./bpp-accounts";
+import { listReminders, type Reminder } from "./reminders";
 
 export type CalendarEventType =
   | "protest_deadline"
@@ -12,7 +13,8 @@ export type CalendarEventType =
   | "tax_penalty"
   | "refund_expected"
   | "bpp_rendition"
-  | "refile_reminder";
+  | "refile_reminder"
+  | "reminder";
 
 export type CalendarEvent = {
   id: string;
@@ -41,6 +43,7 @@ export const EVENT_TYPE_LABEL: Record<CalendarEventType, string> = {
   refund_expected: "Refund Expected",
   bpp_rendition: "BPP Rendition Deadline",
   refile_reminder: "Re-File Reminder",
+  reminder: "Reminder",
 };
 
 // Tailwind color tokens keyed by event type, used for the month-grid dots.
@@ -54,6 +57,7 @@ export const EVENT_TYPE_COLOR: Record<CalendarEventType, string> = {
   refund_expected: "bg-success",
   bpp_rendition: "bg-violet-500",
   refile_reminder: "bg-rose-400",
+  reminder: "bg-fuchsia-500",
 };
 
 // Texas's BPP rendition deadline is a fixed statutory date (April 15) rather than
@@ -276,12 +280,29 @@ function fromBppAccount(account: BppAccountRecord, now: Date): CalendarEvent {
   };
 }
 
+function fromReminder(r: Reminder, properties: PropertyRecord[]): CalendarEvent {
+  const property = r.propertyId ? properties.find((p) => p.id === r.propertyId) : undefined;
+  const propertyLabel = property?.address ?? "Personal reminder";
+  return {
+    id: `reminder-${r.id}`,
+    date: r.remindOn.slice(0, 10),
+    type: "reminder",
+    title: `Reminder — ${r.note}`,
+    amount: null,
+    propertyId: r.propertyId,
+    linkTo: property ? `/dashboard/case?propertyId=${property.id}` : "/dashboard/calendar",
+    resolved: r.done || r.remindOn.slice(0, 10) < new Date().toISOString().slice(0, 10),
+    propertyLabel,
+  };
+}
+
 export async function getCalendarEvents(userId: string): Promise<CalendarEvent[]> {
-  const [properties, protests, taxBills, bppAccounts] = await Promise.all([
+  const [properties, protests, taxBills, bppAccounts, reminders] = await Promise.all([
     listProperties(userId),
     listProtests(userId),
     listTaxBills(userId),
     listBppAccounts(userId),
+    listReminders(userId),
   ]);
 
   const taxBillPropertyIds = new Set(taxBills.map((b) => b.propertyId));
@@ -300,6 +321,7 @@ export async function getCalendarEvents(userId: string): Promise<CalendarEvent[]
     ...protests.flatMap((pr) => fromProtest(pr, properties, propertiesWithCurrentProtest)),
     ...taxBills.flatMap((b) => fromTaxBill(b, properties)),
     ...bppAccounts.map((a) => fromBppAccount(a, now)),
+    ...reminders.map((r) => fromReminder(r, properties)),
   ];
 
   return events.sort((a, b) => a.date.localeCompare(b.date));

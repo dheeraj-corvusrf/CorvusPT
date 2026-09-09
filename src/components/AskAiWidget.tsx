@@ -6,6 +6,8 @@ import { askAboutDocument } from "@/lib/document-ai";
 import { buildUserContext } from "@/lib/ai-context";
 import { useAuth } from "@/lib/auth";
 import { useSpeechInput } from "@/hooks/use-speech-input";
+import { listProperties } from "@/lib/properties";
+import { looksLikeReminderRequest, parseReminderRequest, addReminder } from "@/lib/reminders";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 type ChatMessage = {
@@ -54,6 +56,54 @@ export function AskAiWidget() {
     setMessages((prev) => [...prev, { role: "user", text: q }]);
     setAsking(true);
     try {
+      // "remind me to …" / "save this date" → create a real reminder that
+      // shows on the Calendar, instead of just answering. Only spends the
+      // parse call when the message actually looks like one.
+      if (user && looksLikeReminderRequest(q)) {
+        try {
+          const props = await listProperties(user.id).catch(() => []);
+          const parsed = await parseReminderRequest(
+            q,
+            props.map((p) => ({ id: p.id, address: p.address })),
+          );
+          if (parsed.isReminder && parsed.remindOn) {
+            await addReminder(user.id, {
+              remindOn: parsed.remindOn,
+              note: parsed.note || q,
+              propertyId: parsed.propertyId,
+              source: "assistant",
+            });
+            const when = new Date(`${parsed.remindOn}T00:00:00`).toLocaleDateString("en-US", {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+              year: "numeric",
+            });
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                text: `Saved a reminder for ${when}: ${parsed.note || q}. It's on your Calendar.`,
+                destination: "/dashboard/calendar",
+              },
+            ]);
+            return;
+          }
+          if (parsed.isReminder && !parsed.remindOn) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                text: "I can save that reminder — what date should it be for?",
+              },
+            ]);
+            return;
+          }
+        } catch {
+          // Parsing/saving failed — fall through to a normal answer.
+        }
+      }
+
       const accountContext = user ? await buildUserContext(user.id).catch(() => "") : "";
       const transcript = messages
         .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)

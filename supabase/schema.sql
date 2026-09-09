@@ -1937,6 +1937,30 @@ create policy "Admins can view all module results"
   on public.module_results for select
   using (public.is_admin());
 
+-- Personal reminders the user (or the Ask AI assistant on their behalf, via
+-- the extract-reminder edge function) adds — "call the ARB on May 3",
+-- "evidence due next Friday". Folded into the Calendar page's event list
+-- (see getCalendarEvents in src/lib/tax-calendar.ts) alongside the real,
+-- derived protest/tax deadlines. `source` distinguishes a hand-typed
+-- reminder from one the assistant parsed. Owner-only, full CRUD.
+create table if not exists public.user_reminders (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid references public.properties (id) on delete set null,
+  remind_on date not null,
+  note text not null,
+  done boolean not null default false,
+  source text not null default 'manual',
+  created_at timestamptz not null default now()
+);
+create index if not exists user_reminders_user_idx on public.user_reminders (user_id, remind_on);
+alter table public.user_reminders enable row level security;
+drop policy if exists "Users manage their own reminders" on public.user_reminders;
+create policy "Users manage their own reminders"
+  on public.user_reminders for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
 -- by itself, substituting your real email, to make that account an admin:
