@@ -9,6 +9,10 @@ import type {
   AttendanceType,
 } from "./protests";
 import { getEffectiveTaxRate } from "./texas-tax-rates";
+import { logCaseEvent } from "./case-audit";
+
+const currencyText = (n: number) =>
+  n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
 // AI case prep for a real protest — persists the same strategy recommendation and
 // evidence checklist the paywalled AI Report page already generates on demand
@@ -238,6 +242,11 @@ export async function markFiled(protestId: string): Promise<void> {
     .eq("id", protestId)
     .eq("status", "requested");
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    "Notice of Protest marked as filed with the county.",
+  );
 }
 
 export async function recordSettlementOffer(
@@ -253,6 +262,12 @@ export async function recordSettlementOffer(
     })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "value_recorded",
+    `Informal proposed value received: ${currencyText(offer.value)}.`,
+    { proposedValue: offer.value, receivedAt: offer.receivedAt },
+  );
 }
 
 export async function acceptSettlement(protestId: string, offerValue: number): Promise<void> {
@@ -266,6 +281,12 @@ export async function acceptSettlement(protestId: string, offerValue: number): P
     })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    `Informal offer accepted at ${currencyText(offerValue)} — case resolved.`,
+    { finalValue: offerValue },
+  );
 }
 
 export async function scheduleHearing(
@@ -295,6 +316,10 @@ export async function scheduleHearing(
     })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(protestId, "deadline_set", `Formal ARB hearing scheduled for ${date}.`, {
+    hearingDate: date,
+    ...(detail ?? {}),
+  });
 }
 
 // Real, user-driven update to the informal-review sub-tracker (see the
@@ -310,6 +335,9 @@ export async function updateInformalStatus(
     .update({ informal_status: status })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(protestId, "status_change", `Informal review status set to "${status}".`, {
+    informalStatus: status,
+  });
 }
 
 // The real, self-reported date once the county and owner have actually
@@ -323,6 +351,9 @@ export async function scheduleInformalReview(protestId: string, date: string): P
     .update({ informal_status: "scheduled", informal_review_date: date })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(protestId, "deadline_set", `Informal review scheduled for ${date}.`, {
+    informalReviewDate: date,
+  });
 }
 
 // AI's own read of which appraiser specialty this property would route to
@@ -403,6 +434,13 @@ export async function recordArbDecision(
     })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    `ARB decision recorded: ${decision.type} — final value ${currencyText(decision.finalValue)}` +
+      (resolved ? " (case resolved)." : "."),
+    { arbDecision: decision.type, arbDecisionDate: decision.date, finalValue: decision.finalValue },
+  );
 }
 
 export async function recordEscalation(
@@ -414,6 +452,61 @@ export async function recordEscalation(
     .update({ escalation_path: path, status: path === "appeal" ? "appealing" : "arbitrating" })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    path === "appeal"
+      ? "Escalation recorded: district court appeal."
+      : "Escalation recorded: binding arbitration.",
+    { escalationPath: path },
+  );
+}
+
+// Structured case-record fields with no other home (see src/lib/case-record.ts):
+// the filing confirmation number, how it was filed, a certified-mail tracking
+// number, and the "yes, I submitted my evidence to the ARB" confirmation. All
+// self-reported — same precedent as every other column on this table.
+export type CaseRecordPatch = {
+  filingConfirmationNumber?: string | null;
+  filingChannel?: "online" | "mail" | "in_person" | "email" | null;
+  certifiedMailTracking?: string | null;
+  evidenceSubmittedConfirmedAt?: string | null;
+};
+
+export async function saveCaseRecordFields(
+  protestId: string,
+  patch: CaseRecordPatch,
+): Promise<void> {
+  const row: Record<string, unknown> = {};
+  if ("filingConfirmationNumber" in patch)
+    row.filing_confirmation_number = patch.filingConfirmationNumber || null;
+  if ("filingChannel" in patch) row.filing_channel = patch.filingChannel || null;
+  if ("certifiedMailTracking" in patch)
+    row.certified_mail_tracking = patch.certifiedMailTracking || null;
+  if ("evidenceSubmittedConfirmedAt" in patch)
+    row.evidence_submitted_confirmed_at = patch.evidenceSubmittedConfirmedAt || null;
+  if (Object.keys(row).length === 0) return;
+  const { error } = await supabase.from("protests").update(row).eq("id", protestId);
+  if (error) throw error;
+  if (patch.filingConfirmationNumber)
+    void logCaseEvent(
+      protestId,
+      "submission_confirmed",
+      `Filing confirmation number recorded: ${patch.filingConfirmationNumber}` +
+        (patch.filingChannel ? ` (filed ${patch.filingChannel.replace("_", " ")}).` : "."),
+    );
+  if (patch.certifiedMailTracking)
+    void logCaseEvent(
+      protestId,
+      "submission_confirmed",
+      `Certified-mail tracking recorded: ${patch.certifiedMailTracking}.`,
+    );
+  if (patch.evidenceSubmittedConfirmedAt)
+    void logCaseEvent(
+      protestId,
+      "submission_confirmed",
+      "Evidence submission to the ARB confirmed.",
+    );
 }
 
 // Closes out an appeal or arbitration once *that* resolves — doesn't model the
@@ -425,6 +518,12 @@ export async function closeCase(protestId: string, finalValue: number): Promise<
     .update({ final_value: finalValue, closed_at: new Date().toISOString(), status: "resolved" })
     .eq("id", protestId);
   if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    `Case closed — final value ${currencyText(finalValue)}.`,
+    { finalValue },
+  );
 }
 
 export type CaseResults = { valueReduction: number; actualSavings: number };

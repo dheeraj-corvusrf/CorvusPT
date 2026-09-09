@@ -1411,6 +1411,56 @@ alter table public.protests drop constraint if exists protests_attendance_type_c
 alter table public.protests add constraint protests_attendance_type_check
   check (attendance_type is null or attendance_type in ('Property Owner', 'Authorized Agent', 'Both'));
 
+-- Structured "case record" fields (see src/lib/case-record.ts) — the few
+-- proof-of-record items that have no other home. Everything else in the case
+-- record is a real uploaded document (documents.document_type) or an existing
+-- protests column (settlement_offer_value, arb_decision, final_value, …).
+-- Same self-reported precedent as the rest of this table; there's no live
+-- county API, so the owner enters what actually happened.
+alter table public.protests add column if not exists filing_confirmation_number text;
+alter table public.protests add column if not exists filing_channel text;
+alter table public.protests drop constraint if exists protests_filing_channel_check;
+alter table public.protests add constraint protests_filing_channel_check
+  check (filing_channel is null or filing_channel in ('online', 'mail', 'in_person', 'email'));
+alter table public.protests add column if not exists certified_mail_tracking text;
+alter table public.protests add column if not exists evidence_submitted_confirmed_at timestamptz;
+
+-- Append-only, user-facing audit trail for a single case (see
+-- src/lib/case-audit.ts) — one row per meaningful event: a status change, a
+-- document added, a form submitted/signed, a submission confirmed, a
+-- deadline set, a county communication logged, a value recorded. Distinct
+-- from admin_audit_log (staff actions across all users); this is the owner's
+-- own record of their case. Written fire-and-forget from the case mutation
+-- helpers, so a failed insert here never breaks the real update. No update
+-- or delete policy — entries are immutable; the on-delete cascade handles a
+-- removed protest.
+create table if not exists public.case_audit_events (
+  id uuid primary key default gen_random_uuid(),
+  protest_id uuid not null references public.protests (id) on delete cascade,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  kind text not null,
+  summary text not null,
+  detail jsonb,
+  occurred_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+alter table public.case_audit_events drop constraint if exists case_audit_events_kind_check;
+alter table public.case_audit_events add constraint case_audit_events_kind_check
+  check (kind in ('status_change', 'document_added', 'form_submitted', 'signature_captured',
+    'submission_confirmed', 'deadline_set', 'county_communication', 'value_recorded', 'note'));
+create index if not exists case_audit_events_protest_idx
+  on public.case_audit_events (protest_id, occurred_at);
+alter table public.case_audit_events enable row level security;
+drop policy if exists "Users manage their own case audit events" on public.case_audit_events;
+create policy "Users manage their own case audit events"
+  on public.case_audit_events for select using (auth.uid() = user_id);
+drop policy if exists "Users insert their own case audit events" on public.case_audit_events;
+create policy "Users insert their own case audit events"
+  on public.case_audit_events for insert with check (auth.uid() = user_id);
+drop policy if exists "Admins view all case audit events" on public.case_audit_events;
+create policy "Admins view all case audit events"
+  on public.case_audit_events for select using (public.is_admin());
+
 -- Real, AI-extracted content from an actual ARB Order / hearing decision /
 -- settlement / revised value notice / other final determination the user
 -- (or staff) uploads after a hearing — see extract-decision-document/
