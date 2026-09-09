@@ -866,7 +866,10 @@ export function CasePlanSection({
   // before the tab opens, so the new same-origin tab inherits it.
   function goToModule8() {
     updateIntake(buildAiReportIntakePatch(property));
-    window.open("/ai-report?openModule=evidence", "_blank");
+    // import.meta.env.BASE_URL is "/" in dev and "/corvuspt/" on the GitHub
+    // Pages build — a raw "/ai-report" absolute path skips that prefix and
+    // 404s in production. Always build the URL from BASE_URL.
+    window.open(`${import.meta.env.BASE_URL}ai-report?openModule=evidence`, "_blank");
   }
 
   const hasAnyPlan = !!caseData?.strategyRecommendation;
@@ -1263,7 +1266,10 @@ export function DocumentsSection({
   // stays open behind it.
   function goToModule8() {
     updateIntake(buildAiReportIntakePatch(property));
-    window.open("/ai-report?openModule=evidence", "_blank");
+    // import.meta.env.BASE_URL is "/" in dev and "/corvuspt/" on the GitHub
+    // Pages build — a raw "/ai-report" absolute path skips that prefix and
+    // 404s in production. Always build the URL from BASE_URL.
+    window.open(`${import.meta.env.BASE_URL}ai-report?openModule=evidence`, "_blank");
   }
 
   // Form 50-162 authorizes an agent for possibly several properties at once —
