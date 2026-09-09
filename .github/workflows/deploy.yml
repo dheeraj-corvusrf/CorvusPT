@@ -104,6 +104,32 @@ jobs:
           # restriction fix on Google's side.
           VITE_GOOGLE_MAPS_API_KEY: AIzaSyCxz6Q6Wit9Sq_qR6cciWs1K8zPjdM0sAI
 
+      # --- CorvusDP (Design & Permit) — the /corvusdp/ door under the same hub.
+      # Its source is a separate repo (dheeraj-corvusrf/CorvusDP) with its own
+      # Supabase project; we build it here and drop it into site/corvusdp/,
+      # replacing the hub's static "coming soon" placeholder. Skipped for the
+      # legacy "/CorvusRF/" target, which predates the hub.
+      - name: Check out CorvusDP
+        if: ${{ github.event.inputs.site_base != '/CorvusRF/' }}
+        uses: actions/checkout@v4
+        with:
+          repository: dheeraj-corvusrf/CorvusDP
+          ref: dev
+          path: corvusdp-src
+
+      - name: Build CorvusDP
+        if: ${{ github.event.inputs.site_base != '/CorvusRF/' }}
+        working-directory: corvusdp-src
+        run: |
+          npm ci
+          npm run build
+        env:
+          SITE_BASE: /corvusdp/
+          # Public anon/publishable key — access control is the RLS policies in
+          # CorvusDP's OWN supabase/schema.sql (a separate project from CorvusPT).
+          VITE_SUPABASE_URL: https://xzhilwwlfajxhklkiteb.supabase.co
+          VITE_SUPABASE_ANON_KEY: sb_publishable_zR_OjbkQ3Nto25iGKdX9mg_jRbUDWVF
+
       # The CorvusRE hub (hub/) is a handful of plain static pages with no app
       # logic — see hub/hub.css's own comment for why that's a deliberate
       # simplification rather than a second framework build. It lives at the
@@ -121,6 +147,10 @@ jobs:
           subdir="${subdir%/}"
           mkdir -p "site/$subdir"
           cp -r dist/client/. "site/$subdir/"
+          # CorvusDP app -> site/corvusdp/, replacing the hub's placeholder page.
+          rm -rf site/corvusdp
+          mkdir -p site/corvusdp
+          cp -r corvusdp-src/dist/client/. site/corvusdp/
 
       - uses: actions/upload-pages-artifact@v3
         if: ${{ github.event.inputs.site_base != '/CorvusRF/' }}
