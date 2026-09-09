@@ -508,6 +508,30 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyEvidenceCount]);
 
+  // Same, for Module 5 (Improvement Condition) — a photo uploaded from the
+  // card's per-component control (tagged EVIDENCE_DOCUMENT_TYPE) re-runs the
+  // condition assessment + its dependents.
+  const improvementEvidenceCount = evidenceDocs.filter(
+    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE,
+  ).length;
+  const improvementEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (improvementEvidenceSeenRef.current === null) {
+      improvementEvidenceSeenRef.current = improvementEvidenceCount;
+      return;
+    }
+    if (improvementEvidenceCount <= improvementEvidenceSeenRef.current) {
+      improvementEvidenceSeenRef.current = improvementEvidenceCount;
+      return;
+    }
+    improvementEvidenceSeenRef.current = improvementEvidenceCount;
+    if (moduleData.improvement?.data || moduleData.improvement?.error) {
+      loadModule("improvement", { force: true });
+      reloadDependentModules("improvement");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [improvementEvidenceCount]);
+
   // Save owner-confirmed income figures. Optimistic; the effect above then
   // re-runs Module 7 with the fresh numbers. The form always sends the
   // complete field set (values or explicit null), so this is a passthrough.
@@ -2685,34 +2709,15 @@ function ModuleVisual({
         d.externalObsolescencePct,
         improvementValue ?? null,
       );
-      const withPhoto = d.buildingComponents.filter((c) => c.hasPhoto);
-      const needsAttention = withPhoto.filter((c) => c.condition !== "Good");
       return (
-        <div className="grid gap-2">
-          <BuildingIllustration className="mx-auto h-28 w-auto" />
-          {depreciation.conditionAdjustedValue != null ? (
-            <div className="grid grid-cols-2 gap-1.5">
-              <ExecutiveStat
-                label="Total Depreciation"
-                value={`${depreciation.totalDepreciationPct}%`}
-              />
-              <ExecutiveStat label="Value Impact" value={`${depreciation.impactPct}%`} />
-            </div>
-          ) : (
-            <p className="text-center text-[10px] text-muted-foreground">
-              Additional data needed — upload photos to assess condition.
-            </p>
-          )}
-          {needsAttention.length > 0 && (
-            <p className="text-center text-[10px] text-muted-foreground">
-              {needsAttention.length} of {withPhoto.length} components need attention
-            </p>
-          )}
-          <div className="flex flex-col items-center">
-            <SpeedometerGauge value={d.priorityScore} size="sm" />
-            <div className="-mt-1 text-xs text-muted-foreground">condition priority</div>
-          </div>
-        </div>
+        <ImprovementCardVisual
+          d={d}
+          depreciation={depreciation}
+          overrides={overrides}
+          uploading={uploadingEvidence}
+          onUpload={hasFullAccess ? (files) => onUploadEvidence(files) : undefined}
+          onOpen={onOpen}
+        />
       );
     }
     case "zoning": {
@@ -4290,6 +4295,123 @@ function BuildingComponentRow({
             </button>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// Compact, interactive Module 5 (Improvement Condition) card visual — the 4
+// building components with their real photo-grounded status, an inline
+// per-component photo upload (uploads a general improvement photo, tagged
+// EVIDENCE_DOCUMENT_TYPE; the AI matches it to a component), the condition-
+// priority gauge, and the depreciation / value-impact numbers once they can
+// actually be computed. Nothing here is a guessed condition.
+function ImprovementCardVisual({
+  d,
+  depreciation,
+  overrides,
+  uploading,
+  onUpload,
+  onOpen,
+}: {
+  d: ModuleResultMap["improvement"];
+  depreciation: ReturnType<typeof computeDepreciation>;
+  overrides: ModuleOverride[];
+  uploading?: boolean;
+  onUpload?: (files: File[]) => void;
+  onOpen: () => void;
+}) {
+  const withPhoto = d.buildingComponents.filter((c) => c.hasPhoto);
+  const needsAttention = withPhoto.filter((c) => c.condition !== "Good");
+  const missing = d.buildingComponents.filter(
+    (c) => !c.hasPhoto && !isItemNotApplicable(overrides, "improvement", c.component),
+  ).length;
+  return (
+    <div className="grid gap-2">
+      <BuildingIllustration className="mx-auto h-16 w-auto" />
+      <div className="grid gap-1">
+        {d.buildingComponents.map((c) => {
+          const na = !c.hasPhoto && isItemNotApplicable(overrides, "improvement", c.component);
+          const label = c.hasPhoto ? c.condition : na ? "Not Applicable" : "No photo";
+          return (
+            <div
+              key={c.component}
+              className="flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1"
+            >
+              <span className="text-xs font-medium">{c.component}</span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                    na
+                      ? "bg-secondary/60 text-muted-foreground"
+                      : BUILDING_CONDITION_TONE[c.condition]
+                  }`}
+                >
+                  {label}
+                </span>
+                {!c.hasPhoto && !na && onUpload && (
+                  <label
+                    title={`Upload a photo of the ${c.component.toLowerCase()}`}
+                    className={`inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-1.5 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
+                      uploading ? "pointer-events-none opacity-60" : ""
+                    }`}
+                  >
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        e.target.value = "";
+                        if (sel.length > 0) onUpload(sel);
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "…" : "Photo"}
+                  </label>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {depreciation.conditionAdjustedValue != null ? (
+        <div className="grid grid-cols-2 gap-1.5">
+          <ExecutiveStat
+            label="Total Depreciation"
+            value={`${depreciation.totalDepreciationPct}%`}
+          />
+          <ExecutiveStat label="Value Impact" value={`${depreciation.impactPct}%`} />
+        </div>
+      ) : (
+        <p className="text-center text-[10px] text-muted-foreground">
+          {missing > 0
+            ? `Upload photos of ${missing} component${missing === 1 ? "" : "s"} to assess condition & depreciation.`
+            : "Additional data needed to compute depreciation."}
+        </p>
+      )}
+      {needsAttention.length > 0 && (
+        <p className="text-center text-[10px] text-muted-foreground">
+          {needsAttention.length} of {withPhoto.length} photographed components need attention
+        </p>
+      )}
+
+      <div className="flex flex-col items-center">
+        <SpeedometerGauge value={d.priorityScore} size="sm" />
+        <div className="-mt-1 text-xs text-muted-foreground">condition priority</div>
+      </div>
+
+      {d.keyFinding && (
+        <button
+          type="button"
+          onClick={onOpen}
+          className="text-left text-[11px] leading-snug text-muted-foreground hover:text-foreground"
+        >
+          {d.keyFinding}
+        </button>
       )}
     </div>
   );
