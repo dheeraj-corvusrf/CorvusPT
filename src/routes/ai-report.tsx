@@ -1681,14 +1681,16 @@ function Report() {
   // already skips "savings".
   // comps/site/improvement/zoning investigate the exact 5 strategies Module 2
   // ranks, so they're sequenced to fire after it (see the effect below) rather
-  // than in this immediate batch, which is why they're excluded here.
-  // First-visit AI-call budget: only these generate automatically (health +
-  // strategy fire in the immediate batch below; comps right after strategy).
-  // Every other module generates on first card/modal open and is then cached
-  // (public.module_results) — a return visit shows all 10 with zero AI calls.
-  const SEQUENCED_AFTER_STRATEGY = new Set(["comps"]);
-  // Generated lazily on first open, never in an eager batch.
-  const LAZY_MODULES = new Set(["site", "improvement", "zoning", "executive"]);
+  // than in this immediate batch — that lets each carry Module 2's per-
+  // strategy score as priorityContext. First visit: the immediate batch fires
+  // health + strategy + evidence; this wave adds comps/site/improvement/zoning
+  // once strategy settles; executive follows once evidence settles too. Every
+  // result is cached (public.module_results), so a return visit shows all 10
+  // with zero AI calls. (An earlier pass deferred site/improvement/zoning/
+  // executive to first card-open, but an un-opened card then sat on a
+  // permanent "Analyzing" spinner — misleading — so they generate up front
+  // again; the cost is one first-visit generation per property, not per view.)
+  const SEQUENCED_AFTER_STRATEGY = new Set(["comps", "site", "improvement", "zoning"]);
   // How long the sequenced/executive effects wait for Strategy (or evidence)
   // to settle before firing anyway. It has to comfortably exceed one real
   // module call on the reasoning model (~25-30s observed for gemini-3.1-pro-
@@ -1729,11 +1731,14 @@ function Report() {
     )
       return;
     for (const m of MODULES) {
+      // savings is deterministic (no AI); income waits for user figures;
+      // executive waits for strategy + evidence (its own effect below);
+      // the SEQUENCED set waits for strategy (the effect below this one).
       if (
         m.id === "savings" ||
         m.id === "income" ||
-        SEQUENCED_AFTER_STRATEGY.has(m.id) ||
-        LAZY_MODULES.has(m.id)
+        m.id === "executive" ||
+        SEQUENCED_AFTER_STRATEGY.has(m.id)
       )
         continue;
       if (m.n <= FREE_MODULE_COUNT || hasFullAccess) loadModule(m.id);
@@ -1767,6 +1772,11 @@ function Report() {
     if (siteCoords) loadSiteGis(siteCoords.lat, siteCoords.lng);
     const strategyState = moduleData.strategy;
     const fire = () => {
+      // site/improvement fold the overrides-derived notApplicable* lists into
+      // their cache hash — don't fire this wave until overrides (and the
+      // rest of the aux data) have come back, or a reload hashes them empty
+      // and regenerates. See the immediate-batch effect above.
+      if (!auxDataLoaded) return;
       for (const id of SEQUENCED_AFTER_STRATEGY) {
         // "comps" specifically also wants compsMap.data already populated
         // (see loadModule()'s own comps branch, which sends real topComps
@@ -1820,6 +1830,7 @@ function Report() {
   }, [
     state.totalValue,
     hasFullAccess,
+    auxDataLoaded,
     moduleData.strategy?.data,
     moduleData.strategy?.error,
     compsMap.attempted,
@@ -1837,14 +1848,10 @@ function Report() {
   // real output, so it waits for both to settle (data or error) before firing
   // its own call, same STRATEGY_SETTLE_FALLBACK_MS-capped pattern as the
   // comps/strategy effect above (a slow/failed dependency shouldn't stall
-  // Module 10 indefinitely).
-  //
-  // Only fires once the user has actually opened Module 10 at least once
-  // (executiveOpenedRef) — a first-visit AI call the user may never look at
-  // is deferred until they do, and a return visit serves it from cache.
-  const executiveOpenedRef = useRef(false);
+  // Module 10 indefinitely). Generated on first visit like the rest and then
+  // cached; opening its card just serves the stored result.
   useEffect(() => {
-    if (!state.totalValue || !hasFullAccess || !executiveOpenedRef.current) return;
+    if (!state.totalValue || !hasFullAccess) return;
     const strategyState = moduleData.strategy;
     const evidenceState = moduleData.evidence;
     const strategyDone = !!(strategyState?.data || strategyState?.error);
@@ -1869,11 +1876,9 @@ function Report() {
     if (hasFullAccess || m.n <= FREE_MODULE_COUNT) {
       setOpenId(m.id);
       if (m.id === "executive") {
-        // Deferred first-visit call — generate now if its inputs (strategy +
-        // evidence) are ready, otherwise arm the effect that fires when they
-        // settle. Never call the generic loadModule below with partial
-        // context that would then be cached.
-        executiveOpenedRef.current = true;
+        // executive generates from its own effect once strategy + evidence
+        // settle (never with partial context that would then be cached). If
+        // both are already done and it somehow hasn't run, kick it here.
         const sDone = !!(moduleData.strategy?.data || moduleData.strategy?.error);
         const eDone = !!(moduleData.evidence?.data || moduleData.evidence?.error);
         if (sDone && eDone) loadModule("executive");
