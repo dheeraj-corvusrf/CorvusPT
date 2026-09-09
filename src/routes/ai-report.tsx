@@ -609,6 +609,31 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoningEvidenceCount]);
 
+  // Catch-all for the universal card "Upload data" control: modules 1/3/4/8/10
+  // fold the evidence-doc list into their input but have no per-type digest
+  // of their own (unlike 2/5/6 above), so any change to the total evidence
+  // count re-runs the ones that have already generated. loadModule() dedupes,
+  // so a strategy/improvement/zoning upload that also bumps this total just
+  // regenerates those extra modules once — the intended "I added data, refresh
+  // what it touched" behaviour.
+  const totalEvidenceCount = evidenceDocs.length;
+  const totalEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (totalEvidenceSeenRef.current === null) {
+      totalEvidenceSeenRef.current = totalEvidenceCount;
+      return;
+    }
+    if (totalEvidenceCount <= totalEvidenceSeenRef.current) {
+      totalEvidenceSeenRef.current = totalEvidenceCount;
+      return;
+    }
+    totalEvidenceSeenRef.current = totalEvidenceCount;
+    for (const id of ["health", "comps", "site", "evidence", "executive"]) {
+      if (moduleData[id]?.data || moduleData[id]?.error) loadModule(id, { force: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalEvidenceCount]);
+
   // Save owner-confirmed income figures. Optimistic; the effect above then
   // re-runs Module 7 with the fresh numbers. The form always sends the
   // complete field set (values or explicit null), so this is a passthrough.
@@ -2363,6 +2388,54 @@ function Report() {
   );
 }
 
+// A card is "data-starved" when its own result openly flags missing inputs.
+// Returns the short prompt to show + the document_type an upload should be
+// tagged with, so the matching module's loadModule() input (and the
+// totalEvidenceCount digest in Report()) picks the file up and re-runs it.
+// null when there's no gap, or for a module that already carries a finer-
+// grained inline upload control (strategy's per-strategy chips, improvement's
+// per-component Photo buttons, zoning's per-aspect chips), or where a file
+// upload can't help (income has its figures form; savings is deterministic).
+function cardDataGap(
+  moduleId: string,
+  data: unknown,
+  compsMap: { data: CompsResult | null },
+): { label: string; docType: string } | null {
+  if (!data) return null;
+  const GENERIC = PROTEST_EVIDENCE_DOCUMENT_TYPE;
+  switch (moduleId) {
+    case "health":
+      return (data as HealthScoreResult).dataSufficient === false
+        ? { label: "Add property records or photos to firm up this score", docType: GENERIC }
+        : null;
+    case "comps":
+      return (compsMap.data?.comps?.length ?? 0) < 5
+        ? { label: "Upload a recent sale or appraisal to widen the comp set", docType: GENERIC }
+        : null;
+    case "site":
+      return (data as ModuleResultMap["site"]).factors.some(
+        (f) => f.status === "Additional Data Needed",
+      )
+        ? {
+            label: "Upload a survey, plat, or photos for the flagged site factors",
+            docType: GENERIC,
+          }
+        : null;
+    case "evidence":
+      return (data as ModuleResultMap["evidence"]).items.some((i) => i.availability === "Low")
+        ? { label: "Upload the documents this checklist is still missing", docType: GENERIC }
+        : null;
+    case "executive":
+      return (data as ModuleResultMap["executive"]).missingInformation.some(
+        (x) => x.severity === "Critical" || x.severity === "Important",
+      )
+        ? { label: "Upload the information this recommendation is still missing", docType: GENERIC }
+        : null;
+    default:
+      return null;
+  }
+}
+
 function ModuleCard({
   m,
   unlocked,
@@ -2458,6 +2531,14 @@ function ModuleCard({
   const priorityScore = strategyData?.strategies.find((s) =>
     s.relatedModules.includes(m.id),
   )?.strengthScore;
+  // Universal "this analysis is data-starved — add data right here" control.
+  // Only for a subscribed user on a module that's actually run and flags a
+  // gap; the upload is tagged so the matching module re-runs (see the digest
+  // effects in Report()).
+  const dataGap =
+    unlocked && hasFullAccess && status === "Completed"
+      ? cardDataGap(m.id, moduleState?.data, compsMap)
+      : null;
   return (
     <div className="card-elev overflow-hidden flex flex-col">
       <div className="p-5 flex-1 flex flex-col">
@@ -2542,6 +2623,27 @@ function ModuleCard({
         </div>
       </div>
       {insight && <InsightBanner text={insight} color={m.color} onClick={onOpen} />}
+      {dataGap && (
+        <div className="mx-5 mt-3 flex items-center justify-between gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
+          <span className="text-[11px] leading-snug text-warning-foreground">{dataGap.label}</span>
+          <label className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-accent/40 bg-background px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              multiple
+              disabled={uploadingEvidence}
+              className="hidden"
+              onChange={(e) => {
+                const sel = Array.from(e.target.files ?? []);
+                if (sel.length > 0) onUploadEvidence(sel, undefined, dataGap.docType);
+                e.target.value = "";
+              }}
+            />
+            <Upload className="h-3 w-3" />
+            {uploadingEvidence ? "Uploading…" : "Upload data"}
+          </label>
+        </div>
+      )}
       {status === "Completed" && moduleState?.cachedAt && (
         <div className="px-5 pt-2 text-[10px] text-muted-foreground">
           Updated {relativeTime(moduleState.cachedAt)}
