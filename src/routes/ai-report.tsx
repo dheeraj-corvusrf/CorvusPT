@@ -521,6 +521,8 @@ function Report() {
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType?.startsWith("Strategy Evidence: ") ||
                 d.documentType?.startsWith("Zoning: ") ||
+                d.documentType?.startsWith("Improvement: ") ||
+                d.documentType?.startsWith("Site: ") ||
                 d.documentType?.startsWith("Income: ")),
           ),
         );
@@ -655,10 +657,11 @@ function Report() {
   }, [strategyEvidenceCount]);
 
   // Same, for Module 5 (Improvement Condition) — a photo uploaded from the
-  // card's per-component control (tagged EVIDENCE_DOCUMENT_TYPE) re-runs the
+  // card's per-component control (EVIDENCE_DOCUMENT_TYPE) or the modal's
+  // single upload (AI-tagged "Improvement: <component>") re-runs the
   // condition assessment + its dependents.
   const improvementEvidenceCount = evidenceDocs.filter(
-    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE,
+    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
   ).length;
   const improvementEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -1117,6 +1120,11 @@ function Report() {
     if (id === "site") {
       const na = itemsNotApplicable(overrides, "site");
       if (na.length > 0) input.notApplicableFactors = na;
+      // Site-tagged uploads re-run this module via the totalEvidenceCount
+      // digest; they're not folded into the input/cache hash (that raced the
+      // evidence-docs fetch on reload, and the site edge function has no
+      // per-factor document handling anyway — its gating is siteGis +
+      // notApplicableFactors).
     }
     if (id === "improvement") {
       const na = itemsNotApplicable(overrides, "improvement");
@@ -1389,7 +1397,10 @@ function Report() {
       // guidance in what's actually shown rather than only general advice — see
       // handleUploadEvidence() above and ai-report-modules/index.ts's evidence
       // handling. Capped to the 4 most recent, mirroring the server-side cap.
-      const improvementDocs = evidenceDocs.filter((d) => d.documentType === EVIDENCE_DOCUMENT_TYPE);
+      const improvementDocs = evidenceDocs.filter(
+        (d) =>
+          d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+      );
       if (id === "improvement" && improvementDocs.length > 0) {
         const recent = improvementDocs.slice(-4);
         const evidenceImages = await Promise.all(
@@ -1582,6 +1593,27 @@ function Report() {
     getSiteGis({ lat, lng })
       .then((data) => setSiteGisMap({ data, loading: false, attempted: true }))
       .catch(() => setSiteGisMap({ data: null, loading: false, attempted: true }));
+  }
+
+  // Module 4 "Fetch details" — re-pull the FEMA flood zone + USGS elevation
+  // for the property's coordinates, ignoring the once-only `attempted` guard
+  // above, then re-run the module. No-op without coordinates.
+  const [siteGisRefreshing, setSiteGisRefreshing] = useState(false);
+  async function handleRefreshSiteGis() {
+    if (!siteCoords) {
+      toast.error("No coordinates on file for this property — can't fetch site data.");
+      return;
+    }
+    setSiteGisRefreshing(true);
+    setSiteGisMap({ data: null, loading: true, attempted: true });
+    try {
+      const data = await getSiteGis({ lat: siteCoords.lat, lng: siteCoords.lng }).catch(() => null);
+      setSiteGisMap({ data, loading: false, attempted: true });
+      toast.success(data ? "Site data refreshed." : "No live FEMA/USGS data for this location.");
+      loadModule("site", { force: true });
+    } finally {
+      setSiteGisRefreshing(false);
+    }
   }
 
   useEffect(() => {
@@ -2321,6 +2353,8 @@ function Report() {
                 onUploadEvidence={() => {}}
                 onForceReload={() => {}}
                 onFetchCadDetails={() => {}}
+                onRefreshSiteGis={() => {}}
+                siteGisRefreshing={false}
                 cadFetching={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
@@ -2399,6 +2433,8 @@ function Report() {
             onUploadEvidence={handleUploadEvidence}
             onForceReload={() => loadModule(openModel.id, { force: true })}
             onFetchCadDetails={handleFetchCadDetails}
+            onRefreshSiteGis={handleRefreshSiteGis}
+            siteGisRefreshing={siteGisRefreshing}
             cadFetching={cadFetching}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
@@ -8045,6 +8081,8 @@ function ModulePreviewContent({
   onUploadEvidence,
   onForceReload,
   onFetchCadDetails,
+  onRefreshSiteGis,
+  siteGisRefreshing,
   cadFetching,
   onAnswerStrategy,
   existingProtest,
@@ -8090,6 +8128,8 @@ function ModulePreviewContent({
   onForceReload: () => void;
   // Module 6 only — re-pull the CAD record and update the classification.
   onFetchCadDetails: () => void;
+  onRefreshSiteGis: () => void;
+  siteGisRefreshing: boolean;
   cadFetching: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
@@ -8869,6 +8909,33 @@ function ModulePreviewContent({
       const siteGis = siteGisMap.data;
       const gaps = countDataGaps(d.factors);
       const nextModule = MODULES.find((mm) => mm.id === "improvement");
+      const siteDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Site: "));
+      const siteFactorKinds = d.factors.map((f) => f.factor);
+      // One upload -> AI reads each file and tags it to the site factor it
+      // documents (Floodplain, Easements, Drainage, …), or leaves it generic
+      // when it can't tell. Mirrors Module 5/6/7/8.
+      async function handleSiteAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads(siteFactorKinds, files);
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && siteFactorKinds.includes(matched as (typeof siteFactorKinds)[number])
+                ? `Site: ${matched}`
+                : PROTEST_EVIDENCE_DOCUMENT_TYPE;
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [documentType, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, documentType);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       return (
         <div className="mt-4 grid gap-4">
           <div>
@@ -9001,6 +9068,61 @@ function ModulePreviewContent({
             </div>
           )}
 
+          {allowEvidenceUpload && (
+            <div className="rounded-lg border border-border">
+              <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Data &amp; Evidence
+              </div>
+              {siteDocs.length > 0 && (
+                <ul className="grid gap-1 px-4 py-2.5 text-xs">
+                  {siteDocs.map((doc) => (
+                    <li key={doc.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-muted-foreground">{doc.fileName}</span>
+                      <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                        {doc.documentType?.replace(/^Site:\s*/, "") ?? "Site"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 px-4 py-3">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    multiple
+                    disabled={uploadingEvidence || categorizingEvidence}
+                    className="hidden"
+                    onChange={(e) => {
+                      const sel = Array.from(e.target.files ?? []);
+                      e.target.value = "";
+                      if (sel.length > 0) handleSiteAutoUpload(sel);
+                    }}
+                  />
+                  <Upload className="h-3.5 w-3.5" />
+                  {categorizingEvidence
+                    ? "Reading documents…"
+                    : uploadingEvidence
+                      ? "Uploading…"
+                      : "Upload documents"}
+                </label>
+                <button
+                  type="button"
+                  onClick={onRefreshSiteGis}
+                  disabled={siteGisRefreshing}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${siteGisRefreshing ? "animate-spin" : ""}`} />
+                  {siteGisRefreshing ? "Fetching…" : "Fetch details"}
+                </button>
+              </div>
+              <p className="px-4 pb-3 text-center text-[10px] text-muted-foreground">
+                Upload a survey, plat, flood determination, or site photos — the AI tags each to the
+                right factor. Fetch details re-pulls the FEMA flood zone and USGS elevation.
+              </p>
+            </div>
+          )}
+
           {nextModule && (
             <button
               type="button"
@@ -9017,8 +9139,39 @@ function ModulePreviewContent({
     case "improvement": {
       const d = moduleState.data as ModuleResultMap["improvement"];
       const improvementDocs = evidenceDocs.filter(
-        (doc) => doc.documentType === EVIDENCE_DOCUMENT_TYPE,
+        (doc) =>
+          doc.documentType === EVIDENCE_DOCUMENT_TYPE ||
+          doc.documentType?.startsWith("Improvement: "),
       );
+      const improvementComponentKinds = ["Roof", "HVAC", "Exterior", "Interior"] as const;
+      // One upload -> AI reads each file and tags it to the component it
+      // shows (Roof / HVAC / Exterior / Interior), or leaves it generic
+      // Improvement Evidence when it can't tell. Mirrors Module 6/7/8.
+      async function handleImprovementAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads(
+            [...improvementComponentKinds],
+            files,
+          );
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && (improvementComponentKinds as readonly string[]).includes(matched)
+                ? `Improvement: ${matched}`
+                : EVIDENCE_DOCUMENT_TYPE;
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [documentType, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, documentType);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       const economicLife = getTypicalEconomicLife(state.propertyType);
       const depreciation = computeDepreciation(
         d.effectiveAgeYears,
@@ -9161,27 +9314,37 @@ function ModulePreviewContent({
                 from what you upload instead of only general guidance.
               </p>
               {improvementDocs.length > 0 && (
-                <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                <ul className="mt-2 grid gap-1 text-xs">
                   {improvementDocs.map((doc) => (
-                    <li key={doc.id}>{doc.fileName}</li>
+                    <li key={doc.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-muted-foreground">{doc.fileName}</span>
+                      <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                        {doc.documentType?.replace(/^Improvement:\s*/, "") ??
+                          "Improvement Evidence"}
+                      </span>
+                    </li>
                   ))}
                 </ul>
               )}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label
-                  className={`btn-outline text-sm cursor-pointer ${uploadingEvidence ? "pointer-events-none opacity-60" : ""}`}
+                  className={`btn-outline text-sm cursor-pointer ${uploadingEvidence || categorizingEvidence ? "pointer-events-none opacity-60" : ""}`}
                 >
-                  {uploadingEvidence ? "Uploading…" : "Upload Evidence"}
+                  {categorizingEvidence
+                    ? "Reading documents…"
+                    : uploadingEvidence
+                      ? "Uploading…"
+                      : "Upload Evidence"}
                   <input
                     type="file"
                     accept="image/*,.pdf"
                     multiple
                     className="hidden"
-                    disabled={uploadingEvidence}
+                    disabled={uploadingEvidence || categorizingEvidence}
                     onChange={(e) => {
                       const selected = e.target.files ? Array.from(e.target.files) : [];
                       e.target.value = "";
-                      if (selected.length > 0) onUploadEvidence(selected);
+                      if (selected.length > 0) handleImprovementAutoUpload(selected);
                     }}
                   />
                 </label>
