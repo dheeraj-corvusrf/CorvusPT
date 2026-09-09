@@ -169,6 +169,7 @@ import {
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { LoadingLine } from "@/components/LoadingLine";
+import { PropertyImage } from "@/components/PropertyImage";
 import { ValueHistorySection } from "@/components/ValueHistorySection";
 import { Modal } from "@/components/Modal";
 
@@ -1967,6 +1968,7 @@ function Report() {
               siteCoords={siteCoords}
               estimated={estimated}
               propertyType={state.propertyType}
+              address={resolvedProperty?.address || state.address}
               totalValue={state.totalValue}
               improvementValue={state.improvementValue}
               overrides={overrides}
@@ -2175,6 +2177,7 @@ function ModuleCard({
   siteCoords,
   estimated,
   propertyType,
+  address,
   totalValue,
   improvementValue,
   overrides,
@@ -2202,6 +2205,7 @@ function ModuleCard({
     effectiveTaxRatePct: number;
   };
   propertyType?: string;
+  address?: string | null;
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
@@ -2325,6 +2329,7 @@ function ModuleCard({
             siteCoords={siteCoords}
             estimated={estimated}
             propertyType={propertyType}
+            address={address}
             totalValue={totalValue}
             improvementValue={improvementValue}
             overrides={overrides}
@@ -2402,6 +2407,7 @@ function ModuleVisual({
   siteCoords,
   estimated,
   propertyType,
+  address,
   totalValue,
   improvementValue,
   overrides,
@@ -2429,6 +2435,7 @@ function ModuleVisual({
     effectiveTaxRatePct: number;
   };
   propertyType?: string;
+  address?: string | null;
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
@@ -2713,6 +2720,7 @@ function ModuleVisual({
         <ImprovementCardVisual
           d={d}
           depreciation={depreciation}
+          address={address}
           overrides={overrides}
           uploading={uploadingEvidence}
           onUpload={hasFullAccess ? (files) => onUploadEvidence(files) : undefined}
@@ -4309,6 +4317,7 @@ function BuildingComponentRow({
 function ImprovementCardVisual({
   d,
   depreciation,
+  address,
   overrides,
   uploading,
   onUpload,
@@ -4316,6 +4325,7 @@ function ImprovementCardVisual({
 }: {
   d: ModuleResultMap["improvement"];
   depreciation: ReturnType<typeof computeDepreciation>;
+  address?: string | null;
   overrides: ModuleOverride[];
   uploading?: boolean;
   onUpload?: (files: File[]) => void;
@@ -4328,7 +4338,15 @@ function ImprovementCardVisual({
   ).length;
   return (
     <div className="grid gap-2">
-      <BuildingIllustration className="mx-auto h-16 w-auto" />
+      {/* Real Street View photo of the subject property when Google has
+          outdoor imagery there; a generic building illustration otherwise. */}
+      <PropertyImage
+        address={address}
+        width={480}
+        height={200}
+        className="mx-auto h-24 w-full max-w-[260px] rounded-lg border border-border object-cover"
+        fallback={<BuildingIllustration className="mx-auto h-16 w-auto" />}
+      />
       <div className="grid gap-1">
         {d.buildingComponents.map((c) => {
           const na = !c.hasPhoto && isItemNotApplicable(overrides, "improvement", c.component);
