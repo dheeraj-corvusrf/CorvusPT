@@ -301,17 +301,25 @@ function Properties() {
   function handleRunAiReportSelected() {
     const chosen = sortedProperties.filter((p) => selectedIds.has(p.id));
     if (chosen.length === 0) return;
-    let blocked = 0;
+    // Chrome/Edge only honour ONE window.open() per click (the first spends
+    // the user-activation, the rest are blocked). A synthetic <a target=
+    // "_blank"> click per property isn't subject to that limit — it's the
+    // standard way to open several tabs from one button. Firefox/Safari are
+    // stricter and may still open only the first; the toast tells the user
+    // how to fix that. Each tab is self-contained via ?propertyId, so
+    // rel="noopener" is safe.
     for (const p of chosen) {
-      const w = window.open(
-        `${import.meta.env.BASE_URL}ai-report?propertyId=${encodeURIComponent(p.id)}`,
-        "_blank",
-      );
-      if (!w) blocked++;
+      const a = document.createElement("a");
+      a.href = `${import.meta.env.BASE_URL}ai-report?propertyId=${encodeURIComponent(p.id)}`;
+      a.target = "_blank";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     }
-    if (blocked > 0) {
-      toast.warning(
-        `Your browser blocked ${blocked} tab${blocked === 1 ? "" : "s"} — allow pop-ups for this site, or open those reports from their cards.`,
+    if (chosen.length > 1) {
+      toast.info(
+        `Opening ${chosen.length} AI Reports in new tabs. If only one opened, allow pop-ups for this site.`,
       );
     }
   }
