@@ -6374,17 +6374,23 @@ function IncomeApproachTable({ c }: { c: IncomeApproach }) {
   );
 }
 
-// Data Availability panel — which source documents the owner has provided,
-// with a per-kind upload control. Mirrors ZoningClassificationTable's
-// per-row upload.
+// Data Availability panel — which income source documents the owner has
+// provided. One "Upload documents" control at the bottom; the AI reads each
+// file and tags it to the right kind (see IncomeWorkspace.handleAutoUpload),
+// so the owner never has to pick a category. Documents already tagged to
+// this section are listed underneath the four kind rows.
 function IncomeDataAvailability({
   docKinds,
+  incomeDocs,
   onUpload,
   uploading,
+  categorizing,
 }: {
   docKinds: string[];
-  onUpload?: (kind: string, files: File[]) => void;
+  incomeDocs: DocumentRecord[];
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
+  categorizing?: boolean;
 }) {
   return (
     <div className="rounded-lg border border-border">
@@ -6412,35 +6418,57 @@ function IncomeDataAvailability({
                   )}
                 </span>
               </span>
-              <span className="flex shrink-0 items-center gap-2">
-                <span
-                  className={`hidden text-xs font-semibold sm:inline ${has ? "text-success" : "text-muted-foreground"}`}
-                >
-                  {has ? "Provided" : "Not provided"}
-                </span>
-                {onUpload && (
-                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
-                    <input
-                      type="file"
-                      accept="image/*,.pdf,.csv,.xlsx,.xls"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        if (sel.length > 0) onUpload(kind, sel);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : has ? "Replace" : "Upload"}
-                  </label>
-                )}
+              <span
+                className={`shrink-0 text-xs font-semibold ${has ? "text-success" : "text-muted-foreground"}`}
+              >
+                {has ? "Provided" : "Not provided"}
               </span>
             </li>
           );
         })}
       </ul>
+
+      {incomeDocs.length > 0 && (
+        <div className="border-t border-border/60 px-3 py-2.5 sm:px-4">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Documents in this section
+          </div>
+          <ul className="mt-1 grid gap-1">
+            {incomeDocs.map((doc) => (
+              <li key={doc.id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate">{doc.fileName}</span>
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  {doc.documentType?.replace(/^Income:\s*/, "") || "Income"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {onUpload && (
+        <div className="border-t border-border/60 px-3 py-3 text-center sm:px-4">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+            <input
+              type="file"
+              accept="image/*,.pdf,.csv,.xlsx,.xls"
+              multiple
+              disabled={uploading || categorizing}
+              className="hidden"
+              onChange={(e) => {
+                const sel = Array.from(e.target.files ?? []);
+                if (sel.length > 0) onUpload(sel);
+                e.target.value = "";
+              }}
+            />
+            <Upload className="h-3.5 w-3.5" />
+            {categorizing ? "Reading documents…" : uploading ? "Uploading…" : "Upload documents"}
+          </label>
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            The AI reads each file and tags it (P&amp;L, rent roll, operating statement, appraisal).
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -6676,6 +6704,33 @@ function IncomeWorkspace({
     ),
   ];
   const d = moduleState?.data as ModuleResultMap["income"] | undefined;
+
+  // One upload -> the AI reads each file and tags it to the right income
+  // kind, so the four per-row upload buttons collapse to one. Mirrors
+  // Module 8's handleBulkUploadEvidence: categorize, group, upload per
+  // group; a failed categorization just tags everything "Income: Other"
+  // and the upload still happens.
+  const [categorizingIncomeDocs, setCategorizingIncomeDocs] = useState(false);
+  async function handleAutoUpload(files: File[]) {
+    setCategorizingIncomeDocs(true);
+    try {
+      const categorized = await categorizeEvidenceUploads([...INCOME_DOC_KINDS], files);
+      const groups = new Map<string, File[]>();
+      for (const file of files) {
+        const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+        const key =
+          matched && (INCOME_DOC_KINDS as readonly string[]).includes(matched) ? matched : "Other";
+        const g = groups.get(key);
+        if (g) g.push(file);
+        else groups.set(key, [file]);
+      }
+      for (const [kind, groupFiles] of groups) {
+        await onUploadEvidence(groupFiles, undefined, `Income: ${kind}`);
+      }
+    } finally {
+      setCategorizingIncomeDocs(false);
+    }
+  }
   const supports = d?.supportsCadValue ?? incomeSupportsCad(computed);
   const cs = computeComparableStats(
     compsMap.data?.subject ?? null,
@@ -6703,12 +6758,10 @@ function IncomeWorkspace({
 
       <IncomeDataAvailability
         docKinds={docKinds}
-        onUpload={
-          allowEvidenceUpload
-            ? (kind, files) => onUploadEvidence(files, undefined, `Income: ${kind}`)
-            : undefined
-        }
+        incomeDocs={incomeDocs}
+        onUpload={allowEvidenceUpload ? handleAutoUpload : undefined}
         uploading={uploadingEvidence}
+        categorizing={categorizingIncomeDocs}
       />
 
       <IncomeFiguresForm
