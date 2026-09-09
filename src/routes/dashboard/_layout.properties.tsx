@@ -27,11 +27,8 @@ import { BulkSubscribeModal } from "@/components/BulkSubscribeModal";
 import { PaymentsModeChip } from "@/components/PaymentsModeChip";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
-import {
-  listHealthScores,
-  computeAndStoreHealthScore,
-  type PropertyAiScore,
-} from "@/lib/property-scores";
+import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
+import { createPortal } from "react-dom";
 import { getPropertyProtestStatus, type ActionStatus } from "@/lib/portfolio-status";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
@@ -85,7 +82,6 @@ function Properties() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
-  const [runningBulkAi, setRunningBulkAi] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -296,24 +292,27 @@ function Properties() {
     setBulkDeleting(false);
   }
 
-  // Bulk "Run AI Report" — regenerates each selected property's AI health
-  // score (the "AI Score: X/100" line on the card). computeAndStoreHealthScore
-  // never throws; a slow/failed one just doesn't update. Opening the full
-  // per-property AI Report is still one property at a time.
-  async function handleRunAiReportSelected() {
-    const chosen = properties.filter((p) => selectedIds.has(p.id));
+  // Bulk "Run AI Report" — opens each selected property's AI Report in its
+  // own new tab. The AI Report reads the property from intake (sessionStorage);
+  // a window.open()'d same-origin tab inherits a snapshot of sessionStorage as
+  // it is at open time, so writing each property's patch immediately before
+  // opening its tab gives every tab the right property. Must stay fully
+  // synchronous inside the click — no await between the write and the open, or
+  // the browser blocks the popups and the snapshot is stale. import.meta.env
+  // .BASE_URL is "/" in dev, "/corvuspt/" on the Pages build.
+  function handleRunAiReportSelected() {
+    const chosen = sortedProperties.filter((p) => selectedIds.has(p.id));
     if (chosen.length === 0) return;
-    setRunningBulkAi(true);
-    toast.info(
-      `Running AI analysis for ${chosen.length} propert${chosen.length === 1 ? "y" : "ies"}…`,
-    );
-    const results = await Promise.allSettled(chosen.map((p) => computeAndStoreHealthScore(p)));
-    const ok = results.filter((r) => r.status === "fulfilled" && r.value != null).length;
-    if (user) listHealthScores(user.id).then(setHealthScores).catch(console.error);
-    if (ok > 0) toast.success(`AI analysis updated for ${ok} propert${ok === 1 ? "y" : "ies"}.`);
-    if (ok < chosen.length)
-      toast.warning(`${chosen.length - ok} could not be analyzed right now — try again shortly.`);
-    setRunningBulkAi(false);
+    if (
+      chosen.length > 8 &&
+      !window.confirm(`Open ${chosen.length} AI Report tabs? Your browser may block some.`)
+    ) {
+      return;
+    }
+    for (const p of chosen) {
+      updateIntake(buildAiReportIntakePatch(p));
+      window.open(`${import.meta.env.BASE_URL}ai-report`, "_blank");
+    }
   }
 
   // Most recently added first, per explicit request — the property you just
@@ -420,53 +419,56 @@ function Properties() {
         />
       )}
 
-      {/* One floating action bar for the whole multi-selection — Delete /
-          Run AI Report / Protest selected. Fixed to the bottom so it stays
-          reachable however far the list is scrolled. */}
-      {selectedIds.size > 0 && (
-        <div className="fixed inset-x-0 bottom-4 z-40 flex justify-center px-4 print:hidden">
-          <div className="card-elev flex flex-wrap items-center gap-2 p-2 pl-4 shadow-lg">
-            <span className="text-sm font-medium">
-              {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
-            </span>
-            <button
-              type="button"
-              disabled={bulkDeleting}
-              onClick={handleDeleteSelected}
-              className="btn-outline text-destructive text-sm disabled:opacity-60"
-            >
-              {bulkDeleting ? "Deleting…" : "Delete"}
-            </button>
-            <button
-              type="button"
-              disabled={runningBulkAi}
-              onClick={handleRunAiReportSelected}
-              className="btn-outline text-sm disabled:opacity-60"
-            >
-              {runningBulkAi ? "Running…" : "Run AI Report"}
-            </button>
-            {stripeConfigured && subscribableSelected.length > 0 && (
+      {/* One action bar for the whole multi-selection — Delete / Run AI
+          Report / Protest selected. Portaled to <body> and position:fixed so
+          it stays pinned to the viewport bottom no matter how far the list
+          is scrolled (a transformed dashboard-layout ancestor would otherwise
+          trap a plain `fixed` child into the page flow). */}
+      {selectedIds.size > 0 &&
+        createPortal(
+          <div className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4 print:hidden">
+            <div className="card-elev flex flex-wrap items-center gap-2 p-2 pl-4 shadow-xl">
+              <span className="text-sm font-medium">
+                {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
+              </span>
               <button
                 type="button"
-                onClick={() => setBulkOpen(true)}
-                className="btn-primary btn-primary-hover text-sm"
+                disabled={bulkDeleting}
+                onClick={handleDeleteSelected}
+                className="btn-outline text-destructive text-sm disabled:opacity-60"
               >
-                Protest selected
-                {subscribableSelected.length !== selectedIds.size &&
-                  ` (${subscribableSelected.length})`}
+                {bulkDeleting ? "Deleting…" : "Delete"}
               </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setSelectedIds(new Set())}
-              aria-label="Clear selection"
-              className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      )}
+              <button
+                type="button"
+                onClick={handleRunAiReportSelected}
+                className="btn-outline text-sm"
+              >
+                Run AI Report
+              </button>
+              {stripeConfigured && subscribableSelected.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setBulkOpen(true)}
+                  className="btn-primary btn-primary-hover text-sm"
+                >
+                  Protest selected
+                  {subscribableSelected.length !== selectedIds.size &&
+                    ` (${subscribableSelected.length})`}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                aria-label="Clear selection"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>,
+          document.body,
+        )}
 
       <BulkSubscribeModal
         properties={subscribableSelected}
