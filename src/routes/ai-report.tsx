@@ -114,7 +114,8 @@ import { getCountyProtestInfo } from "@/lib/county-protest-info";
 import { getCaseGuidance } from "@/lib/case-guidance";
 import { getCaseRecord } from "@/lib/case-record";
 import { type CaseReportInputs } from "@/lib/case-report";
-import { ExecutiveModuleTabs } from "@/components/CaseReportView";
+import { buildFinalCaseSummary } from "@/lib/final-case-summary";
+import { ExecutiveModuleTabs, FinalCaseSummaryPanel } from "@/components/CaseReportView";
 import {
   classifyPropertyCategory,
   getAssessmentRatioInfo,
@@ -8046,27 +8047,41 @@ function ModulePreviewContent({
         </div>
       );
     }
+    // Once the protest process has concluded, Module 9 also carries the
+    // deterministic Final Case Summary (see src/lib/final-case-summary.ts).
+    // Purely additive — the estimated-savings workspace below is unchanged.
+    const finalSummary =
+      resolvedProperty && existingProtest
+        ? buildFinalCaseSummary(resolvedProperty, existingProtest)
+        : null;
     return (
-      <SavingsWorkspace
-        analysis={savingsAnalysis}
-        taxInputs={savingsTaxInputs}
-        allowEdit={allowEvidenceUpload}
-        onSaveTaxInputs={onSaveSavingsTaxInputs}
-        onOpenModule={onOpenModule}
-        headlineSavings={estimated.savings}
-        currentValue={current}
-        reducedValue={reduced}
-        rationale={estimated.rationale}
-        incomeNote={
-          incomeComputed.complete && incomeComputed.indicatedValue != null
-            ? `Income approach also indicates ${compactCurrency(incomeComputed.indicatedValue)}${
-                incomeComputed.gapPct != null
-                  ? ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`
-                  : ""
-              }. See Module 7.`
-            : null
-        }
-      />
+      <div className="grid gap-4">
+        {finalSummary?.available && (
+          <div className="mt-4">
+            <FinalCaseSummaryPanel summary={finalSummary} />
+          </div>
+        )}
+        <SavingsWorkspace
+          analysis={savingsAnalysis}
+          taxInputs={savingsTaxInputs}
+          allowEdit={allowEvidenceUpload}
+          onSaveTaxInputs={onSaveSavingsTaxInputs}
+          onOpenModule={onOpenModule}
+          headlineSavings={estimated.savings}
+          currentValue={current}
+          reducedValue={reduced}
+          rationale={estimated.rationale}
+          incomeNote={
+            incomeComputed.complete && incomeComputed.indicatedValue != null
+              ? `Income approach also indicates ${compactCurrency(incomeComputed.indicatedValue)}${
+                  incomeComputed.gapPct != null
+                    ? ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`
+                    : ""
+                }. See Module 7.`
+              : null
+          }
+        />
+      </div>
     );
   }
 

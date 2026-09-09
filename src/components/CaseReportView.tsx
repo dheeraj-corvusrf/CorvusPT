@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { buildCaseReport, type CaseReportInputs, type ProtestCaseReport } from "@/lib/case-report";
+import type { FinalCaseSummary } from "@/lib/final-case-summary";
 
 // Module 10's "Full Case Report" — the consolidated protest playbook. Purely
 // presentational: `buildCaseReport` (deterministic, no AI) does the assembly;
@@ -299,6 +300,70 @@ export function CaseReportView({ report }: { report: ProtestCaseReport }) {
           })}
         </ul>
       </Section>
+    </div>
+  );
+}
+
+// Final case summary — added to Module 9 once the protest process has
+// concluded (see buildFinalCaseSummary). Deterministic; every figure is a
+// real, decision-backed number. Renders nothing while the case is still in
+// progress.
+export function FinalCaseSummaryPanel({ summary }: { summary: FinalCaseSummary }) {
+  if (!summary.available) return null;
+  const s = summary;
+  const closed = s.status.kind === "closed";
+  const rows: { label: string; value: string }[] = [
+    { label: "Original value", value: s.originalValue },
+    { label: "Final value", value: s.finalValue },
+    { label: "Value reduction", value: s.valueReduction },
+    {
+      label:
+        s.taxSavings.basis === "actual"
+          ? "Actual tax savings / yr"
+          : s.taxSavings.basis === "estimated"
+            ? "Estimated tax savings / yr"
+            : "Tax savings",
+      value: s.taxSavings.value,
+    },
+    { label: "Protest outcome", value: s.protestOutcome },
+    { label: "Informal outcome", value: s.informalOutcome },
+    { label: "Hearing outcome", value: s.hearingOutcome },
+    { label: "Decision date", value: s.decisionDate },
+    ...(s.remainingEscalationDeadline
+      ? [{ label: "Remaining appeal / escalation deadline", value: s.remainingEscalationDeadline }]
+      : []),
+    { label: "Case close date", value: s.caseCloseDate },
+  ];
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-serif text-base font-bold text-foreground">Final Case Summary</h4>
+        <span
+          className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+            closed ? "bg-success/15 text-success" : "bg-destructive/10 text-destructive"
+          }`}
+        >
+          {s.status.label}
+        </span>
+      </div>
+      <dl className="mt-3 grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+        {rows.map((r) => (
+          <div key={r.label} className="min-w-0">
+            <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{r.label}</dt>
+            <dd className="font-medium text-foreground">{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="mt-3 rounded-md border border-accent/40 bg-accent/10 p-3">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+          Recommended next action
+        </div>
+        <p className="mt-0.5 text-sm text-foreground">{s.recommendedNextAction}</p>
+      </div>
+      <p className="mt-2 text-[10px] text-muted-foreground">
+        Figures are the real, recorded outcome of this case. Savings shown before the case is closed
+        are estimates, not a guarantee.
+      </p>
     </div>
   );
 }
