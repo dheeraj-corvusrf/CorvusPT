@@ -122,7 +122,13 @@ import {
   applyValueTrendAdjustment,
 } from "@/lib/texas-tax-rates";
 import { CompsMap, useLeaflet } from "@/components/CompsMap";
-import { findExistingProperty, addProperty, type PropertyRecord } from "@/lib/properties";
+import {
+  findExistingProperty,
+  addProperty,
+  listProperties,
+  buildAiReportIntakePatch,
+  type PropertyRecord,
+} from "@/lib/properties";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -208,11 +214,17 @@ export const Route = createFileRoute("/ai-report")({
       },
     ],
   }),
-  // Lets a deep link (CaseDetailModal's "Upload Evidence — Go to Module 8"
-  // button) auto-open a specific module's modal on load, same
-  // validateSearch pattern sign-in.tsx already uses for its own `redirect`.
-  validateSearch: (search: Record<string, unknown>): { openModule?: string } => ({
+  // openModule: a deep link (CaseDetailModal's "Upload Evidence — Go to
+  // Module 8" button) auto-opens a specific module's modal on load.
+  // propertyId: opens the report for one specific saved property regardless
+  // of what's in intake — the Properties page's bulk "Run AI Report" opens
+  // one tab per selected property this way, so each tab is self-contained
+  // rather than racing a shared sessionStorage write.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { openModule?: string; propertyId?: string } => ({
     openModule: typeof search.openModule === "string" ? search.openModule : undefined,
+    propertyId: typeof search.propertyId === "string" ? search.propertyId : undefined,
   }),
   component: Report,
 });
@@ -254,7 +266,7 @@ function buildValueTrend(valueHistory: IntakeState["valueHistory"]) {
 function Report() {
   const nav = useNavigate();
   const { user } = useAuth();
-  const { openModule: deepLinkModuleId } = Route.useSearch();
+  const { openModule: deepLinkModuleId, propertyId: deepLinkPropertyId } = Route.useSearch();
   const [state, setState] = useState<IntakeState>({ previewsUsed: [] });
   const [analyzing, setAnalyzing] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -374,7 +386,31 @@ function Report() {
   const [incomeAnalysisLoaded, setIncomeAnalysisLoaded] = useState(false);
   const auxDataLoaded = overridesLoaded && compSelectionsLoaded && incomeAnalysisLoaded;
 
+  // ?propertyId — open this exact saved property's report, whatever intake
+  // currently holds. Used by the Properties page's bulk "Run AI Report" so
+  // each tab is self-contained. Resolves once, seeds intake from the real
+  // row, then the normal readIntake() flow below takes over on the next tick.
+  const [propertyIdApplied, setPropertyIdApplied] = useState(!deepLinkPropertyId);
   useEffect(() => {
+    if (!deepLinkPropertyId || !user || propertyIdApplied) return;
+    let live = true;
+    listProperties(user.id)
+      .then((props) => {
+        if (!live) return;
+        const match = props.find((p) => p.id === deepLinkPropertyId);
+        if (match) updateIntake({ ...buildAiReportIntakePatch(match), confirmed: true });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (live) setPropertyIdApplied(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [deepLinkPropertyId, user, propertyIdApplied]);
+
+  useEffect(() => {
+    if (!propertyIdApplied) return; // wait for ?propertyId to seed intake first
     const s = readIntake();
     if (!s.confirmed) {
       setState(s);
@@ -388,7 +424,7 @@ function Report() {
     setState(s.aiReviewReached ? s : updateIntake({ aiReviewReached: true }));
     const t = setTimeout(() => setAnalyzing(false), 1800);
     return () => clearTimeout(t);
-  }, [nav]);
+  }, [nav, propertyIdApplied]);
 
   useEffect(() => {
     if (!user || !state.address) return;

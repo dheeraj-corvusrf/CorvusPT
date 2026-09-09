@@ -293,25 +293,26 @@ function Properties() {
   }
 
   // Bulk "Run AI Report" — opens each selected property's AI Report in its
-  // own new tab. The AI Report reads the property from intake (sessionStorage);
-  // a window.open()'d same-origin tab inherits a snapshot of sessionStorage as
-  // it is at open time, so writing each property's patch immediately before
-  // opening its tab gives every tab the right property. Must stay fully
-  // synchronous inside the click — no await between the write and the open, or
-  // the browser blocks the popups and the snapshot is stale. import.meta.env
-  // .BASE_URL is "/" in dev, "/corvuspt/" on the Pages build.
+  // own new tab via ?propertyId, so each tab loads its own property (no
+  // shared-intake race). Browsers only allow a burst of window.open() calls
+  // inside one user gesture and usually cap it — count the ones that came
+  // back null and tell the user to allow pop-ups. BASE_URL is "/" in dev,
+  // "/corvuspt/" on the Pages build.
   function handleRunAiReportSelected() {
     const chosen = sortedProperties.filter((p) => selectedIds.has(p.id));
     if (chosen.length === 0) return;
-    if (
-      chosen.length > 8 &&
-      !window.confirm(`Open ${chosen.length} AI Report tabs? Your browser may block some.`)
-    ) {
-      return;
-    }
+    let blocked = 0;
     for (const p of chosen) {
-      updateIntake(buildAiReportIntakePatch(p));
-      window.open(`${import.meta.env.BASE_URL}ai-report`, "_blank");
+      const w = window.open(
+        `${import.meta.env.BASE_URL}ai-report?propertyId=${encodeURIComponent(p.id)}`,
+        "_blank",
+      );
+      if (!w) blocked++;
+    }
+    if (blocked > 0) {
+      toast.warning(
+        `Your browser blocked ${blocked} tab${blocked === 1 ? "" : "s"} — allow pop-ups for this site, or open those reports from their cards.`,
+      );
     }
   }
 
