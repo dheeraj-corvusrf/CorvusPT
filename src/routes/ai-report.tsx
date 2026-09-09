@@ -170,6 +170,14 @@ import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow"
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { LoadingLine } from "@/components/LoadingLine";
 import { PropertyImage } from "@/components/PropertyImage";
+import {
+  hashModuleInput,
+  getCachedModuleResult,
+  saveModuleResult,
+  relativeTime,
+  MODEL_TAG,
+} from "@/lib/module-results-cache";
+import { getAiReportCacheEnabled } from "@/lib/app-settings";
 import { ValueHistorySection } from "@/components/ValueHistorySection";
 import { Modal } from "@/components/Modal";
 
@@ -177,6 +185,9 @@ type ModuleAsyncState = {
   data: unknown;
   loading: boolean;
   error: string | null;
+  // When this data came from public.module_results rather than a fresh AI
+  // call — drives the "Updated {time}" line next to Regenerate.
+  cachedAt?: string;
 };
 
 export const Route = createFileRoute("/ai-report")({
@@ -327,6 +338,14 @@ function Report() {
   // exists (same gate as the evidence-docs effect below, since overrides
   // are keyed by property id too).
   const [overrides, setOverrides] = useState<ModuleOverride[]>([]);
+  // Whether module results are served from public.module_results instead of
+  // re-generating on every visit (app_settings.ai_report_cache_enabled).
+  // Defaults on; a false read leaves it on (never silently switch to the
+  // expensive live-every-time path on a transient error).
+  const [cacheEnabled, setCacheEnabled] = useState(true);
+  useEffect(() => {
+    getAiReportCacheEnabled().then(setCacheEnabled);
+  }, []);
   // Module 3 (Market Value) — the user's include/exclude/add decisions for
   // comparable sales. Loaded once per property; every mutation is optimistic
   // (same pattern as `overrides` above) and re-runs the comps AI so its
@@ -1211,11 +1230,39 @@ function Report() {
       return getModuleAnalysis(id as BatchModuleId, input);
     }
 
-    run()
-      .then((data) =>
-        setModuleData((prev) => ({ ...prev, [id]: { data, loading: false, error: null } })),
-      )
-      .catch((err) =>
+    // Serve a stored result (identical every visit, no AI call) when caching
+    // is on, we have a real saved property to key against, this isn't an
+    // explicit Regenerate, and the stored row was produced from the same
+    // inputs. Otherwise generate and store.
+    (async () => {
+      const canCache = !!resolvedProperty && !!user && cacheEnabled;
+      let inputHash: string | null = null;
+      if (canCache) {
+        try {
+          inputHash = await hashModuleInput(id as BatchModuleId | "health", input);
+          if (!opts?.force) {
+            const hit = await getCachedModuleResult(resolvedProperty!.id, id);
+            if (hit && hit.inputHash === inputHash) {
+              setModuleData((prev) => ({
+                ...prev,
+                [id]: { data: hit.result, loading: false, error: null, cachedAt: hit.updatedAt },
+              }));
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("module cache read failed:", e); // fall through to a live call
+        }
+      }
+      try {
+        const data = await run();
+        setModuleData((prev) => ({ ...prev, [id]: { data, loading: false, error: null } }));
+        if (canCache && inputHash) {
+          saveModuleResult(user!.id, resolvedProperty!.id, id, inputHash, MODEL_TAG, data).catch(
+            (e) => console.error("module cache write failed:", e),
+          );
+        }
+      } catch (err) {
         setModuleData((prev) => ({
           ...prev,
           [id]: {
@@ -1223,8 +1270,9 @@ function Report() {
             loading: false,
             error: err instanceof Error ? err.message : "Could not generate this analysis.",
           },
-        })),
-      );
+        }));
+      }
+    })();
   }
 
   // Auto-retry a module that landed in an error state, instead of making the
@@ -1601,7 +1649,13 @@ function Report() {
   // comps/site/improvement/zoning investigate the exact 5 strategies Module 2
   // ranks, so they're sequenced to fire after it (see the effect below) rather
   // than in this immediate batch, which is why they're excluded here.
-  const SEQUENCED_AFTER_STRATEGY = new Set(["comps", "site", "improvement", "zoning"]);
+  // First-visit AI-call budget: only these generate automatically (health +
+  // strategy fire in the immediate batch below; comps right after strategy).
+  // Every other module generates on first card/modal open and is then cached
+  // (public.module_results) — a return visit shows all 10 with zero AI calls.
+  const SEQUENCED_AFTER_STRATEGY = new Set(["comps"]);
+  // Generated lazily on first open, never in an eager batch.
+  const LAZY_MODULES = new Set(["site", "improvement", "zoning", "executive"]);
   // Module 10 (executive) reconciles Module 2's strategy AND Module 8's
   // evidence — firing it in this same immediate batch (as it did before this
   // sequencing was added) meant its own AI call went out before either had
@@ -1614,8 +1668,8 @@ function Report() {
       if (
         m.id === "savings" ||
         m.id === "income" ||
-        m.id === "executive" ||
-        SEQUENCED_AFTER_STRATEGY.has(m.id)
+        SEQUENCED_AFTER_STRATEGY.has(m.id) ||
+        LAZY_MODULES.has(m.id)
       )
         continue;
       if (m.n <= FREE_MODULE_COUNT || hasFullAccess) loadModule(m.id);
@@ -1708,8 +1762,13 @@ function Report() {
   // real output, so it waits for both to settle (data or error) before firing
   // its own call, same 6s-capped-timeout pattern as the comps/strategy effect
   // above (a slow/failed dependency shouldn't stall Module 10 indefinitely).
+  //
+  // Only fires once the user has actually opened Module 10 at least once
+  // (executiveOpenedRef) — a first-visit AI call the user may never look at
+  // is deferred until they do, and a return visit serves it from cache.
+  const executiveOpenedRef = useRef(false);
   useEffect(() => {
-    if (!state.totalValue || !hasFullAccess) return;
+    if (!state.totalValue || !hasFullAccess || !executiveOpenedRef.current) return;
     const strategyState = moduleData.strategy;
     const evidenceState = moduleData.evidence;
     const strategyDone = !!(strategyState?.data || strategyState?.error);
@@ -1733,7 +1792,18 @@ function Report() {
   function openModule(m: Module) {
     if (hasFullAccess || m.n <= FREE_MODULE_COUNT) {
       setOpenId(m.id);
-      if (!m.requiresUserData) loadModule(m.id);
+      if (m.id === "executive") {
+        // Deferred first-visit call — generate now if its inputs (strategy +
+        // evidence) are ready, otherwise arm the effect that fires when they
+        // settle. Never call the generic loadModule below with partial
+        // context that would then be cached.
+        executiveOpenedRef.current = true;
+        const sDone = !!(moduleData.strategy?.data || moduleData.strategy?.error);
+        const eDone = !!(moduleData.evidence?.data || moduleData.evidence?.error);
+        if (sDone && eDone) loadModule("executive");
+      } else if (!m.requiresUserData) {
+        loadModule(m.id);
+      }
       // Modules 7 and 9 show the comparable-sales range alongside their own
       // numbers — load the same comps map Module 3 uses.
       if (m.id === "comps" || m.id === "income" || m.id === "savings") loadCompsMap();
@@ -2064,6 +2134,28 @@ function Report() {
           </div>
           <div className="text-sm font-medium text-muted-foreground">{openModel.title}</div>
           <p className="text-muted-foreground">{openModel.question}</p>
+          {!!moduleData[openModel.id]?.data && (
+            <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                {moduleData[openModel.id]?.cachedAt
+                  ? `Updated ${relativeTime(moduleData[openModel.id]!.cachedAt)}`
+                  : "Updated just now"}
+              </span>
+              {openModel.id !== "savings" && (
+                <button
+                  type="button"
+                  onClick={() => loadModule(openModel.id, { force: true })}
+                  disabled={moduleData[openModel.id]?.loading}
+                  className="inline-flex items-center gap-1 font-medium text-accent hover:underline disabled:opacity-50"
+                >
+                  <RefreshCw
+                    className={`h-3 w-3 ${moduleData[openModel.id]?.loading ? "animate-spin" : ""}`}
+                  />
+                  Regenerate
+                </button>
+              )}
+            </div>
+          )}
           <ModulePreviewBody
             m={openModel}
             estimated={estimated}
@@ -2307,8 +2399,8 @@ function ModuleCard({
                   type="button"
                   onClick={onForceReload}
                   disabled={status === "Analyzing"}
-                  title={status === "Analyzing" ? "Analyzing…" : "Refresh this module"}
-                  aria-label={status === "Analyzing" ? "Analyzing" : "Refresh this module"}
+                  title={status === "Analyzing" ? "Analyzing…" : "Regenerate this module"}
+                  aria-label={status === "Analyzing" ? "Analyzing" : "Regenerate this module"}
                   className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-default disabled:hover:bg-transparent"
                 >
                   <RefreshCw
@@ -2345,6 +2437,11 @@ function ModuleCard({
         </div>
       </div>
       {insight && <InsightBanner text={insight} color={m.color} onClick={onOpen} />}
+      {status === "Completed" && moduleState?.cachedAt && (
+        <div className="px-5 pt-2 text-[10px] text-muted-foreground">
+          Updated {relativeTime(moduleState.cachedAt)}
+        </div>
+      )}
       <div className="px-5 pb-5 pt-3 flex items-center justify-between gap-2">
         {hasFullAccess ? (
           <span className="text-xs font-medium text-success">Included in your plan</span>
