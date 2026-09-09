@@ -6642,19 +6642,14 @@ function SavingsRoiRow({ a }: { a: SavingsAnalysis }) {
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         ROI Analysis (Base Scenario)
       </div>
+      {/* Annual figures only — ROI is defined on the annual net benefit
+          (spec §8). The multi-year projection is its own line below. */}
       <div className="flex flex-wrap items-center justify-center gap-1.5">
         <FormulaIcon
           Icon={DollarSign}
           value={currency(a.annualSavings)}
           label="annual savings"
           tone="bg-success/15 text-success"
-        />
-        <span className="text-sm text-muted-foreground">×</span>
-        <FormulaIcon
-          Icon={RefreshCw}
-          value={`${a.projectionYears} yrs`}
-          label="projection"
-          tone="bg-sky-500/15 text-sky-600"
         />
         <span className="text-sm text-muted-foreground">−</span>
         <FormulaIcon
@@ -6666,17 +6661,15 @@ function SavingsRoiRow({ a }: { a: SavingsAnalysis }) {
         <span className="text-sm text-muted-foreground">=</span>
         <FormulaIcon
           Icon={BarChart3}
-          value={currency(
-            a.multiYearSavings != null ? a.multiYearSavings - a.protestCost : a.netBenefit,
-          )}
-          label={a.multiYearSavings != null ? `net over ${a.projectionYears} yrs` : "net benefit"}
+          value={currency(a.netBenefit)}
+          label="net benefit / yr"
           tone="bg-success/15 text-success"
         />
       </div>
       <div className="mt-2 text-center text-sm">
         {a.roiPct != null ? (
           <>
-            <span className="text-muted-foreground">ROI </span>
+            <span className="text-muted-foreground">Annual ROI </span>
             <span className="font-serif text-lg font-bold text-success">{a.roiPct}%</span>
             {a.savingsToCostMultiple != null && (
               <span className="ml-2 text-xs text-muted-foreground">
