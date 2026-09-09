@@ -34,6 +34,10 @@ test.beforeEach(async ({ page }) => {
 test("unsubscribed guest sees free preview on modules 1-3 and a subscription gate on 4-10", async ({
   page,
 }) => {
+  // The three free-preview modules each fire a real edge-function call on
+  // load; comps (module 3) resolves right around the default 30s budget, so
+  // the settle-wait below needs room.
+  test.setTimeout(90_000);
   // Relative, no leading slash — see pricing-tiers.spec.ts for why.
   await page.goto("ai-report");
 
@@ -58,8 +62,11 @@ test("unsubscribed guest sees free preview on modules 1-3 and a subscription gat
 
   // …and that link opens the module's preview modal. Wait for the eager
   // module loads to settle first — the cards re-render as each resolves, and
-  // clicking mid-re-render detaches the node (flaky otherwise).
-  await page.waitForLoadState("networkidle");
+  // clicking mid-re-render detaches the node (flaky otherwise). "Analyzing"
+  // is the per-card loading label; wait for every card to leave that state
+  // rather than networkidle, which is too tight now that comps generates
+  // right around the old 30s test budget.
+  await expect(page.getByText("Analyzing")).toHaveCount(0, { timeout: 60_000 });
   await page.getByRole("button", { name: "Open", exact: true }).first().click();
   await expect(page.getByRole("button", { name: "Close" })).toBeVisible();
 });
