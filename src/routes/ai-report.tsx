@@ -110,6 +110,11 @@ import {
   isPreFilingBlocked,
   type PreFilingCheckItem,
 } from "@/lib/pre-filing-check";
+import { getCountyProtestInfo } from "@/lib/county-protest-info";
+import { getCaseGuidance } from "@/lib/case-guidance";
+import { getCaseRecord } from "@/lib/case-record";
+import { type CaseReportInputs } from "@/lib/case-report";
+import { ExecutiveModuleTabs } from "@/components/CaseReportView";
 import {
   classifyPropertyCategory,
   getAssessmentRatioInfo,
@@ -411,17 +416,24 @@ function Report() {
   // hash), so they must not fire until this list has settled, or a reload
   // races it and a cached result misses just because the docs weren't in yet.
   const [evidenceDocsLoaded, setEvidenceDocsLoaded] = useState(false);
+  // Every non-deleted document for this property — used by Module 10's Full
+  // Case Report (case-report.ts) for the Key Documents section. evidenceDocs
+  // above is the evidence-only subset the cache hash folds in.
+  const [caseDocuments, setCaseDocuments] = useState<DocumentRecord[]>([]);
   useEffect(() => {
     if (!user || !resolvedProperty) {
       setEvidenceDocsLoaded(!resolvedProperty); // no property => nothing to wait for
       return;
     }
     listDocuments(user.id)
-      .then((docs) =>
+      .then((docs) => {
+        const forProperty = docs.filter(
+          (d) => d.propertyId === resolvedProperty.id && d.deletedAt == null,
+        );
+        setCaseDocuments(forProperty);
         setEvidenceDocs(
-          docs.filter(
+          forProperty.filter(
             (d) =>
-              d.propertyId === resolvedProperty.id &&
               d.useAsEvidence !== false &&
               (d.useAsEvidence === true ||
                 d.documentType === EVIDENCE_DOCUMENT_TYPE ||
@@ -430,8 +442,8 @@ function Report() {
                 d.documentType?.startsWith("Zoning: ") ||
                 d.documentType?.startsWith("Income: ")),
           ),
-        ),
-      )
+        );
+      })
       .catch((err) => console.error("Could not load uploaded evidence for this property:", err))
       .finally(() => setEvidenceDocsLoaded(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2231,6 +2243,8 @@ function Report() {
                 onAskQuestion={() => Promise.resolve("")}
                 existingProtest={null}
                 resolvedProperty={null}
+                caseDocuments={[]}
+                noticeSignedAt={null}
                 onOpenModule={() => {}}
                 onStartProtest={() => {}}
                 onViewCase={() => {}}
@@ -2305,6 +2319,8 @@ function Report() {
             onAskQuestion={askQuestion}
             existingProtest={existingProtest}
             resolvedProperty={resolvedProperty}
+            caseDocuments={caseDocuments}
+            noticeSignedAt={null}
             onOpenModule={(id) => {
               const target = MODULES.find((mm) => mm.id === id);
               if (target) openModule(target);
@@ -7857,6 +7873,8 @@ function ModulePreviewContent({
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
+  caseDocuments,
+  noticeSignedAt,
   onOpenModule,
   onStartProtest,
   onViewCase,
@@ -7901,6 +7919,10 @@ function ModulePreviewContent({
   // page reload (just switches which module is open in this same modal).
   existingProtest: ProtestRecord | null;
   resolvedProperty: PropertyRecord | null;
+  // Module 10's Full Case Report also reads every property document and
+  // whether the Notice of Protest has been signed.
+  caseDocuments: DocumentRecord[];
+  noticeSignedAt: string | null;
   onOpenModule: (moduleId: string) => void;
   onStartProtest: () => void;
   onViewCase: () => void;
@@ -9414,7 +9436,7 @@ function ModulePreviewContent({
         cta = { label: "Review Case", onClick: onViewCase };
       }
 
-      return (
+      const summaryView = (
         <div className="mt-4 grid gap-4">
           {/* 2. Executive Protest Summary — real numbers only, see
               src/lib/executive-summary.ts for the exact formulas. */}
@@ -9673,6 +9695,103 @@ function ModulePreviewContent({
           </div>
         </div>
       );
+
+      // Module 10 = the consolidated Protest Case Report / playbook. The
+      // Executive Summary tab above is unchanged; the Full Case Report tab
+      // assembles every section deterministically (see src/lib/case-report.ts)
+      // from real case/property/county data + the other modules' outputs.
+      // Only shown when there's a real saved property to build a case around.
+      if (!resolvedProperty) return summaryView;
+      const reportCountyInfo = getCountyProtestInfo(state.cad);
+      const reportGuidance = getCaseGuidance(
+        resolvedProperty,
+        existingProtest ??
+          ({
+            id: "",
+            propertyId: resolvedProperty.id,
+            status: "requested",
+            notes: null,
+            requestedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            originalValue: state.totalValue ?? null,
+            settlementOfferValue: null,
+            settlementOfferReceivedAt: null,
+            hearingDate: null,
+            hearingTime: null,
+            hearingLocation: null,
+            hearingMode: null,
+            informalStatus: "not_requested",
+            informalReviewDate: null,
+            informalAppraiserCategory: null,
+            attendanceType: null,
+            arbDecision: null,
+            arbDecisionDate: null,
+            finalValue: null,
+            escalationPath: null,
+            closedAt: null,
+            taxYear: state.taxYear ?? null,
+            corvusGuidanceAckAt: null,
+          } satisfies ProtestRecord),
+        evidenceDocs.length,
+        reportCountyInfo,
+        noticeSignedAt,
+      );
+      const reportCaseRecordItems = existingProtest
+        ? getCaseRecord(existingProtest, {
+            documents: caseDocuments,
+            hearingNoticeOnFile: !!(existingProtest.hearingLocation || existingProtest.hearingTime),
+            countyCommunicationLogged: false,
+          })
+        : [];
+      const reportInputs: CaseReportInputs = {
+        property: resolvedProperty,
+        protest: existingProtest,
+        countyInfo: reportCountyInfo,
+        guidance: reportGuidance,
+        caseRecordItems: reportCaseRecordItems,
+        preFilingItems,
+        documents: caseDocuments,
+        evidenceChecklist: evidenceItems.map((it) => ({
+          item: it.item,
+          importance: it.importance,
+          availability: it.availability,
+        })),
+        topStrategy: strategyData?.strategies[0]
+          ? {
+              name: strategyData.strategies[0].name,
+              whySelected: strategyData.strategies[0].whySelected,
+            }
+          : null,
+        executive: {
+          recommendedAction: d.recommendedAction,
+          recommendedProtestValue: d.recommendedProtestValue,
+          recommendedProtestValueBasis: d.recommendedProtestValueBasis,
+        },
+        comps: execStats.indicated
+          ? {
+              indicated: execStats.indicated,
+              valuationGapPct: execStats.valuationGapPct,
+              ranked: execStats.ranked.slice(0, 5).map((c) => ({
+                address: c.address,
+                distanceMi: c.distanceMi,
+                marketValue: c.marketValue ?? null,
+              })),
+            }
+          : null,
+        savings:
+          estimated.savings > 0
+            ? {
+                amount: estimated.savings,
+                reductionPct:
+                  state.totalValue && estimated.reduction
+                    ? Math.round((estimated.reduction / state.totalValue) * 100)
+                    : null,
+              }
+            : null,
+        hearingGuide: null,
+        noticeSignedAt,
+      };
+      return <ExecutiveModuleTabs summary={summaryView} reportInputs={reportInputs} />;
     }
   }
 
