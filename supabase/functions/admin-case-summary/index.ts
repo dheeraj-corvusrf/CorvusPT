@@ -8,6 +8,7 @@
 // email, document list), so it's gated the same way admin-create-user /
 // admin-delete-user are.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -66,7 +67,7 @@ Deno.serve(async (req: Request) => {
       systemInstruction: {
         parts: [
           {
-            text: "You are an internal assistant for CorvusPT's property tax protest staff. Given a case's property details, protest status/notes, and uploaded document list, respond with JSON only: {\"summary\": one or two staff-facing sentences on where this case stands, \"nextAction\": a short imperative sentence on what staff should do next, \"evidenceGaps\": an array of short strings naming anything that looks missing or insufficient given the current status (empty array if nothing stands out)}. Be concrete and brief. Do not invent facts not present in the given context.",
+            text: 'You are an internal assistant for CorvusPT\'s property tax protest staff. Given a case\'s property details, protest status/notes, and uploaded document list, respond with JSON only: {"summary": one or two staff-facing sentences on where this case stands, "nextAction": a short imperative sentence on what staff should do next, "evidenceGaps": an array of short strings naming anything that looks missing or insufficient given the current status (empty array if nothing stands out)}. Be concrete and brief. Do not invent facts not present in the given context.',
           },
         ],
       },
@@ -83,14 +84,11 @@ Deno.serve(async (req: Request) => {
       generationConfig: { responseMimeType: "application/json" },
     };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (!res.ok) {
       const text = await res.text();

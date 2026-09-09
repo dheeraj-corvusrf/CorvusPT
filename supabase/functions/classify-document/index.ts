@@ -6,6 +6,8 @@
 // sign-in, matching the app's existing "before you even sign in" design. Known
 // tradeoff: an unauthenticated endpoint calling a rate-limited free API could be
 // abused for quota exhaustion; the client already caps uploads at 15MB.
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -121,14 +123,11 @@ Deno.serve(async (req: Request) => {
       generationConfig: { responseMimeType: "application/json", temperature: 0 },
     };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (!res.ok) {
       const text = await res.text();

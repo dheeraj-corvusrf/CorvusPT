@@ -12,6 +12,8 @@
 // concrete mismatch (no signature visible, a stale-looking year) for the
 // customer to notice before they confirm, same "AI advises, human decides"
 // discipline as every other AI feature in this app.
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -84,14 +86,11 @@ Deno.serve(async (req: Request) => {
       generationConfig: { responseMimeType: "application/json", temperature: 0 },
     };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (!res.ok) {
       const text = await res.text();

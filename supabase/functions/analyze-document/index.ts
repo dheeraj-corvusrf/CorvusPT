@@ -13,6 +13,7 @@
 //  4. writes category/source/ai_verdict/ai_notes/ai_cross_refs/ai_checked_at/
 //     suggested_name back to the row and returns the analysis.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
 
 const corsHeaders = {
@@ -212,10 +213,10 @@ Deno.serve(async (req: Request) => {
       });
     }
     if (blob.size > 18 * 1024 * 1024) {
-      return new Response(
-        JSON.stringify({ error: "File is too large to analyze (over 18 MB)." }),
-        { status: 413, headers: corsHeaders },
-      );
+      return new Response(JSON.stringify({ error: "File is too large to analyze (over 18 MB)." }), {
+        status: 413,
+        headers: corsHeaders,
+      });
     }
     const ext = extOf(doc.file_name);
     const mimeType =
@@ -254,18 +255,15 @@ Deno.serve(async (req: Request) => {
       { inline_data: { mime_type: mimeType, data } },
     ];
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM }] },
-          contents: [{ role: "user", parts }],
-          generationConfig: { responseMimeType: "application/json", temperature: 0 },
-        }),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM }] },
+        contents: [{ role: "user", parts }],
+        generationConfig: { responseMimeType: "application/json", temperature: 0 },
+      }),
+    });
     if (!res.ok) {
       const text = await res.text();
       if (res.status === 429) {
@@ -301,7 +299,10 @@ Deno.serve(async (req: Request) => {
     const modelCrossRefs = strList(parsed.crossRefs, 6, 240);
 
     let suggestedName = str(parsed.suggestedName, 160) ?? "";
-    suggestedName = suggestedName.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+    suggestedName = suggestedName
+      .replace(/[\\/:*?"<>|]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
     if (suggestedName && !suggestedName.toLowerCase().endsWith("." + ext)) {
       suggestedName = suggestedName.replace(/\.[a-z0-9]{1,5}$/i, "") + "." + ext;
     }

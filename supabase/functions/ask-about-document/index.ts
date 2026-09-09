@@ -1,6 +1,7 @@
 // Deploy via CLI: `supabase functions deploy ask-about-document`.
 // Requires the GEMINI_API_KEY secret (shared with classify-document).
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -45,14 +46,11 @@ Deno.serve(async (req: Request) => {
       ],
     };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (!res.ok) {
       const text = await res.text();

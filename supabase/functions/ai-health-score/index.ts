@@ -4,6 +4,7 @@
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions (classify-document, ask-about-document, route-intent).
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { GEMINI_MODEL_REASONING, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -110,11 +111,13 @@ score>}`;
 // (confirmed live: a plain "reply OK" ping ranged from ~2s to 30s+ with
 // nothing on our side to explain the difference — this is external
 // congestion, not something a prompt/config change here can fix outright).
-// 20s bounds the worst case to something the client can retry against
-// instead of waiting forever; on abort this throws a TimeoutError the catch
-// block below turns into a 504 the client already knows to retry (see the
-// 429-retry loop in src/lib/edge-functions.ts, extended to also cover 504).
-const GEMINI_TIMEOUT_MS = 20_000;
+// Bounds the worst case to something the client can retry against instead of
+// waiting forever; on abort this throws a TimeoutError the catch block below
+// turns into a 504 the client already knows to retry (see the 429-retry loop
+// in src/lib/edge-functions.ts, extended to also cover 504). Set to 75s to
+// match ai-report-modules — gemini-3.1-pro-preview runs slower than flash and
+// 45s was clipping calls mid-generation into client-side retry spin.
+const GEMINI_TIMEOUT_MS = 75_000;
 
 class TimeoutError extends Error {}
 
@@ -231,14 +234,11 @@ Deno.serve(async (req: Request) => {
         // Every other AI function here already pins temperature 0 — this one
         // was the outlier. Same input -> same score now.
         temperature: 0,
-        thinkingConfig: { thinkingBudget: 512 },
+        thinkingConfig: { thinkingBudget: 2048 },
       },
     };
 
-    const res = await fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      body,
-    );
+    const res = await fetchWithTimeout(geminiUrl(GEMINI_MODEL_REASONING, apiKey), body);
 
     if (!res.ok) {
       const text = await res.text();

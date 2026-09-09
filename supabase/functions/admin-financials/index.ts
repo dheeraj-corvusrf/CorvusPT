@@ -137,9 +137,7 @@ Deno.serve(async (req: Request) => {
     const { count: signups } = await adminClient
       .from("profiles")
       .select("id", { count: "exact", head: true });
-    const { data: props } = await adminClient
-      .from("properties")
-      .select("subscription_status");
+    const { data: props } = await adminClient.from("properties").select("subscription_status");
     const propsByStatus: Record<string, number> = {};
     for (const p of props ?? []) {
       const s = (p.subscription_status as string | null) ?? "none";

@@ -511,18 +511,26 @@ function AdminPanel() {
 
   return (
     <div className="container-page py-10">
-      <span className="badge-soft">Admin</span>
-      <h1 className="mt-2 font-serif text-3xl font-semibold">Admin</h1>
-      <p className="text-muted-foreground">
-        Users, protest requests, beta signups, and staff activity.
-      </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <span className="badge-soft">Admin</span>
+          <h1 className="mt-2 font-serif text-3xl font-semibold">Admin</h1>
+          <p className="text-muted-foreground">
+            Users, protest requests, beta signups, and staff activity.
+          </p>
+        </div>
+        {/* Nothing on this page updates live — this is the only way to see
+            anything submitted/changed after the page first loaded without a
+            full reload. */}
+        <button type="button" onClick={refreshAll} className="btn-outline shrink-0 text-xs">
+          Refresh
+        </button>
+      </div>
 
-      <div className="mt-6 flex items-center justify-between gap-2 border-b border-border">
-        {/* overflow-y-hidden: `overflow-x: auto` alone computes `overflow-y`
-            to `auto` too, and the buttons' -mb-px spills ~1px past this
-            container — enough for Windows to draw a vertical scrollbar
-            (just its ▲▼ arrows, no thumb). Clip that axis; keep x scrolling. */}
-        <div className="flex gap-1 overflow-x-auto overflow-y-hidden">
+      {/* Tabs wrap on a narrow viewport instead of scrolling — no stray
+          horizontal scrollbar. */}
+      <div className="mt-6 border-b border-border">
+        <div className="flex flex-wrap gap-1">
           {TABS.map((tab) => (
             <button
               key={tab.key}
@@ -541,12 +549,6 @@ function AdminPanel() {
             </button>
           ))}
         </div>
-        {/* Nothing on this page updates live — this is the only way to see
-            anything submitted/changed after the page first loaded without a
-            full reload. */}
-        <button type="button" onClick={refreshAll} className="btn-outline mb-2 shrink-0 text-xs">
-          Refresh
-        </button>
       </div>
 
       {activeTab === "financials" && (
