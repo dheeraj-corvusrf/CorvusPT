@@ -66,6 +66,7 @@ const GROUP_ORDER: CalendarEventType[] = [
   "tax_penalty",
   "refund_expected",
   "bpp_rendition",
+  "reminder",
 ];
 
 function daysUntil(iso: string): number {

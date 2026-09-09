@@ -31,6 +31,7 @@ import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
 import { getPropertyProtestStatus, type ActionStatus } from "@/lib/portfolio-status";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
+import { Modal } from "@/components/Modal";
 import { generateCasePrep } from "@/lib/protest-case";
 import { CopyButton } from "@/components/CopyButton";
 import { ImportPropertiesModal } from "@/components/ImportPropertiesModal";
@@ -75,6 +76,8 @@ function Properties() {
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [subscribing, setSubscribing] = useState<{ propertyId: string; tier: Tier } | null>(null);
+  // The property the "Protest Property" button opened the plan chooser for.
+  const [protestingProperty, setProtestingProperty] = useState<PropertyRecord | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -460,7 +463,6 @@ function Properties() {
               // Beta bypasses per-property billing entirely; every other
               // plan reads this exact property's own real subscription.
               const isPaid = isBeta || p.subscriptionStatus === "active";
-              const bracket = bracketForValue(p.totalValue);
               return (
                 <div
                   key={p.id}
@@ -560,22 +562,13 @@ function Properties() {
                         )
                       )
                     ) : (
-                      (["owner_managed", "corvusrf_managed"] as const).map((tier) => {
-                        const isSubscribingThis =
-                          subscribing?.propertyId === p.id && subscribing.tier === tier;
-                        return (
-                          <button
-                            key={tier}
-                            disabled={!!subscribing}
-                            onClick={() => handleSubscribe(p, tier)}
-                            className="btn-outline disabled:opacity-60"
-                          >
-                            {isSubscribingThis
-                              ? "Redirecting…"
-                              : `Subscribe — ${TIER_LABEL[tier]} $${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}/mo`}
-                          </button>
-                        );
-                      })
+                      <button
+                        onClick={() => setProtestingProperty(p)}
+                        disabled={!!subscribing}
+                        className="btn-primary btn-primary-hover disabled:opacity-60"
+                      >
+                        {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
+                      </button>
                     )}
                     {isPaid && !isBeta && p.cancelAtPeriodEnd && (
                       <button
@@ -628,6 +621,61 @@ function Properties() {
           </div>
         )}
       </div>
+
+      {protestingProperty && (
+        <Modal onClose={() => setProtestingProperty(null)}>
+          <div className="p-6">
+            <h2 className="font-serif text-xl font-bold">Protest this property</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {protestingProperty.address} — choose how you want to run the protest.
+            </p>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    tier: "owner_managed" as const,
+                    tagline:
+                      "You file and attend; Corvus does the AI analysis, the pre-filled forms, the evidence packet, and step-by-step guidance the whole way.",
+                  },
+                  {
+                    tier: "corvusrf_managed" as const,
+                    tagline:
+                      "Corvus handles the filing, the informal negotiation, scheduling, and hearing representation on your behalf.",
+                  },
+                ] as const
+              ).map(({ tier, tagline }) => {
+                const bracket = bracketForValue(protestingProperty.totalValue);
+                const isSubscribingThis =
+                  subscribing?.propertyId === protestingProperty.id && subscribing.tier === tier;
+                return (
+                  <div key={tier} className="flex flex-col rounded-lg border border-border p-4">
+                    <div className="text-sm font-semibold text-foreground">{TIER_LABEL[tier]}</div>
+                    <div className="mt-1 font-serif text-2xl font-bold">
+                      ${formatMoney(TIER_BRACKET_PRICES[tier][bracket])}
+                      <span className="text-sm font-normal text-muted-foreground">/mo</span>
+                    </div>
+                    <p className="mt-2 flex-1 text-xs text-muted-foreground">{tagline}</p>
+                    <button
+                      disabled={!!subscribing}
+                      onClick={async () => {
+                        await handleSubscribe(protestingProperty, tier);
+                        setProtestingProperty(null);
+                      }}
+                      className="btn-primary btn-primary-hover mt-3 disabled:opacity-60"
+                    >
+                      {isSubscribingThis ? "Redirecting…" : `Choose ${TIER_LABEL[tier]}`}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-4 text-[11px] text-muted-foreground">
+              You'll be taken to Stripe to start the subscription for this property. You can cancel
+              anytime from this page.
+            </p>
+          </div>
+        </Modal>
+      )}
 
       {authorizingProperty && user && (
         <ProtestAuthorizationFlow
