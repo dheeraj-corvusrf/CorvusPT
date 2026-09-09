@@ -5,6 +5,7 @@ import { listProperties, type PropertyRecord } from "@/lib/properties";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { CaseDetailView } from "@/components/CaseDetailModal";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LoadingLine } from "@/components/LoadingLine";
 
 // View Case's own page — previously CaseDetailModal opened as an overlay
 // wherever "View Case" was clicked (Properties, the AI Report's case banner,
@@ -83,6 +84,7 @@ function CasePage() {
   if (loading || !user) {
     return (
       <div className="grid gap-2">
+        <LoadingLine text="Loading your case…" className="mb-2 text-sm" />
         <Skeleton className="h-6 w-64" />
         <Skeleton className="h-4 w-48" />
         <Skeleton className="h-40 w-full mt-4" />

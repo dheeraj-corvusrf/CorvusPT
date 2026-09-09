@@ -719,8 +719,8 @@ function TextRow({
           )}
           {value && (
             <p className="mt-1 text-[11px] text-muted-foreground">
-              If this was AI-suggested, it's Corvus's draft from your evidence — review and edit it
-              before signing.
+              If this was AI-suggested, it's Corvus AI's draft from your evidence — review and edit
+              it before signing.
             </p>
           )}
         </div>

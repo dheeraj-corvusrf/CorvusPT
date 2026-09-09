@@ -62,7 +62,7 @@ export function Modal({
           management, hence the same justified exception. */}
       {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
       <div
-        className={`relative overflow-hidden card-elev ${wide ? "w-[75vw] max-w-[75vw]" : "w-full max-w-lg"}`}
+        className={`relative overflow-hidden card-elev ${wide ? "w-[90vw] max-w-5xl" : "w-full max-w-lg"}`}
         onClick={(e) => e.stopPropagation()}
       >
         <Tooltip>
@@ -86,7 +86,9 @@ export function Modal({
             safety net on top of that real fix, not a substitute for it —
             content that still overflows horizontally now clips instead of
             becoming scrollable, which is a much more visible bug to catch. */}
-        <div className="p-6 pr-12 max-h-[90vh] overflow-y-auto overflow-x-hidden">{children}</div>
+        <div className="p-4 pr-11 sm:p-6 sm:pr-12 max-h-[90vh] overflow-y-auto overflow-x-hidden">
+          {children}
+        </div>
       </div>
     </div>,
     document.body,

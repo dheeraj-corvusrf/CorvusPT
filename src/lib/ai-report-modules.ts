@@ -44,6 +44,49 @@ export type ModuleAnalysisInput = {
     saleVerified?: boolean;
   }[];
   compsSubjectValue?: number | null;
+  // Only for "zoning" (Module 6) — the real CAD classification / zoning
+  // string / legal description this app actually has, plus the comps'
+  // classifications and the file names of any zoning docs the user
+  // uploaded. enforceZoningRealData in the edge function gates each of the
+  // four aspects on whether real data for it is present here. See
+  // loadModule()'s zoning branch in ai-report.tsx.
+  zoningData?: {
+    cadClassification: string | null;
+    cadZoning: string | null;
+    legalDescription: string | null;
+    subdivision: string | null;
+    comps: { classification: string | null; zoning: string | null }[];
+    uploadedDocs: string[];
+  };
+  // Only for "income" (Module 7) — the owner-confirmed income figures and the
+  // deterministically-computed EGI/NOI/indicated value from
+  // src/lib/income-approach.ts. The AI layer only *explains* these; it never
+  // produces a revenue, expense, NOI, or cap-rate number. enforceIncomeRealData
+  // in the edge function forces an "inconclusive" verdict when figures or a
+  // cap rate are missing. See loadModule()'s income branch in ai-report.tsx.
+  incomeFigures?: {
+    grossPotentialIncome: number | null;
+    otherIncome: number | null;
+    vacancyPct: number | null;
+    operatingExpenses: number | null;
+    egiComputed: number | null;
+    noiComputed: number | null;
+    opexRatioPct: number | null;
+    rentableSqft: number | null;
+    documentKinds: string[];
+  };
+  capRate?: { pct: number | null; source: "appraisal" | "owner" | null };
+  incomeIndicatedValue?: number | null;
+  cadValue?: number | null;
+  compsIndicatedRange?: { min: number; median: number; max: number } | null;
+  // Only for "executive" — Module 7's real income indication, when the owner
+  // completed it, as a second valuation view alongside compsIndicated.
+  incomeIndicated?: {
+    indicatedValue: number | null;
+    gapPct: number | null;
+    supports: string;
+    confidencePct: number;
+  } | null;
   // Everything below is only for "executive" — real outputs Modules 2/3/8/9
   // already computed (never regenerated), so Module 10 can actually
   // reconcile them instead of writing a recommendation blind to the rest of
@@ -73,6 +116,18 @@ export type ModuleAnalysisInput = {
     savings: number;
     basis: "comps" | "formula";
     reductionPct: number | null;
+    // Module 9's fuller financial-opportunity result (all deterministic —
+    // see src/lib/savings-analysis.ts). Optional so a stale caller still
+    // type-checks; the executive prompt weighs these when present.
+    annualSavings?: number;
+    netBenefit?: number;
+    protestCost?: number;
+    protestCostSource?: "contingency" | "override" | "none";
+    savingsToCostMultiple?: number | null;
+    roiPct?: number | null;
+    indicatedRange?: { low: number; high: number } | null;
+    financialConfidence?: "High" | "Moderate" | "Limited";
+    topScenarioReductionPct?: number;
   } | null;
   // Only present once a real protest case exists for this property (see
   // getPreFilingCheck() in pre-filing-check.ts) — omitted, not fabricated,
@@ -108,7 +163,14 @@ export type ModuleAnalysisInput = {
 };
 
 export type BatchModuleId =
-  "strategy" | "comps" | "site" | "improvement" | "zoning" | "evidence" | "executive";
+  | "strategy"
+  | "comps"
+  | "site"
+  | "improvement"
+  | "zoning"
+  | "income"
+  | "evidence"
+  | "executive";
 
 // One ranked valuation strategy from Module 2 — see StrategyList/StrategyDetail in
 // src/routes/ai-report.tsx and the "strategy" MODULE_SPEC in the edge function.
@@ -216,10 +278,62 @@ export type ModuleResultMap = {
     keyFinding: string;
     priorityScore: number;
   };
+  // Module 6 — the property's CAD Classification / Actual Use / Zoning
+  // District / Permitted Use lined up, with discrepancies kept SEPARATE from
+  // valuation relevance kept separate from the evidence that would
+  // substantiate either. Each aspect's status is server-enforced against the
+  // real data in ModuleAnalysisInput.zoningData (see enforceZoningRealData)
+  // — a mismatch the app can't actually see is never asserted.
   zoning: {
     matches: "consistent" | "inconsistent" | "uncertain";
     assessment: string;
+    category:
+      | "Office"
+      | "Retail"
+      | "Neighborhood Services"
+      | "Commercial"
+      | "Agricultural"
+      | "Rural"
+      | "Non-profit"
+      | "Other";
+    aspects: {
+      label: "CAD Classification" | "Actual Use" | "Zoning District" | "Permitted Use";
+      value: string;
+      status: "Confirmed" | "Partial Data" | "Additional Data Needed";
+      source: string;
+    }[];
+    discrepancies: {
+      between: string;
+      detail: string;
+      confidence: "High" | "Moderate" | "Low";
+    }[];
+    valuationRelevance: string;
+    possibleExemptions: string[];
+    evidenceRequired: string[];
+    restrictions: string;
+    comparableClassifications: string;
+    // Kept for backward-compat with the compact card's "Stated → Typical"
+    // flow; the AI still returns it.
     typicalClassification: string;
+  };
+  // Module 7 — the AI *narrative* layer over the income approach. Every
+  // dollar figure and the cap rate are computed deterministically in
+  // src/lib/income-approach.ts from owner-confirmed data; this only
+  // explains them. supportsCadValue is forced to "inconclusive"
+  // server-side (enforceIncomeRealData) whenever the figures or a cap rate
+  // are missing — the module never fills the gap with a typical number.
+  income: {
+    assessment: string;
+    supportsCadValue: "supports" | "does-not-support" | "inconclusive";
+    cadComparisonNarrative: string;
+    vacancyBasis: string;
+    opexBasis: string;
+    capRateBasis: string;
+    assumptions: string[];
+    sources: string[];
+    confidenceNote: string;
+    missingInformation: string[];
+    lineItemNotes: { line: string; note: string }[];
   };
   evidence: {
     items: {

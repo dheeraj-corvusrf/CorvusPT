@@ -18,6 +18,8 @@
 //
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions.
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -97,6 +99,18 @@ type ModulesInput = {
     savings: number;
     basis: "comps" | "formula";
     reductionPct: number | null;
+    // Module 9's fuller deterministic financial-opportunity result — the
+    // executive module weighs the net benefit / confidence, not just the
+    // gross savings. All optional so a stale caller still parses.
+    annualSavings?: number;
+    netBenefit?: number;
+    protestCost?: number;
+    protestCostSource?: "contingency" | "override" | "none";
+    savingsToCostMultiple?: number | null;
+    roiPct?: number | null;
+    indicatedRange?: { low: number; high: number } | null;
+    financialConfidence?: "High" | "Moderate" | "Limited";
+    topScenarioReductionPct?: number;
   } | null;
   preFilingStatus?: { missingBlocking: string[] } | null;
   // Only for moduleId "site" — real point data the site-gis edge function
@@ -121,6 +135,48 @@ type ModulesInput = {
   // gated on anything (unlike evidenceImages) — always sent for this
   // module.
   economicLifeYears?: { min: number; max: number; typical: number } | null;
+  // Only for moduleId "zoning" (Module 6) — the real CAD classification /
+  // zoning string / legal description this app has, the comps'
+  // classifications, and the file names of any zoning docs the user
+  // uploaded. enforceZoningRealData gates each of the four aspects on
+  // whether real data for it is present here — the AI can't claim an aspect
+  // is "Confirmed" without the underlying value existing.
+  zoningData?: {
+    cadClassification: string | null;
+    cadZoning: string | null;
+    legalDescription: string | null;
+    subdivision: string | null;
+    comps: { classification: string | null; zoning: string | null }[];
+    uploadedDocs: string[];
+  };
+  // Only for moduleId "income" (Module 7) — the owner-confirmed income
+  // figures and the deterministically-computed EGI/NOI/indicated value from
+  // src/lib/income-approach.ts. The AI only *explains* these numbers; it
+  // never produces a revenue, expense, NOI, or cap-rate figure.
+  // enforceIncomeRealData forces an "inconclusive" verdict whenever the core
+  // figures or a cap rate are missing here — the module never fills the gap
+  // with a typical number.
+  incomeFigures?: {
+    grossPotentialIncome: number | null;
+    otherIncome: number | null;
+    vacancyPct: number | null;
+    operatingExpenses: number | null;
+    egiComputed: number | null;
+    noiComputed: number | null;
+    opexRatioPct: number | null;
+    rentableSqft: number | null;
+    documentKinds: string[];
+  };
+  capRate?: { pct: number | null; source: "appraisal" | "owner" | null };
+  incomeIndicatedValue?: number | null;
+  cadValue?: number | null;
+  compsIndicatedRange?: { min: number; median: number; max: number } | null;
+  incomeIndicated?: {
+    indicatedValue: number | null;
+    gapPct: number | null;
+    supports: string;
+    confidencePct: number;
+  } | null;
   // Question-mode fields (see Deno.serve below) — when `question` is set, this
   // request is a Q&A follow-up, not a module-analysis request.
   question?: string;
@@ -152,20 +208,7 @@ module would normally need data this record doesn't include (actual comparable s
 inspection, a building condition survey), give general guidance and a checklist of what to
 gather instead of fabricated specific findings.
 
-Writing style: be precise and concise. Short, direct sentences — lead with the concrete fact
-(the actual number or detail), never a preamble like "based on the provided information" or
-"it should be noted that." Cut hedging and filler ("though a formal analysis should be
-performed once...", "based on this minimal information, there is..."); state a limitation
-plainly, then the specific next step, not wrapped in soft qualifiers. Every sentence must
-carry real information — if a sentence could be deleted without losing a fact, delete it.
-Example of the target density: instead of "The provided record contains only a single total
-assessed value of $3,100,000 for tax year 2026 without any land/improvement breakdown,
-property characteristics, or historical trends. Based on this minimal information, there is
-insufficient evidence to confirm a strong protest opportunity, though a formal equity and
-market comparison should be performed once detailed CAD data is pulled," write "The record
-only shows a 2026 assessed value of $3,100,000, with no land/improvement breakdown, property
-details, or historical data. There is not enough information to confirm a strong protest
-opportunity. A detailed CAD and market/equity analysis is needed."`;
+${PROSE_STYLE}`;
 
 // The 5 fixed valuation strategies Module 2 ranks, 1:1 with the modules that
 // investigate each one (see STRATEGY_MODULE_MAP) — matches the reference design's
@@ -495,6 +538,141 @@ function enforceSiteFactorRealData(
   });
 }
 
+// Module 6 (zoning) — the same honest-data enforcement as Module 4. The app
+// only really has the CAD classification (property type) and, for the
+// TrueProdigy/BIS counties, a zoning string; it can't observe actual use or
+// read a zoning ordinance. So:
+//   - CAD Classification -> "Confirmed" only if the real value exists.
+//   - Zoning District -> "Confirmed" only if a real zoning string exists.
+//   - Actual Use / Permitted Use -> never better than "Partial Data", and
+//     only that when the user uploaded a doc for it; else "Additional Data
+//     Needed".
+// If nothing real is present for any aspect, the module must not assert a
+// mismatch it can't see: force matches -> "uncertain", clear discrepancies,
+// and replace valuationRelevance with an honest "not enough data" line.
+type ZoningResult = {
+  matches: "consistent" | "inconsistent" | "uncertain";
+  aspects: {
+    label: "CAD Classification" | "Actual Use" | "Zoning District" | "Permitted Use";
+    value: string;
+    status: "Confirmed" | "Partial Data" | "Additional Data Needed";
+    source: string;
+  }[];
+  discrepancies: unknown[];
+  valuationRelevance: string;
+};
+
+function enforceZoningRealData(
+  result: ZoningResult,
+  zoningData: ModulesInput["zoningData"],
+): ZoningResult {
+  const hasClass = !!zoningData?.cadClassification?.trim();
+  const hasZoning = !!zoningData?.cadZoning?.trim();
+  const docs = (zoningData?.uploadedDocs ?? []).join(" ").toLowerCase();
+  const uploadedFor = (label: string) => {
+    if (docs.length === 0) return false;
+    if (label === "Actual Use") return /use|lease|photo|occup/.test(docs);
+    if (label === "Permitted Use") return /zon|ordinance|permit|land.?use/.test(docs);
+    return true;
+  };
+
+  const aspects = result.aspects.map((a) => {
+    if (a.label === "CAD Classification") {
+      return hasClass
+        ? { ...a, status: "Confirmed" as const, value: zoningData!.cadClassification!.trim() }
+        : { ...a, status: "Additional Data Needed" as const, source: "Upload your CAD notice" };
+    }
+    if (a.label === "Zoning District") {
+      return hasZoning
+        ? { ...a, status: "Confirmed" as const, value: zoningData!.cadZoning!.trim() }
+        : {
+            ...a,
+            status: "Additional Data Needed" as const,
+            source: "Upload a zoning letter or GIS map",
+          };
+    }
+    // Actual Use / Permitted Use
+    if (uploadedFor(a.label)) {
+      return { ...a, status: a.status === "Confirmed" ? ("Partial Data" as const) : a.status };
+    }
+    return {
+      ...a,
+      status: "Additional Data Needed" as const,
+      source:
+        a.label === "Actual Use"
+          ? "Upload photos, a lease, or use records"
+          : "Upload zoning / land-use documents",
+    };
+  });
+
+  const anyReal = aspects.some((a) => a.status !== "Additional Data Needed");
+  if (!anyReal) {
+    return {
+      ...result,
+      aspects,
+      matches: "uncertain",
+      discrepancies: [],
+      valuationRelevance:
+        "Not enough classification, zoning, or use data on file yet to judge whether there is a discrepancy or any valuation impact.",
+    };
+  }
+  return { ...result, aspects };
+}
+
+// Module 7 (income) — honest-data enforcement, same discipline as Modules
+// 4/5/6. Every dollar figure and the cap rate are computed client-side from
+// owner-confirmed data (src/lib/income-approach.ts). If the core figures or a
+// usable cap rate aren't present in the request, the module must not state a
+// verdict it can't support: force "inconclusive", replace the comparison /
+// cap-rate narrative with an honest "no data yet" line, and make
+// missingInformation the concrete upload list. Also: the verdict can never be
+// non-inconclusive when there is no computed indicated value to compare.
+type IncomeResult = {
+  supportsCadValue: "supports" | "does-not-support" | "inconclusive";
+  cadComparisonNarrative: string;
+  capRateBasis: string;
+  missingInformation: string[];
+  [k: string]: unknown;
+};
+
+function enforceIncomeRealData(result: IncomeResult, input: ModulesInput): IncomeResult {
+  const f = input.incomeFigures;
+  const hasCoreFigures =
+    !!f && f.grossPotentialIncome != null && f.vacancyPct != null && f.operatingExpenses != null;
+  const hasCapRate = !!input.capRate?.pct && input.capRate.pct > 0;
+  const hasIndicated = input.incomeIndicatedValue != null;
+
+  if (hasCoreFigures && hasCapRate && hasIndicated) {
+    // Real data present — trust the parsed narrative, but still never let the
+    // model claim support without a computed value behind it.
+    return result;
+  }
+
+  const needed: string[] = [];
+  if (!hasCoreFigures) {
+    needed.push("Trailing-12 profit & loss / operating statement", "Current rent roll");
+  }
+  if (!hasCapRate) {
+    needed.push("Capitalization rate — a fee appraisal that states one, or your own input");
+  }
+  const existing = new Set((result.missingInformation ?? []).map((s) => s.toLowerCase()));
+  const missingInformation = [
+    ...needed.filter((s) => !existing.has(s.toLowerCase())),
+    ...(result.missingInformation ?? []),
+  ].slice(0, 8);
+
+  return {
+    ...result,
+    supportsCadValue: "inconclusive",
+    cadComparisonNarrative:
+      "The income approach can't be completed yet — upload the financial records and provide a capitalization rate, then this will compare the income-indicated value with the CAD value.",
+    capRateBasis: hasCapRate
+      ? (result.capRateBasis as string)
+      : "No capitalization rate on file yet — upload an appraisal that states one, or enter a rate.",
+    missingInformation,
+  };
+}
+
 // Module 5 (improvement) — the 4 fixed building components, in a fixed
 // order. Same allow-list discipline as SITE_FACTORS: the AI can't omit or
 // invent a row, so the UI's 4-row layout is always stable.
@@ -624,9 +802,9 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "recommendedKeys — most similar by real value/distance/land-size/type differences, most " +
       "reliable source; never pick a comp already marked excluded. (2) For EACH comp key, give a " +
       "verdict of 'use' or 'exclude' and a one-line reason citing only real differences given " +
-      "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use "
-      + "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in "
-      + "the protest hearing. Never invent a property, address, key, or number not given above.",
+      "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use " +
+      "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in " +
+      "the protest hearing. Never invent a property, address, key, or number not given above.",
     schema:
       `{"guidance": "<ONE short sentence, max ~18 words — a headline, the checklist below carries ` +
       `the detail>", "checklist": ["<short item>", ...], "recommendedUse": "<ONE to two short ` +
@@ -765,18 +943,167 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
   },
   zoning: {
     instruction:
-      "Assess whether the stated property type and typical CAD classification appear consistent. " +
-      "Also state, in 2-4 words, what CAD classification would typically be expected for a property " +
-      'like this (e.g. "Commercial - Retail").',
-    schema: `{"matches": "<one of: consistent | inconsistent | uncertain>", "assessment": "<ONE short sentence, max ~18 words>", "typicalClassification": "<2-4 words>"}`,
+      "Line up this property's CAD Classification, Actual Use, Zoning District, and Permitted Use " +
+      "from the real data given (zoningData). Then, keeping THREE things strictly separate: " +
+      "(1) DETECTED DISCREPANCY — describe any mismatch BETWEEN two of the four aspects, factually, " +
+      "with a confidence level; a discrepancy is descriptive only. " +
+      "(2) VALUATION RELEVANCE — a SEPARATE judgement: does the mismatch plausibly bear on value or " +
+      "exemptions? If the impact is unclear or none, say so plainly. A zoning/classification " +
+      "mismatch is NOT by itself evidence of overvaluation — never phrase it as if it were. " +
+      "(3) EVIDENCE REQUIRED — what documents would substantiate the discrepancy or the valuation " +
+      "point (site photos, use/lease records, a zoning verification letter, permit history, etc.). " +
+      "Also: list any exemptions or special-use valuations the owner could raise with the ARB IF " +
+      "requirements are met (agricultural / open-space 1-d-1, special appraisal, non-profit, " +
+      "Freeport, pollution-control) — only where plausibly applicable, empty array otherwise; " +
+      "note any deed / easement / CC&R / development restrictions visible in the data (else say " +
+      "none were found in the data given); comment in one sentence on whether the comparable " +
+      "properties' classifications look consistent with this one; and classify this property into " +
+      "exactly one category. Never invent a zoning code, ordinance, restriction, or use not present " +
+      'in the data. For an aspect with no real value in zoningData, use "—" and status ' +
+      '"Additional Data Needed".',
+    schema:
+      `{"matches": "<consistent | inconsistent | uncertain>", ` +
+      `"assessment": "<ONE short sentence, max ~18 words — the headline verdict>", ` +
+      `"typicalClassification": "<2-4 words, the CAD classification typically expected>", ` +
+      `"category": "<one of: Office | Retail | Neighborhood Services | Commercial | Agricultural | Rural | Non-profit | Other>", ` +
+      `"aspects": [{"label": "<CAD Classification | Actual Use | Zoning District | Permitted Use>", ` +
+      `"value": "<the real value or '—'>", "status": "<Confirmed | Partial Data | Additional Data Needed>", ` +
+      `"source": "<max ~8 words — where this came from, or what to upload>"}] (exactly these 4, in this order), ` +
+      `"discrepancies": [{"between": "<Aspect A ↔ Aspect B>", "detail": "<max ~22 words, factual, no 'therefore overvalued'>", ` +
+      `"confidence": "<High | Moderate | Low>"}] (empty array if none), ` +
+      `"valuationRelevance": "<ONE to two sentences — the SEPARATE value/exemption judgement, or 'No clear valuation impact from classification alone.'>", ` +
+      `"possibleExemptions": ["<short phrase>", ...] (empty if none), ` +
+      `"evidenceRequired": ["<short phrase>", ...], ` +
+      `"restrictions": "<one sentence on deed/easement/CC&R/development restrictions in the data, or 'None found in the data given.'>", ` +
+      `"comparableClassifications": "<ONE sentence on comp classification consistency>"}`,
     parse: (p) => {
-      const matches = typeof p.matches === "string" ? p.matches : "";
+      const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fb: T): T =>
+        typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fb;
+      const ASPECT_LABELS = [
+        "CAD Classification",
+        "Actual Use",
+        "Zoning District",
+        "Permitted Use",
+      ] as const;
+      const rawAspects = Array.isArray(p.aspects) ? p.aspects : [];
+      const aspects = ASPECT_LABELS.map((label) => {
+        const found = rawAspects.find(
+          (a): a is Record<string, unknown> =>
+            typeof a === "object" && a !== null && a.label === label,
+        );
+        return {
+          label,
+          value: str(found?.value, 80) || "—",
+          status: oneOf(
+            found?.status,
+            ["Confirmed", "Partial Data", "Additional Data Needed"] as const,
+            "Additional Data Needed",
+          ),
+          source: str(found?.source, 80),
+        };
+      });
+      const discrepancies = (Array.isArray(p.discrepancies) ? p.discrepancies : [])
+        .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
+        .map((d) => ({
+          between: str(d.between, 60),
+          detail: str(d.detail, 200),
+          confidence: oneOf(d.confidence, ["High", "Moderate", "Low"] as const, "Low"),
+        }))
+        .filter((d) => d.between.length > 0)
+        .slice(0, 4);
       return {
-        matches: (["consistent", "inconsistent", "uncertain"].includes(matches)
-          ? matches
-          : "uncertain") as "consistent" | "inconsistent" | "uncertain",
+        matches: oneOf(
+          p.matches,
+          ["consistent", "inconsistent", "uncertain"] as const,
+          "uncertain",
+        ),
         assessment: str(p.assessment, 160),
         typicalClassification: str(p.typicalClassification, 40),
+        category: oneOf(
+          p.category,
+          [
+            "Office",
+            "Retail",
+            "Neighborhood Services",
+            "Commercial",
+            "Agricultural",
+            "Rural",
+            "Non-profit",
+            "Other",
+          ] as const,
+          "Other",
+        ),
+        aspects,
+        discrepancies,
+        valuationRelevance: str(p.valuationRelevance, 400),
+        possibleExemptions: strList(p.possibleExemptions, 5, 120),
+        evidenceRequired: strList(p.evidenceRequired, 6, 120),
+        restrictions: str(p.restrictions, 300),
+        comparableClassifications: str(p.comparableClassifications, 240),
+      };
+    },
+  },
+  income: {
+    instruction:
+      "You are given a commercial property's OWNER-CONFIRMED income figures and the " +
+      "already-computed EGI, NOI, and income-approach indicated value (all in the record above, " +
+      "under 'Income approach'). DO NOT recompute or invent ANY number — no revenue, expense, " +
+      "vacancy rate, NOI, or capitalization rate. Your job is to EXPLAIN the figures given. " +
+      "State the basis for the vacancy percentage used, and say whether the operating-expense " +
+      "ratio looks typical for this property type (general appraisal knowledge only — never cite " +
+      "a specific comparable figure you were not given). State where the cap rate came from " +
+      "(owner-entered vs an appraisal) and, if you know a typical market range for this property " +
+      "type and region as general knowledge, give it as context only. Compare the indicated " +
+      "value to the CAD value and, if a comparable-sales range is given, to that range; then " +
+      "classify support as exactly one of: supports (income indicated value is at or above the " +
+      "CAD value), does-not-support (income indicates a materially lower value than the CAD), " +
+      "inconclusive. List the key assumptions made, the data sources used, an honest one-line " +
+      "confidence note, and the specific additional documents that would materially improve this " +
+      "analysis. If the record says the figures or the cap rate are missing, set supportsCadValue " +
+      "to 'inconclusive', keep every narrative field brief, and put the needed documents in " +
+      "missingInformation — never fill a gap with a typical number.",
+    schema:
+      `{"assessment": "<ONE short sentence, max ~18 words — the headline verdict>", ` +
+      `"supportsCadValue": "<supports | does-not-support | inconclusive>", ` +
+      `"cadComparisonNarrative": "<1-2 sentences comparing the income indicated value to the CAD ` +
+      `value (and comps range if given); no restating raw numbers the tiles already show>", ` +
+      `"vacancyBasis": "<max ~20 words — basis for the vacancy % used, or 'Owner-provided; no ` +
+      `market basis on file.'>", ` +
+      `"opexBasis": "<max ~24 words — whether the operating-expense ratio looks typical for this ` +
+      `property type>", ` +
+      `"capRateBasis": "<max ~24 words — where the cap rate came from and any general market-range ` +
+      `context>", ` +
+      `"assumptions": ["<short phrase>", ...] (max 8, empty if none), ` +
+      `"sources": ["<short phrase>", ...] (max 8), ` +
+      `"confidenceNote": "<ONE short sentence on data quality/completeness>", ` +
+      `"missingInformation": ["<short phrase>", ...] (max 8), ` +
+      `"lineItemNotes": [{"line": "<Gross Potential Income | Vacancy | Effective Gross Income | ` +
+      `Operating Expenses | Net Operating Income | Cap Rate | Indicated Value>", "note": "<max ` +
+      `~18 words>"}, ...] (only where a note adds something, max 8)}`,
+    parse: (p) => {
+      const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fb: T): T =>
+        typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fb;
+      const lineItemNotes = (Array.isArray(p.lineItemNotes) ? p.lineItemNotes : [])
+        .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
+        .map((x) => ({ line: str(x.line, 40), note: str(x.note, 160) }))
+        .filter((x) => x.line.length > 0 && x.note.length > 0)
+        .slice(0, 8);
+      return {
+        assessment: str(p.assessment, 160),
+        supportsCadValue: oneOf(
+          p.supportsCadValue,
+          ["supports", "does-not-support", "inconclusive"] as const,
+          "inconclusive",
+        ),
+        cadComparisonNarrative: str(p.cadComparisonNarrative, 400),
+        vacancyBasis: str(p.vacancyBasis, 200),
+        opexBasis: str(p.opexBasis, 240),
+        capRateBasis: str(p.capRateBasis, 240),
+        assumptions: strList(p.assumptions, 8, 140),
+        sources: strList(p.sources, 8, 120),
+        confidenceNote: str(p.confidenceNote, 220),
+        missingInformation: strList(p.missingInformation, 8, 140),
+        lineItemNotes,
       };
     },
   },
@@ -1033,13 +1360,74 @@ function buildRecord(input: ModulesInput): string {
         ". Use this exact range — never invent a different indicated value.",
     );
   }
+  if (input.moduleId === "income" && input.incomeFigures) {
+    const f = input.incomeFigures;
+    const money = (v: number | null | undefined) =>
+      v != null ? `$${Math.round(v).toLocaleString()}` : "not provided";
+    const capPct = input.capRate?.pct;
+    lines.push(
+      `Income approach — OWNER-CONFIRMED figures and deterministically-computed results (do NOT ` +
+        `recompute or invent any of these):\n` +
+        `- Gross potential income (annual): ${money(f.grossPotentialIncome)}\n` +
+        `- Other income (annual): ${money(f.otherIncome)}\n` +
+        `- Vacancy / collection loss: ${f.vacancyPct != null ? `${f.vacancyPct}%` : "not provided"}\n` +
+        `- Operating expenses (annual): ${money(f.operatingExpenses)}` +
+        (f.opexRatioPct != null ? ` (${f.opexRatioPct}% of EGI)` : "") +
+        `\n` +
+        `- Effective gross income (computed): ${money(f.egiComputed)}\n` +
+        `- Net operating income (computed): ${money(f.noiComputed)}\n` +
+        `- Capitalization rate: ${capPct ? `${capPct}%` : "NOT PROVIDED"}` +
+        (input.capRate?.source ? ` (source: ${input.capRate.source})` : "") +
+        `\n` +
+        `- Income-approach indicated value (NOI ÷ cap rate): ${money(input.incomeIndicatedValue)}\n` +
+        `- Current CAD assessed value: ${money(input.cadValue)}` +
+        (input.compsIndicatedRange
+          ? `\n- Market Value module's comparable-sales range: $${Math.round(
+              input.compsIndicatedRange.min,
+            ).toLocaleString()}-$${Math.round(
+              input.compsIndicatedRange.max,
+            ).toLocaleString()} (median $${Math.round(
+              input.compsIndicatedRange.median,
+            ).toLocaleString()})`
+          : "") +
+        (f.rentableSqft != null ? `\n- Rentable area: ${f.rentableSqft.toLocaleString()} SF` : "") +
+        (f.documentKinds.length > 0
+          ? `\n- Source documents provided: ${f.documentKinds.join(", ")}`
+          : `\n- No source documents provided yet.`),
+    );
+  }
+  if (input.moduleId === "executive" && input.incomeIndicated?.indicatedValue != null) {
+    const i = input.incomeIndicated;
+    lines.push(
+      `The Income Value module's real income-approach analysis indicates a value of ` +
+        `$${Math.round(i.indicatedValue!).toLocaleString()}` +
+        (i.gapPct != null
+          ? `, ${i.gapPct > 0 ? "below" : "at or above"} the CAD value by ${Math.abs(i.gapPct)}%`
+          : "") +
+        ` (${i.supports}, ${i.confidencePct}/100 confidence). Weigh this alongside the ` +
+        `comparable-sales indication — use this exact figure, never invent a different one.`,
+    );
+  }
   if (input.financialSummary) {
     const f = input.financialSummary;
+    const m = (v: number | undefined) => (v != null ? `$${Math.round(v).toLocaleString()}` : null);
     lines.push(
       `The Estimated Savings module already calculated a real potential annual tax savings of ` +
         `$${f.savings.toLocaleString()} (${f.basis === "comps" ? "based on real comparable properties" : "based on real county/category adjustments"}` +
         (f.reductionPct != null ? `, ${f.reductionPct}% value reduction` : "") +
-        "). Use this exact figure — never recalculate or invent a different savings number.",
+        (m(f.netBenefit)
+          ? `; after an estimated protest cost of ${m(f.protestCost)} (${f.protestCostSource ?? "estimated"}), the net benefit is ${m(f.netBenefit)}` +
+            (f.savingsToCostMultiple != null
+              ? `, a ${f.savingsToCostMultiple}x savings-to-cost multiple`
+              : "") +
+            (f.roiPct != null ? `, ${f.roiPct}% ROI` : "")
+          : "") +
+        (f.indicatedRange
+          ? `; comparable-sales indicated value range ${m(f.indicatedRange.low)}-${m(f.indicatedRange.high)}`
+          : "") +
+        (f.financialConfidence ? `; financial confidence ${f.financialConfidence}` : "") +
+        `). Use these exact figures — never recalculate or invent a different savings number. ` +
+        `Weigh the net benefit and financial confidence, not just the gross savings.`,
     );
   }
   if (input.preFilingStatus) {
@@ -1281,6 +1669,23 @@ Deno.serve(async (req: Request) => {
           evidenceParts.length > 0,
           Array.isArray(input.notApplicableComponents) ? input.notApplicableComponents : [],
         );
+    }
+    // Real-data enforcement for Module 6 — see enforceZoningRealData. Runs
+    // here (not in spec.parse) because only the handler has input.zoningData.
+    if (input.moduleId === "zoning") {
+      const z = enforceZoningRealData(result as ZoningResult, input.zoningData);
+      (result as ZoningResult).aspects = z.aspects;
+      (result as ZoningResult).matches = z.matches;
+      (result as ZoningResult).discrepancies = z.discrepancies;
+      (result as ZoningResult).valuationRelevance = z.valuationRelevance;
+    }
+    // Real-data enforcement for Module 7 — see enforceIncomeRealData. The AI
+    // never produces a dollar figure or cap rate; when the owner-confirmed
+    // figures or a cap rate are missing, the verdict is forced to
+    // "inconclusive" and the narrative replaced with an honest "no data yet"
+    // line. Runs here because only the handler has input.incomeFigures.
+    if (input.moduleId === "income") {
+      Object.assign(result as IncomeResult, enforceIncomeRealData(result as IncomeResult, input));
     }
     // Real-data enforcement for Module 3 — the model can only ever recommend
     // or judge a comp that was actually sent to it. Clamp every key it

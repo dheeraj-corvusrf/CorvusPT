@@ -13,6 +13,7 @@
 //  4. writes category/source/ai_verdict/ai_notes/ai_cross_refs/ai_checked_at/
 //     suggested_name back to the row and returns the analysis.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -87,7 +88,9 @@ Rules:
 - "crossRefs" is [] when nothing is notable.
 - Plain prose only, no markdown.
 - Naming standard for "suggestedName": "<Category words> - <Acct NUMBER, or a short address if there is no account number> - <tax year, or Mon YYYY>.<ext>". Examples: "Appraisal Notice - Acct 2748399 - 2026.pdf", "Evidence - 705 State Hwy 352 - Aug 2026.jpg", "Signed Agreement - Acct 34086 - 2026.pdf".
-- If the file is not a property-tax-related document at all (a random photo, an unrelated file), use category "other", say so in "whatItIs", and add a concern.`;
+- If the file is not a property-tax-related document at all (a random photo, an unrelated file), use category "other", say so in "whatItIs", and add a concern.
+
+${PROSE_STYLE}`;
 
 const norm = (v: string | null | undefined) => (v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 const toNum = (v: unknown): number | null => {

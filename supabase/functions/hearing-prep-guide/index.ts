@@ -19,6 +19,8 @@
 //    comps/case numbers given, but is free text (like every other
 //    guidance field this app's AI functions return) — same discipline as
 //    informal-review-guidance's requestedValueGuidance.
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -36,7 +38,9 @@ Rules:
 - Every section should reference REAL specifics from the input (the real address, real evidence file names, real comp addresses/values when given) rather than generic advice that could apply to any hearing.
 - Never guarantee, promise, or imply a specific outcome or reduction — describe this as what the evidence supports, not what will happen.
 - Plain prose in free-text fields, no markdown. Arrays should have 2-6 short, concrete items each, never empty unless there is genuinely nothing real to say.
-- Return ONLY a JSON object with this exact shape: {"hearingSummary":<string>,"evidencePacketNote":<string>,"beforeHearing":{"whatToReview":[<string>,...],"documentsToHaveReady":[<string>,...],"valueToRequest":<string>,"keyEvidence":[<string>,...],"howToOrganize":<string>,"questionPrep":<string>},"duringHearing":{"openingStatement":<string>,"valueExplanation":<string>,"comparableEvidencePresentation":<string>,"conditionArguments":<string>,"requestedValue":<string>,"closingStatement":<string>},"propertySpecificArguments":[<string>,...],"questionsToAsk":[<string>,...],"questionsArbMayAsk":[<string>,...],"weaknessesAndRisks":[<string>,...],"documentsToHave":[<string>,...],"submissionInstructions":<string>,"countyContact":<string>,"hearingLogistics":<string>}`;
+- Return ONLY a JSON object with this exact shape: {"hearingSummary":<string>,"evidencePacketNote":<string>,"beforeHearing":{"whatToReview":[<string>,...],"documentsToHaveReady":[<string>,...],"valueToRequest":<string>,"keyEvidence":[<string>,...],"howToOrganize":<string>,"questionPrep":<string>},"duringHearing":{"openingStatement":<string>,"valueExplanation":<string>,"comparableEvidencePresentation":<string>,"conditionArguments":<string>,"requestedValue":<string>,"closingStatement":<string>},"propertySpecificArguments":[<string>,...],"questionsToAsk":[<string>,...],"questionsArbMayAsk":[<string>,...],"weaknessesAndRisks":[<string>,...],"documentsToHave":[<string>,...],"submissionInstructions":<string>,"countyContact":<string>,"hearingLogistics":<string>}
+
+${PROSE_STYLE}`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

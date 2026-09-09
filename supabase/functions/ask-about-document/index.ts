@@ -1,5 +1,7 @@
 // Deploy via CLI: `supabase functions deploy ask-about-document`.
 // Requires the GEMINI_API_KEY secret (shared with classify-document).
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -27,7 +29,7 @@ Deno.serve(async (req: Request) => {
       systemInstruction: {
         parts: [
           {
-            text: 'You are CorvusPT\'s Texas property tax assistant. Answer briefly and accurately. If unsure, say so. Do not invent numbers. Be precise and concise — short, direct sentences, no preamble like "based on the provided information," no hedging filler. Every sentence must carry real information. Respond in plain text only — no markdown, no asterisks, no bullet points or numbered lists, no headers.',
+            text: `You are CorvusPT's Texas property tax assistant. Answer briefly and accurately. If unsure, say so. Do not invent numbers. Respond in plain text only — no markdown, no asterisks, no bullet points or numbered lists, no headers.\n\n${PROSE_STYLE}`,
           },
         ],
       },

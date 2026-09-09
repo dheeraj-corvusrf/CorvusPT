@@ -14,6 +14,8 @@
 // real countyReference.arbContact.email the caller already has on file
 // (see county-protest-info.ts), so a drafted email is only ever offered
 // when addressed to a real, verified address, never one the model invents.
+import { PROSE_STYLE } from "../_shared/prose-style.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -43,7 +45,9 @@ Rules:
 - respondingToProposedValue: how to evaluate whether a proposed value is a reasonable outcome vs. worth continuing to a formal hearing.
 - acceptingEndsCase: state plainly whether accepting an informal proposed value ends the case (in Texas, accepting an informal settlement typically withdraws the formal protest) or requires an additional step.
 - Plain prose only — no markdown, no bullet characters inside string fields (use the array fields for lists).
-- Return ONLY a JSON object matching this exact shape: {"available":"<Yes|No|Unclear>","appraiserCategory":"<one of: Land Appraiser | Improvement Appraiser | Commercial Appraiser | Retail Appraiser | Office Appraiser | Daycare/School Appraiser | Other>","whoToContact":"<string>","howToRequest":"<string>","documentsToProvide":[<string>, ...],"requestedValueGuidance":"<string>","evidenceToUse":[<string>, ...],"whatToSay":"<string>","whatNotToSay":"<string>","respondingToProposedValue":"<string>","acceptingEndsCase":"<string>","draftEmailSubject":"<string, only if an email address was given below — otherwise empty string>","draftEmailBody":"<string, only if an email address was given below — otherwise empty string, written in the property owner's own voice, referencing the real address/account number/tax year/requested value given below>"}`;
+- Return ONLY a JSON object matching this exact shape: {"available":"<Yes|No|Unclear>","appraiserCategory":"<one of: Land Appraiser | Improvement Appraiser | Commercial Appraiser | Retail Appraiser | Office Appraiser | Daycare/School Appraiser | Other>","whoToContact":"<string>","howToRequest":"<string>","documentsToProvide":[<string>, ...],"requestedValueGuidance":"<string>","evidenceToUse":[<string>, ...],"whatToSay":"<string>","whatNotToSay":"<string>","respondingToProposedValue":"<string>","acceptingEndsCase":"<string>","draftEmailSubject":"<string, only if an email address was given below — otherwise empty string>","draftEmailBody":"<string, only if an email address was given below — otherwise empty string, written in the property owner's own voice, referencing the real address/account number/tax year/requested value given below>"}
+
+${PROSE_STYLE}`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

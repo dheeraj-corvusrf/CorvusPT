@@ -26,6 +26,10 @@ import {
   ArrowDown,
   ChevronDown,
   Upload,
+  User,
+  Cpu,
+  Scale,
+  Gauge,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -42,6 +46,7 @@ import {
   ScatterChart,
   Scatter,
   ReferenceLine,
+  CartesianGrid,
 } from "recharts";
 import {
   readIntake,
@@ -88,6 +93,17 @@ import {
   type ComparableStats,
 } from "@/lib/comps-analysis";
 import { estimateSavings } from "@/lib/savings-estimate";
+import {
+  computeSavingsAnalysis,
+  EMPTY_TAX_INPUTS,
+  type SavingsAnalysis,
+  type SavingsTaxInputs,
+} from "@/lib/savings-analysis";
+import {
+  getSavingsTaxInputs,
+  upsertSavingsTaxInputs,
+  type SavingsTaxInputsInput,
+} from "@/lib/savings-tax-inputs";
 import { getExecutiveSummary, getDefenseReadinessScore } from "@/lib/executive-summary";
 import {
   getPreFilingCheck,
@@ -136,8 +152,24 @@ import {
   type CompSelectionInput,
   type CompSaleExtraction,
 } from "@/lib/comp-selections";
+import {
+  computeIncomeApproach,
+  incomeSupportsCad,
+  type IncomeApproach,
+  type IncomeFigures,
+} from "@/lib/income-approach";
+import {
+  getIncomeAnalysis,
+  upsertIncomeAnalysis,
+  extractIncomeFinancials,
+  type IncomeAnalysis,
+  type IncomeAnalysisInput,
+  type IncomeExtraction,
+} from "@/lib/income-analysis";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { LoadingLine } from "@/components/LoadingLine";
+import { PropertyImage } from "@/components/PropertyImage";
 import { ValueHistorySection } from "@/components/ValueHistorySection";
 import { Modal } from "@/components/Modal";
 
@@ -300,6 +332,11 @@ function Report() {
   // (same pattern as `overrides` above) and re-runs the comps AI so its
   // per-comp verdicts stay consistent with the set the user actually kept.
   const [compSelections, setCompSelections] = useState<CompSelection[]>([]);
+  // Module 7 (Income Value) — the owner-confirmed income figures for this
+  // property (see income-analysis.ts). Loaded once per property; every save is
+  // optimistic and re-runs the income AI narrative + its dependents. null
+  // until the owner has provided anything.
+  const [incomeAnalysis, setIncomeAnalysis] = useState<IncomeAnalysis | null>(null);
 
   useEffect(() => {
     const s = readIntake();
@@ -351,7 +388,9 @@ function Report() {
               (d.useAsEvidence === true ||
                 d.documentType === EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
-                d.documentType?.startsWith("Strategy Evidence: ")),
+                d.documentType?.startsWith("Strategy Evidence: ") ||
+                d.documentType?.startsWith("Zoning: ") ||
+                d.documentType?.startsWith("Income: ")),
           ),
         ),
       )
@@ -372,6 +411,155 @@ function Report() {
       .then(setCompSelections)
       .catch((err) => console.error("Could not load comp selections for this property:", err));
   }, [resolvedProperty]);
+
+  useEffect(() => {
+    if (!resolvedProperty) {
+      setIncomeAnalysis(null);
+      return;
+    }
+    getIncomeAnalysis(resolvedProperty.id)
+      .then(setIncomeAnalysis)
+      .catch((err) => console.error("Could not load income analysis for this property:", err));
+  }, [resolvedProperty]);
+
+  // Which Module-7 source documents the owner has uploaded, by kind — drives
+  // the Data Availability panel and the deterministic confidence bump.
+  const incomeDocKinds = useMemo(() => {
+    const kinds = new Set<string>();
+    for (const d of evidenceDocs) {
+      const m = d.documentType?.match(/^Income:\s*(.+)$/);
+      if (m) kinds.add(m[1].trim());
+    }
+    return [...kinds];
+  }, [evidenceDocs]);
+
+  // Deterministic income-approach math (src/lib/income-approach.ts) — NEVER an
+  // AI value. The AI layer (moduleData.income) only explains these numbers.
+  const incomeFigures = useMemo<IncomeFigures>(
+    () => ({
+      grossPotentialIncome: incomeAnalysis?.grossPotentialIncome ?? null,
+      otherIncome: incomeAnalysis?.otherIncome ?? null,
+      vacancyPct: incomeAnalysis?.vacancyPct ?? null,
+      operatingExpenses: incomeAnalysis?.operatingExpenses ?? null,
+      noiStated: incomeAnalysis?.noiStated ?? null,
+      rentableSqft: incomeAnalysis?.rentableSqft ?? null,
+      capRatePct: incomeAnalysis?.capRatePct ?? null,
+      capRateSource: incomeAnalysis?.capRateSource ?? null,
+      documentKinds: incomeDocKinds,
+    }),
+    [incomeAnalysis, incomeDocKinds],
+  );
+  const incomeComputed = useMemo<IncomeApproach>(
+    () => computeIncomeApproach(incomeFigures, state.totalValue ?? null),
+    [incomeFigures, state.totalValue],
+  );
+
+  // Re-run Module 7's AI narrative (and its dependents) whenever the
+  // owner-confirmed figures change — keyed on a stable digest so this fires
+  // on the render AFTER the figures actually update, with a fresh
+  // incomeComputed, rather than from saveIncomeAnalysis's stale closure.
+  // Same "never a cold fetch" rule as everywhere else: only when the module
+  // is open or has already run.
+  const incomeReloadKey = incomeComputed.dataComplete
+    ? [
+        incomeComputed.gpi,
+        incomeComputed.otherIncome,
+        incomeComputed.vacancyPct,
+        incomeComputed.operatingExpenses,
+        incomeComputed.noiStated,
+        incomeComputed.capRatePct,
+        incomeComputed.capRateSource,
+        incomeDocKinds.join(","),
+      ].join("|")
+    : "";
+  const incomeLoadedKeyRef = useRef<string>("");
+  useEffect(() => {
+    if (!incomeReloadKey) return;
+    const alreadyRan = !!(moduleData.income?.data || moduleData.income?.error);
+    if (openId !== "income" && !alreadyRan) return; // never a cold fetch
+    if (incomeLoadedKeyRef.current === incomeReloadKey) return; // already loaded for these figures
+    incomeLoadedKeyRef.current = incomeReloadKey;
+    loadModule("income", { force: true });
+    reloadDependentModules("income");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomeReloadKey, openId]);
+
+  // Re-run Module 2 whenever a per-strategy evidence doc is added (from the
+  // card's "Data Needed" upload chip or the modal's StrategyDetail), on the
+  // render after evidenceDocs updates so loadModule sees the new file. Only
+  // when Module 2 has already run — never a cold fetch. Starts from the
+  // mount count so an initial load doesn't re-trigger it.
+  const strategyEvidenceCount = evidenceDocs.filter((d) =>
+    d.documentType?.startsWith("Strategy Evidence: "),
+  ).length;
+  const strategyEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (strategyEvidenceSeenRef.current === null) {
+      strategyEvidenceSeenRef.current = strategyEvidenceCount;
+      return;
+    }
+    if (strategyEvidenceCount <= strategyEvidenceSeenRef.current) {
+      strategyEvidenceSeenRef.current = strategyEvidenceCount;
+      return;
+    }
+    strategyEvidenceSeenRef.current = strategyEvidenceCount;
+    if (moduleData.strategy?.data || moduleData.strategy?.error) {
+      loadModule("strategy", { force: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyEvidenceCount]);
+
+  // Same, for Module 5 (Improvement Condition) — a photo uploaded from the
+  // card's per-component control (tagged EVIDENCE_DOCUMENT_TYPE) re-runs the
+  // condition assessment + its dependents.
+  const improvementEvidenceCount = evidenceDocs.filter(
+    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE,
+  ).length;
+  const improvementEvidenceSeenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (improvementEvidenceSeenRef.current === null) {
+      improvementEvidenceSeenRef.current = improvementEvidenceCount;
+      return;
+    }
+    if (improvementEvidenceCount <= improvementEvidenceSeenRef.current) {
+      improvementEvidenceSeenRef.current = improvementEvidenceCount;
+      return;
+    }
+    improvementEvidenceSeenRef.current = improvementEvidenceCount;
+    if (moduleData.improvement?.data || moduleData.improvement?.error) {
+      loadModule("improvement", { force: true });
+      reloadDependentModules("improvement");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [improvementEvidenceCount]);
+
+  // Save owner-confirmed income figures. Optimistic; the effect above then
+  // re-runs Module 7 with the fresh numbers. The form always sends the
+  // complete field set (values or explicit null), so this is a passthrough.
+  async function saveIncomeAnalysis(input: IncomeAnalysisInput) {
+    if (!user || !resolvedProperty) return;
+    setIncomeAnalysis({
+      grossPotentialIncome: input.grossPotentialIncome ?? null,
+      otherIncome: input.otherIncome ?? null,
+      vacancyPct: input.vacancyPct ?? null,
+      operatingExpenses: input.operatingExpenses ?? null,
+      noiStated: input.noiStated ?? null,
+      rentableSqft: input.rentableSqft ?? null,
+      capRatePct: input.capRatePct ?? null,
+      capRateSource: input.capRateSource ?? null,
+      sourceDocumentIds: input.sourceDocumentIds ?? [],
+      notes: input.notes ?? null,
+      updatedAt: new Date().toISOString(),
+    });
+    try {
+      await upsertIncomeAnalysis(user.id, resolvedProperty.id, input);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      getIncomeAnalysis(resolvedProperty.id)
+        .then(setIncomeAnalysis)
+        .catch(() => {});
+    }
+  }
 
   // Include/exclude a comp, or save a hand-added / document-extracted comp.
   // Optimistic local update, then re-run Module 3's AI so recommendedKeys /
@@ -461,8 +649,8 @@ function Report() {
   function reloadDependentModules(moduleId: string) {
     const dependents =
       moduleId === "income"
-        ? ["strategy", "executive"]
-        : moduleId === "site" || moduleId === "improvement"
+        ? ["strategy", "evidence", "executive"]
+        : moduleId === "site" || moduleId === "improvement" || moduleId === "zoning"
           ? [moduleId, "strategy", "evidence", "executive"]
           : [moduleId];
     for (const id of dependents) {
@@ -654,6 +842,14 @@ function Report() {
     return await extractCompSale(doc.id);
   }
 
+  // Module 7 — read one already-uploaded income document (tagged "Income: …"
+  // via onUploadEvidence) with extract-income-financials and hand the pulled
+  // figures back to IncomeFiguresForm to pre-fill. Nothing is saved until the
+  // owner confirms the form.
+  async function extractIncome(documentId: string) {
+    return await extractIncomeFinancials(documentId);
+  }
+
   // Free-text fallback for Module 2's per-strategy evidence gate (see
   // StrategyDetail) — persisted the same way the rest of intake state is, via
   // sessionStorage, so it survives a refresh but never leaves the browser.
@@ -685,6 +881,11 @@ function Report() {
     // No AI call backs this module anymore — it renders straight from the
     // deterministic `estimated` value (see estimateSavings() above).
     if (id === "savings") return;
+    // Module 7 only runs its AI narrative once the owner has provided enough
+    // real figures to build the NOI ladder — before that there's nothing to
+    // explain, and the module stays "Additional Data Needed" (no token spend,
+    // and the eager-load effect already skips it via requiresUserData).
+    if (id === "income" && !incomeComputed.dataComplete) return;
     const existing = moduleData[id];
     if ((existing && (existing.loading || (existing.data && !opts?.force))) || !state.totalValue)
       return;
@@ -742,6 +943,37 @@ function Report() {
       const improvementNA = itemsNotApplicable(overrides, "improvement");
       if (improvementNA.length > 0) {
         context.push(`Improvement Condition: no photo available for ${improvementNA.join(", ")}.`);
+      }
+      // Module 6's finding flows downstream — comps selection, strategy
+      // ranking, evidence needs, and the executive recommendation should all
+      // be aware of a zoning/classification discrepancy and, separately,
+      // whether it has valuation relevance.
+      const zoningData = moduleData.zoning?.data as ModuleResultMap["zoning"] | undefined;
+      if (zoningData) {
+        const disc = zoningData.discrepancies[0]?.detail ?? "none detected";
+        const exempt =
+          zoningData.possibleExemptions.length > 0
+            ? zoningData.possibleExemptions.join("; ")
+            : "none";
+        context.push(
+          `Zoning & Classification (Module 6): classification looks ${zoningData.matches}. ` +
+            `Detected discrepancy: ${disc}. Valuation relevance (separate): ${zoningData.valuationRelevance} ` +
+            `Possible exemptions to raise with the ARB: ${exempt}.`,
+        );
+      }
+      // Module 7's income indication flows downstream too — every figure here
+      // is the deterministic result from income-approach.ts, not an AI value.
+      if (incomeComputed.complete && incomeComputed.indicatedValue != null) {
+        const gap = incomeComputed.gapPct;
+        const dir =
+          gap == null ? "" : gap > 0 ? `${Math.abs(gap)}% below` : `${Math.abs(gap)}% above`;
+        context.push(
+          `Income Approach (Module 7): NOI $${Math.round(incomeComputed.noi ?? 0).toLocaleString()} ` +
+            `÷ cap rate ${incomeComputed.capRatePct}% = indicated value ` +
+            `$${incomeComputed.indicatedValue.toLocaleString()}` +
+            (dir ? `, which is ${dir} the CAD value` : "") +
+            `. Cap-rate source: ${incomeComputed.capRateSource === "appraisal" ? "an appraisal" : "owner-entered"}.`,
+        );
       }
       if (context.length > 0) input.notApplicableContext = context;
     }
@@ -809,6 +1041,59 @@ function Report() {
         input.siteGis = siteGisMap.data;
       }
 
+      // Module 6 — the real classification/zoning data this app has (the
+      // comps subject carries a zoning string for the TrueProdigy counties),
+      // the comps' own classifications, and any docs the user uploaded onto
+      // a zoning aspect. enforceZoningRealData gates each aspect on these.
+      if (id === "zoning") {
+        const subj = compsMap.data?.subject ?? null;
+        input.zoningData = {
+          cadClassification: state.propertyType ?? null,
+          cadZoning: subj?.zoning ?? null,
+          legalDescription: state.legalDescription ?? null,
+          subdivision: state.subdivision ?? null,
+          comps: (compsMap.data?.comps ?? []).slice(0, 15).map((c) => ({
+            classification: c.propType ?? null,
+            zoning: c.zoning ?? null,
+          })),
+          uploadedDocs: evidenceDocs
+            .filter((d) => d.documentType?.startsWith("Zoning: "))
+            .map((d) => d.fileName),
+        };
+      }
+
+      // Module 7 — the owner-confirmed income figures + the deterministic
+      // EGI/NOI/indicated value (income-approach.ts). The AI only explains
+      // these; enforceIncomeRealData server-side forces "inconclusive" if the
+      // core figures or a cap rate are missing.
+      if (id === "income") {
+        input.incomeFigures = {
+          grossPotentialIncome: incomeComputed.gpi,
+          otherIncome: incomeComputed.otherIncome,
+          vacancyPct: incomeComputed.vacancyPct,
+          operatingExpenses: incomeComputed.operatingExpenses,
+          egiComputed: incomeComputed.egi,
+          noiComputed: incomeComputed.noiComputed,
+          opexRatioPct: incomeComputed.opexRatioPct,
+          rentableSqft: incomeAnalysis?.rentableSqft ?? null,
+          documentKinds: incomeDocKinds,
+        };
+        input.capRate = {
+          pct: incomeComputed.capRatePct,
+          source: incomeComputed.capRateSource,
+        };
+        input.incomeIndicatedValue = incomeComputed.indicatedValue;
+        input.cadValue = state.totalValue ?? null;
+        const cs = computeComparableStats(
+          compsMap.data?.subject ?? null,
+          compsMap.data?.comps ?? [],
+          state.totalValue,
+        );
+        input.compsIndicatedRange = cs.indicated
+          ? { min: cs.indicated.min, median: cs.indicated.median, max: cs.indicated.max }
+          : null;
+      }
+
       // Module 10 reconciles Modules 2/3/8/9's already-real outputs — see the
       // sequencing effect above that waits for strategy + evidence to settle
       // before this ever fires, so these reads are the real thing, not
@@ -855,11 +1140,35 @@ function Report() {
             confidencePct: execStats.confidencePct,
           };
         }
+        // Module 7's real income indication, when the owner completed it — a
+        // second valuation view for the executive to weigh alongside comps.
+        if (incomeComputed.complete && incomeComputed.indicatedValue != null) {
+          input.incomeIndicated = {
+            indicatedValue: incomeComputed.indicatedValue,
+            gapPct: incomeComputed.gapPct,
+            supports: incomeSupportsCad(incomeComputed),
+            confidencePct: incomeComputed.confidencePct,
+          };
+        }
         if (savingsEstimate) {
           input.financialSummary = {
             savings: savingsEstimate.amount,
             basis: savingsEstimate.basis,
             reductionPct: savingsEstimate.basis === "formula" ? savingsEstimate.reductionPct : null,
+            // Module 9's fuller deterministic result — see savings-analysis.ts.
+            ...(savingsAnalysis.sufficient
+              ? {
+                  annualSavings: savingsAnalysis.annualSavings,
+                  netBenefit: savingsAnalysis.netBenefit,
+                  protestCost: savingsAnalysis.protestCost,
+                  protestCostSource: savingsAnalysis.protestCostSource,
+                  savingsToCostMultiple: savingsAnalysis.savingsToCostMultiple,
+                  roiPct: savingsAnalysis.roiPct,
+                  indicatedRange: savingsAnalysis.indicatedRange,
+                  financialConfidence: savingsAnalysis.financialConfidence,
+                  topScenarioReductionPct: savingsAnalysis.scenarios[2]?.reductionPct,
+                }
+              : {}),
           };
         }
         if (existingProtest && resolvedProperty) {
@@ -1170,6 +1479,115 @@ function Report() {
   // property can produce a 6+ digit savings figure on any screen size.
   const savingsDigits = useMemo(() => currency(estimated.savings).length, [estimated.savings]);
 
+  // ── Module 9 (Estimated Savings) — the fuller deterministic financial
+  // analysis (src/lib/savings-analysis.ts). Additive to `estimated` above,
+  // which is shared with the intake savings screen and stays untouched. No
+  // AI call anywhere in this module.
+  const [savingsTaxInputs, setSavingsTaxInputs] = useState<SavingsTaxInputs | null>(null);
+  useEffect(() => {
+    if (!resolvedProperty) {
+      setSavingsTaxInputs(null);
+      return;
+    }
+    getSavingsTaxInputs(resolvedProperty.id)
+      .then((r) =>
+        setSavingsTaxInputs(
+          r
+            ? {
+                taxableValue: r.taxableValue,
+                exemptionsTotal: r.exemptionsTotal,
+                protestCostOverride: r.protestCostOverride,
+                projectionYears: r.projectionYears,
+              }
+            : null,
+        ),
+      )
+      .catch((err) => console.error("Could not load savings tax inputs:", err));
+  }, [resolvedProperty]);
+
+  const savingsAnalysis = useMemo<SavingsAnalysis>(() => {
+    const cs = computeComparableStats(
+      compsMap.data?.subject ?? null,
+      compsMap.data?.comps ?? [],
+      state.totalValue,
+    );
+    return computeSavingsAnalysis({
+      cadValue: state.totalValue ?? null,
+      taxYear: state.taxYear ?? null,
+      cad: state.cad ?? null,
+      estimate: savingsEstimate,
+      compsIndicated: cs.indicated
+        ? { min: cs.indicated.min, median: cs.indicated.median, max: cs.indicated.max }
+        : null,
+      taxInputs: savingsTaxInputs ?? EMPTY_TAX_INPUTS,
+    });
+  }, [
+    savingsEstimate,
+    savingsTaxInputs,
+    compsMap.data,
+    state.totalValue,
+    state.taxYear,
+    state.cad,
+  ]);
+
+  async function saveSavingsTaxInputs(input: SavingsTaxInputsInput) {
+    if (!user || !resolvedProperty) return;
+    setSavingsTaxInputs({
+      taxableValue: input.taxableValue ?? null,
+      exemptionsTotal: input.exemptionsTotal ?? null,
+      protestCostOverride: input.protestCostOverride ?? null,
+      projectionYears: input.projectionYears ?? null,
+    });
+    try {
+      await upsertSavingsTaxInputs(user.id, resolvedProperty.id, input);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save — please try again."));
+      getSavingsTaxInputs(resolvedProperty.id)
+        .then((r) =>
+          setSavingsTaxInputs(
+            r
+              ? {
+                  taxableValue: r.taxableValue,
+                  exemptionsTotal: r.exemptionsTotal,
+                  protestCostOverride: r.protestCostOverride,
+                  projectionYears: r.projectionYears,
+                }
+              : null,
+          ),
+        )
+        .catch(() => {});
+    }
+  }
+
+  // Re-run Module 10 when the savings analysis changes (tax inputs edited,
+  // comps loaded, estimate resolved) — on the render after the memo settles,
+  // ref-guarded, never a cold fetch. Same pattern as the income digest.
+  const savingsDigest = savingsAnalysis.sufficient
+    ? [
+        savingsAnalysis.annualSavings,
+        savingsAnalysis.netBenefit,
+        savingsAnalysis.protestCost,
+        savingsAnalysis.reductionBase,
+        savingsAnalysis.financialConfidence,
+        savingsAnalysis.indicatedRange?.low ?? "",
+        savingsAnalysis.indicatedRange?.high ?? "",
+      ].join("|")
+    : "";
+  const savingsDigestRef = useRef<string>("");
+  useEffect(() => {
+    if (!savingsDigest) return;
+    if (savingsDigestRef.current === "") {
+      savingsDigestRef.current = savingsDigest;
+      return;
+    }
+    if (savingsDigestRef.current === savingsDigest) return;
+    savingsDigestRef.current = savingsDigest;
+    if (moduleData.executive?.data || moduleData.executive?.error) {
+      loadModule("executive", { force: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savingsDigest]);
+
   // Eager-loads real data for the module overview grid below (real scores,
   // checklists, etc. instead of generic teaser text) as soon as the property
   // is known. Free-preview modules (1-3) load for everyone; the rest only
@@ -1316,7 +1734,9 @@ function Report() {
     if (hasFullAccess || m.n <= FREE_MODULE_COUNT) {
       setOpenId(m.id);
       if (!m.requiresUserData) loadModule(m.id);
-      if (m.id === "comps") loadCompsMap();
+      // Modules 7 and 9 show the comparable-sales range alongside their own
+      // numbers — load the same comps map Module 3 uses.
+      if (m.id === "comps" || m.id === "income" || m.id === "savings") loadCompsMap();
       return;
     }
     setShowWall(true);
@@ -1548,9 +1968,16 @@ function Report() {
               siteCoords={siteCoords}
               estimated={estimated}
               propertyType={state.propertyType}
+              address={resolvedProperty?.address || state.address}
               totalValue={state.totalValue}
               improvementValue={state.improvementValue}
               overrides={overrides}
+              incomeComputed={incomeComputed}
+              incomeAnalysis={incomeAnalysis}
+              savingsAnalysis={savingsAnalysis}
+              uploadingEvidence={uploadingEvidence}
+              onUploadEvidence={handleUploadEvidence}
+              onSaveIncomeAnalysis={saveIncomeAnalysis}
               onOpen={() => openModule(m)}
               onForceReload={() => loadModule(m.id, { force: true })}
             />
@@ -1614,6 +2041,13 @@ function Report() {
                 onSaveCompSelection={() => {}}
                 onRemoveCompSelection={() => {}}
                 onExtractCompSale={async () => null}
+                incomeAnalysis={incomeAnalysis}
+                incomeComputed={incomeComputed}
+                onSaveIncomeAnalysis={() => {}}
+                onExtractIncome={extractIncome}
+                savingsAnalysis={savingsAnalysis}
+                savingsTaxInputs={savingsTaxInputs}
+                onSaveSavingsTaxInputs={() => {}}
               />
             </div>
           ));
@@ -1622,7 +2056,7 @@ function Report() {
 
       {/* Preview modal */}
       {openModel && (
-        <Modal onClose={() => setOpenId(null)}>
+        <Modal onClose={() => setOpenId(null)} wide>
           <span className="badge-soft">{hasFullAccess ? "Unlocked" : "Free Preview"}</span>
           <div className="mt-2 flex items-center gap-2">
             <NumberBadge n={openModel.n} color={openModel.color} size="lg" />
@@ -1656,10 +2090,9 @@ function Report() {
             onStartProtest={startProtest}
             onViewCase={() => {
               if (!resolvedProperty) return;
-              // New tab, not nav() — View Case shouldn't navigate the report
-              // itself away from whatever module the user was just looking at.
-              const url = `${window.location.origin}${import.meta.env.BASE_URL}dashboard/case?propertyId=${encodeURIComponent(resolvedProperty.id)}`;
-              window.open(url, "_blank", "noopener,noreferrer");
+              // Same-window navigation (per product direction) — opening it
+              // in a new tab left two tabs that each reloaded on focus.
+              nav({ to: "/dashboard/case", search: { propertyId: resolvedProperty.id } });
             }}
             overrides={overrides}
             onMarkNotApplicable={markNotApplicable}
@@ -1668,6 +2101,13 @@ function Report() {
             onSaveCompSelection={saveCompSelection}
             onRemoveCompSelection={removeCompSelection}
             onExtractCompSale={extractCompSaleFromFile}
+            incomeAnalysis={incomeAnalysis}
+            incomeComputed={incomeComputed}
+            onSaveIncomeAnalysis={saveIncomeAnalysis}
+            onExtractIncome={extractIncome}
+            savingsAnalysis={savingsAnalysis}
+            savingsTaxInputs={savingsTaxInputs}
+            onSaveSavingsTaxInputs={saveSavingsTaxInputs}
           />
           <div className="mt-6 flex gap-2 justify-end">
             <button onClick={() => setOpenId(null)} className="btn-outline">
@@ -1737,9 +2177,16 @@ function ModuleCard({
   siteCoords,
   estimated,
   propertyType,
+  address,
   totalValue,
   improvementValue,
   overrides,
+  incomeComputed,
+  incomeAnalysis,
+  savingsAnalysis,
+  uploadingEvidence,
+  onUploadEvidence,
+  onSaveIncomeAnalysis,
   onOpen,
   onForceReload,
 }: {
@@ -1758,9 +2205,16 @@ function ModuleCard({
     effectiveTaxRatePct: number;
   };
   propertyType?: string;
+  address?: string | null;
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
+  incomeComputed: IncomeApproach;
+  incomeAnalysis: IncomeAnalysis | null;
+  savingsAnalysis: SavingsAnalysis;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
   onOpen: () => void;
   onForceReload: () => void;
 }) {
@@ -1773,7 +2227,13 @@ function ModuleCard({
     : m.id === "income"
       ? isModuleNotApplicable(overrides, "income")
         ? "Not Applicable"
-        : "Needs Data"
+        : !incomeComputed.dataComplete
+          ? "Needs Data"
+          : !moduleState || moduleState.loading
+            ? "Analyzing"
+            : moduleState.error
+              ? "Error"
+              : "Completed"
       : m.id === "savings"
         ? "Completed"
         : !moduleState || moduleState.loading
@@ -1782,7 +2242,16 @@ function ModuleCard({
             ? "Error"
             : "Completed";
   const insight = unlocked
-    ? moduleInsight(m, moduleState, compsMap, estimated, totalValue, overrides)
+    ? moduleInsight(
+        m,
+        moduleState,
+        compsMap,
+        estimated,
+        totalValue,
+        overrides,
+        incomeComputed,
+        savingsAnalysis,
+      )
     : null;
   // Module 2's own score for this module's strategy, once it's resolved — see
   // the priorityContext sequencing in loadModule()/the eager-load effects
@@ -1860,9 +2329,17 @@ function ModuleCard({
             siteCoords={siteCoords}
             estimated={estimated}
             propertyType={propertyType}
+            address={address}
             totalValue={totalValue}
             improvementValue={improvementValue}
             overrides={overrides}
+            incomeComputed={incomeComputed}
+            incomeAnalysis={incomeAnalysis}
+            savingsAnalysis={savingsAnalysis}
+            uploadingEvidence={uploadingEvidence}
+            onUploadEvidence={onUploadEvidence}
+            onSaveIncomeAnalysis={onSaveIncomeAnalysis}
+            hasFullAccess={hasFullAccess}
             onOpen={onOpen}
           />
         </div>
@@ -1930,13 +2407,22 @@ function ModuleVisual({
   siteCoords,
   estimated,
   propertyType,
+  address,
   totalValue,
   improvementValue,
   overrides,
+  incomeComputed,
+  incomeAnalysis,
+  savingsAnalysis,
+  uploadingEvidence,
+  onUploadEvidence,
+  onSaveIncomeAnalysis,
+  hasFullAccess,
   onOpen,
 }: {
   m: Module;
   unlocked: boolean;
+  hasFullAccess: boolean;
   moduleState: ModuleAsyncState | undefined;
   moduleData: Record<string, ModuleAsyncState>;
   compsMap: { data: CompsResult | null; loading: boolean };
@@ -1949,9 +2435,16 @@ function ModuleVisual({
     effectiveTaxRatePct: number;
   };
   propertyType?: string;
+  address?: string | null;
   totalValue?: number | null;
   improvementValue?: number | null;
   overrides: ModuleOverride[];
+  incomeComputed: IncomeApproach;
+  incomeAnalysis: IncomeAnalysis | null;
+  savingsAnalysis: SavingsAnalysis;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
   onOpen: () => void;
 }) {
   if (!unlocked) {
@@ -1964,6 +2457,9 @@ function ModuleVisual({
   }
 
   if (m.id === "savings") {
+    if (estimated.savings > 0 && savingsAnalysis.sufficient) {
+      return <SavingsCardVisual a={savingsAnalysis} />;
+    }
     return (
       <div className="grid gap-1.5">
         <FormulaChain
@@ -1977,16 +2473,33 @@ function ModuleVisual({
   }
 
   if (m.id === "income") {
-    return isModuleNotApplicable(overrides, "income") ? (
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <CheckCircle2 className="h-4 w-4 shrink-0" />
-        <span className="text-xs">Marked not applicable — excluded from this protest</span>
-      </div>
-    ) : (
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <FileWarning className="h-4 w-4 shrink-0" />
-        <span className="text-xs">Upload financials to run this analysis</span>
-      </div>
+    if (isModuleNotApplicable(overrides, "income")) {
+      return (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <span className="text-xs">Marked not applicable — excluded from this protest</span>
+        </div>
+      );
+    }
+    if (!incomeComputed.dataComplete) {
+      return (
+        <IncomeLadderPreview
+          computed={incomeComputed}
+          editable={hasFullAccess}
+          analysis={incomeAnalysis}
+          onSave={onSaveIncomeAnalysis}
+          onOpen={onOpen}
+        />
+      );
+    }
+    const aiSupports = (moduleData.income?.data as ModuleResultMap["income"] | undefined)
+      ?.supportsCadValue;
+    return (
+      <IncomeCardVisual
+        computed={incomeComputed}
+        supports={aiSupports ?? incomeSupportsCad(incomeComputed)}
+        onOpen={onOpen}
+      />
     );
   }
 
@@ -2129,7 +2642,15 @@ function ModuleVisual({
     case "strategy": {
       const d = moduleState.data as ModuleResultMap["strategy"];
       if (d.strategies.length === 0) return null;
-      return <StrategyRankList strategies={d.strategies} color={m.color} max={5} />;
+      return (
+        <StrategyRankList
+          strategies={d.strategies}
+          color={m.color}
+          max={5}
+          uploading={uploadingEvidence}
+          onUploadFor={(s, files) => onUploadEvidence(files, strategySlug(s.name))}
+        />
+      );
     }
     case "comps": {
       const d = moduleState.data as ModuleResultMap["comps"];
@@ -2195,45 +2716,21 @@ function ModuleVisual({
         d.externalObsolescencePct,
         improvementValue ?? null,
       );
-      const withPhoto = d.buildingComponents.filter((c) => c.hasPhoto);
-      const needsAttention = withPhoto.filter((c) => c.condition !== "Good");
       return (
-        <div className="grid gap-2">
-          <BuildingIllustration className="mx-auto h-28 w-auto" />
-          {depreciation.conditionAdjustedValue != null ? (
-            <div className="grid grid-cols-2 gap-1.5">
-              <ExecutiveStat
-                label="Total Depreciation"
-                value={`${depreciation.totalDepreciationPct}%`}
-              />
-              <ExecutiveStat label="Value Impact" value={`${depreciation.impactPct}%`} />
-            </div>
-          ) : (
-            <p className="text-center text-[10px] text-muted-foreground">
-              Additional data needed — upload photos to assess condition.
-            </p>
-          )}
-          {needsAttention.length > 0 && (
-            <p className="text-center text-[10px] text-muted-foreground">
-              {needsAttention.length} of {withPhoto.length} components need attention
-            </p>
-          )}
-          <div className="flex flex-col items-center">
-            <SpeedometerGauge value={d.priorityScore} size="sm" />
-            <div className="-mt-1 text-xs text-muted-foreground">condition priority</div>
-          </div>
-        </div>
+        <ImprovementCardVisual
+          d={d}
+          depreciation={depreciation}
+          address={address}
+          overrides={overrides}
+          uploading={uploadingEvidence}
+          onUpload={hasFullAccess ? (files) => onUploadEvidence(files) : undefined}
+          onOpen={onOpen}
+        />
       );
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      return (
-        <ZoningFlow
-          matches={d.matches}
-          stated={propertyType}
-          typical={d.typicalClassification || undefined}
-        />
-      );
+      return <ZoningAspectTiles aspects={d.aspects} matches={d.matches} />;
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
@@ -3811,6 +4308,133 @@ function BuildingComponentRow({
   );
 }
 
+// Compact, interactive Module 5 (Improvement Condition) card visual — the 4
+// building components with their real photo-grounded status, an inline
+// per-component photo upload (uploads a general improvement photo, tagged
+// EVIDENCE_DOCUMENT_TYPE; the AI matches it to a component), the condition-
+// priority gauge, and the depreciation / value-impact numbers once they can
+// actually be computed. Nothing here is a guessed condition.
+function ImprovementCardVisual({
+  d,
+  depreciation,
+  address,
+  overrides,
+  uploading,
+  onUpload,
+  onOpen,
+}: {
+  d: ModuleResultMap["improvement"];
+  depreciation: ReturnType<typeof computeDepreciation>;
+  address?: string | null;
+  overrides: ModuleOverride[];
+  uploading?: boolean;
+  onUpload?: (files: File[]) => void;
+  onOpen: () => void;
+}) {
+  const withPhoto = d.buildingComponents.filter((c) => c.hasPhoto);
+  const needsAttention = withPhoto.filter((c) => c.condition !== "Good");
+  const missing = d.buildingComponents.filter(
+    (c) => !c.hasPhoto && !isItemNotApplicable(overrides, "improvement", c.component),
+  ).length;
+  return (
+    <div className="grid gap-2">
+      {/* Real Street View photo of the subject property when Google has
+          outdoor imagery there; a generic building illustration otherwise. */}
+      <PropertyImage
+        address={address}
+        width={480}
+        height={200}
+        className="mx-auto h-24 w-full max-w-[260px] rounded-lg border border-border object-cover"
+        fallback={<BuildingIllustration className="mx-auto h-16 w-auto" />}
+      />
+      <div className="grid gap-1">
+        {d.buildingComponents.map((c) => {
+          const na = !c.hasPhoto && isItemNotApplicable(overrides, "improvement", c.component);
+          const label = c.hasPhoto ? c.condition : na ? "Not Applicable" : "No photo";
+          return (
+            <div
+              key={c.component}
+              className="flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1"
+            >
+              <span className="text-xs font-medium">{c.component}</span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                    na
+                      ? "bg-secondary/60 text-muted-foreground"
+                      : BUILDING_CONDITION_TONE[c.condition]
+                  }`}
+                >
+                  {label}
+                </span>
+                {!c.hasPhoto && !na && onUpload && (
+                  <label
+                    title={`Upload a photo of the ${c.component.toLowerCase()}`}
+                    className={`inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-1.5 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
+                      uploading ? "pointer-events-none opacity-60" : ""
+                    }`}
+                  >
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        e.target.value = "";
+                        if (sel.length > 0) onUpload(sel);
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "…" : "Photo"}
+                  </label>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {depreciation.conditionAdjustedValue != null ? (
+        <div className="grid grid-cols-2 gap-1.5">
+          <ExecutiveStat
+            label="Total Depreciation"
+            value={`${depreciation.totalDepreciationPct}%`}
+          />
+          <ExecutiveStat label="Value Impact" value={`${depreciation.impactPct}%`} />
+        </div>
+      ) : (
+        <p className="text-center text-[10px] text-muted-foreground">
+          {missing > 0
+            ? `Upload photos of ${missing} component${missing === 1 ? "" : "s"} to assess condition & depreciation.`
+            : "Additional data needed to compute depreciation."}
+        </p>
+      )}
+      {needsAttention.length > 0 && (
+        <p className="text-center text-[10px] text-muted-foreground">
+          {needsAttention.length} of {withPhoto.length} photographed components need attention
+        </p>
+      )}
+
+      <div className="flex flex-col items-center">
+        <SpeedometerGauge value={d.priorityScore} size="sm" />
+        <div className="-mt-1 text-xs text-muted-foreground">condition priority</div>
+      </div>
+
+      {d.keyFinding && (
+        <button
+          type="button"
+          onClick={onOpen}
+          className="text-left text-[11px] leading-snug text-muted-foreground hover:text-foreground"
+        >
+          {d.keyFinding}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // The reference's 5-step explainer strip — purely describes a pipeline that
 // now genuinely exists (this module's own real photo-grounded assessment +
 // deterministic depreciation math), not a claim about this property. Fixed,
@@ -3878,13 +4502,33 @@ function moduleInsight(
   estimated: { savings: number },
   totalValue: number | null | undefined,
   overrides: ModuleOverride[],
+  incomeComputed?: IncomeApproach,
+  savingsAnalysis?: SavingsAnalysis,
 ): string | null {
   if (m.id === "income") {
-    return isModuleNotApplicable(overrides, "income")
-      ? "Marked Not Applicable"
-      : "Upload financials to unlock";
+    if (isModuleNotApplicable(overrides, "income")) return "Marked Not Applicable";
+    if (!incomeComputed?.complete) {
+      return incomeComputed?.dataComplete ? "Cap rate needed" : "Upload financials to unlock";
+    }
+    const supports =
+      (moduleState?.data as ModuleResultMap["income"] | undefined)?.supportsCadValue ??
+      incomeSupportsCad(incomeComputed);
+    return supports === "does-not-support"
+      ? "Income does not support CAD value"
+      : supports === "supports"
+        ? "Income supports CAD value"
+        : "Income analysis inconclusive";
   }
-  if (m.id === "savings") return estimated.savings > 0 ? "Strong Potential Savings" : null;
+  if (m.id === "savings") {
+    if (estimated.savings <= 0) return null;
+    if (savingsAnalysis && !savingsAnalysis.sufficient) return "Additional data needed";
+    if (savingsAnalysis) {
+      return savingsAnalysis.netBenefit > 0
+        ? "Strong potential savings"
+        : "Marginal — review protest cost";
+    }
+    return "Strong Potential Savings";
+  }
   if (!moduleState?.data) return null;
   switch (m.id) {
     case "health": {
@@ -4301,7 +4945,18 @@ function evidenceItemSlug(item: string): string {
 // Compact ranked row for the card preview — used by both ModuleVisual's
 // "strategy" case and StrategyDetail's header below. Row order itself
 // already conveys rank (top = strongest), so no separate number badge.
-function StrategyBar({ s }: { s: StrategyEntry }) {
+function StrategyBar({
+  s,
+  onUpload,
+  uploading,
+}: {
+  s: StrategyEntry;
+  // When provided, a "Data Needed" row shows an inline upload control that
+  // tags the file for this strategy (same path as StrategyDetail's own
+  // upload) and lets Module 2 re-run with it.
+  onUpload?: (s: StrategyEntry, files: File[]) => void;
+  uploading?: boolean;
+}) {
   const Icon = strategyIcon(s);
   return (
     <div className="flex items-center gap-2.5">
@@ -4315,18 +4970,45 @@ function StrategyBar({ s }: { s: StrategyEntry }) {
           />
         </div>
       </div>
-      {s.dataSufficient ? (
+      <div className="flex shrink-0 items-center gap-1.5">
+        {/* Score always shows — the row still reads as ranked even when the
+            AI wants more evidence. */}
         <span
-          className="w-7 shrink-0 text-right text-xs font-semibold"
-          style={{ color: scoreColor(s.strengthScore) }}
+          className="w-6 text-right text-xs font-semibold"
+          style={{ color: s.dataSufficient ? scoreColor(s.strengthScore) : undefined }}
         >
           {s.strengthScore}
         </span>
-      ) : (
-        <span className="shrink-0 whitespace-nowrap rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
-          Data Needed
-        </span>
-      )}
+        {!s.dataSufficient &&
+          (onUpload ? (
+            // Upload control ONLY on a row the AI flagged as needing data.
+            <label
+              title="Data needed — upload supporting evidence"
+              className={`inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-full border border-accent/40 px-2 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
+                uploading ? "pointer-events-none opacity-60" : ""
+              }`}
+            >
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                multiple
+                disabled={uploading}
+                className="hidden"
+                onChange={(e) => {
+                  const sel = Array.from(e.target.files ?? []);
+                  e.target.value = "";
+                  if (sel.length > 0) onUpload(s, sel);
+                }}
+              />
+              <Upload className="h-3 w-3" />
+              {uploading ? "…" : "Upload"}
+            </label>
+          ) : (
+            <span className="whitespace-nowrap rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
+              Data Needed
+            </span>
+          ))}
+      </div>
     </div>
   );
 }
@@ -4335,16 +5017,20 @@ function StrategyRankList({
   strategies,
   color,
   max,
+  onUploadFor,
+  uploading,
 }: {
   strategies: StrategyEntry[];
   color: IconColor;
   max?: number;
+  onUploadFor?: (s: StrategyEntry, files: File[]) => void;
+  uploading?: boolean;
 }) {
   const shown = max ? strategies.slice(0, max) : strategies;
   return (
     <div className="grid gap-2 [&>*]:min-w-0">
       {shown.map((s) => (
-        <StrategyBar key={s.name} s={s} />
+        <StrategyBar key={s.name} s={s} onUpload={onUploadFor} uploading={uploading} />
       ))}
     </div>
   );
@@ -4560,32 +5246,1164 @@ function StrategyDetail({
   );
 }
 
-// Two-node "stated vs. typical" flow for Zoning & Classification — only 2
-// real data points exist (the property's stated type and the AI's typical-
-// classification guess), so this stays 2 boxes + a match/mismatch badge on
-// the connecting arrow, not a fabricated 4-box CAD/Actual/Zoning/Permitted
-// tree the underlying data doesn't actually have.
-function ZoningFlow({
-  matches,
-  stated,
-  typical,
+// A "how the analysis flows" ribbon — User Input → AI Processing →
+// Logic/Decision → AI Output → Next Step. Purely a process cue; each step
+// carries its own eyebrow (the stage), a short label, and an icon so a
+// module can name its own pipeline. The AI-output step is accented.
+function AnalysisPipeline({
+  steps,
 }: {
-  matches: keyof typeof ZONING_STATUS;
-  stated?: string;
-  typical?: string;
+  steps: { eyebrow: string; label: string; Icon: LucideIcon; current?: boolean }[];
 }) {
-  const { Icon, color } = ZONING_STATUS[matches];
   return (
-    <div className="flex items-center gap-2">
-      <div className="min-w-0 flex-1 rounded-lg bg-secondary/50 p-2.5 text-center">
-        <div className="text-[9px] uppercase tracking-wide text-muted-foreground">Stated</div>
-        <div className="truncate text-xs font-semibold">{stated || "—"}</div>
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1 sm:gap-1.5">
+      {steps.map((s, i) => (
+        <Fragment key={s.label}>
+          <div
+            className={`flex min-w-[88px] flex-1 flex-col items-center gap-1 rounded-lg px-2 py-2 text-center sm:min-w-[120px] sm:gap-1.5 sm:px-3 sm:py-3 ${
+              s.current ? "bg-accent/15 ring-1 ring-accent/30" : "bg-secondary/50"
+            }`}
+          >
+            <s.Icon
+              className={`h-4 w-4 sm:h-5 sm:w-5 ${s.current ? "text-accent" : "text-muted-foreground"}`}
+            />
+            <div
+              className={`text-[9px] font-bold uppercase leading-none tracking-wide sm:text-[10px] ${
+                s.current ? "text-accent" : "text-muted-foreground"
+              }`}
+            >
+              {s.eyebrow}
+            </div>
+            <div className="text-[10px] font-medium leading-tight text-foreground sm:text-xs">
+              {s.label}
+            </div>
+          </div>
+          {i < steps.length - 1 && (
+            <ArrowRight className="h-3.5 w-3.5 shrink-0 self-center text-muted-foreground sm:h-4 sm:w-4" />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+const ZONING_ASPECT_STATUS: Record<
+  ModuleResultMap["zoning"]["aspects"][number]["status"],
+  { label: string; cls: string; Icon: LucideIcon; iconCls: string }
+> = {
+  Confirmed: {
+    label: "Confirmed",
+    cls: "bg-success/15 text-success",
+    Icon: CheckCircle2,
+    iconCls: "text-success",
+  },
+  "Partial Data": {
+    label: "Partial",
+    cls: "bg-warning/20 text-warning-foreground",
+    Icon: AlertTriangle,
+    iconCls: "text-warning-foreground",
+  },
+  "Additional Data Needed": {
+    label: "Needs data",
+    cls: "bg-secondary text-muted-foreground",
+    Icon: HelpCircle,
+    iconCls: "text-muted-foreground",
+  },
+};
+
+const ZONING_ASPECT_ICON: Record<string, LucideIcon> = {
+  "CAD Classification": FileText,
+  "Actual Use": Building2,
+  "Zoning District": MapPin,
+  "Permitted Use": CheckCircle2,
+};
+
+// The 4-column classification line-up from the spec's screenshot: the four
+// aspects are the columns, one value row, then a muted source / upload row.
+// The Permitted Use column also carries the overall consistent/mismatch mark.
+function ZoningClassificationTable({
+  aspects,
+  matches,
+  onUpload,
+  uploading,
+}: {
+  aspects: ModuleResultMap["zoning"]["aspects"];
+  matches: keyof typeof ZONING_STATUS;
+  onUpload?: (aspectLabel: string, files: File[]) => void;
+  uploading?: boolean;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+        <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
+          <tr>
+            {aspects.map((a) => (
+              <th key={a.label} className="px-4 py-2.5 font-semibold">
+                {a.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="border-t border-border/60 align-top">
+            {aspects.map((a) => {
+              const st = ZONING_ASPECT_STATUS[a.status];
+              const isPermitted = a.label === "Permitted Use";
+              const showMismatch = isPermitted && matches === "inconsistent";
+              const showMatch = isPermitted && matches === "consistent";
+              return (
+                <td key={a.label} className="px-4 py-3">
+                  <div className="flex items-start gap-1.5">
+                    {showMismatch ? (
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                    ) : showMatch ? (
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                    ) : (
+                      <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
+                    )}
+                    <span
+                      className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
+                    >
+                      {a.value || "—"}
+                    </span>
+                  </div>
+                </td>
+              );
+            })}
+          </tr>
+          <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
+            {aspects.map((a) => (
+              <td key={a.label} className="px-4 py-3">
+                <div>{a.source || "—"}</div>
+                {onUpload && a.status === "Additional Data Needed" && (
+                  <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 font-semibold text-accent hover:bg-accent/10">
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        if (sel.length > 0) onUpload(a.label, sel);
+                        e.target.value = "";
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "Uploading…" : "Upload"}
+                  </label>
+                )}
+              </td>
+            ))}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Compact card visual — the 4 classification aspects as small icon tiles,
+// branching into a Matches / Mismatch outcome, then a "verify" call to
+// action. Mirrors the spec's card screenshot in the app's own light styling.
+function ZoningAspectTiles({
+  aspects,
+  matches,
+}: {
+  aspects: ModuleResultMap["zoning"]["aspects"];
+  matches: keyof typeof ZONING_STATUS;
+}) {
+  const consistent = matches === "consistent";
+  const uncertain = matches === "uncertain";
+  return (
+    <div>
+      <div className="grid grid-cols-4 gap-1.5">
+        {aspects.map((a) => {
+          const st = ZONING_ASPECT_STATUS[a.status];
+          const Icon = ZONING_ASPECT_ICON[a.label] ?? FileText;
+          return (
+            <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
+              <Icon className="mx-auto h-4 w-4 text-muted-foreground" />
+              <div className="mt-1 text-[8px] uppercase leading-tight tracking-wide text-muted-foreground">
+                {a.label}
+              </div>
+              <span
+                className={`mt-1 inline-block rounded-full px-1.5 py-0.5 text-[8px] font-semibold ${st.cls}`}
+              >
+                {st.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
-      <Icon className={`h-5 w-5 shrink-0 ${color}`} />
-      <div className="min-w-0 flex-1 rounded-lg bg-secondary/50 p-2.5 text-center">
-        <div className="text-[9px] uppercase tracking-wide text-muted-foreground">Typical</div>
-        <div className="truncate text-xs font-semibold">{typical || "—"}</div>
+      <div className="mx-auto my-1.5 h-3 w-px bg-border" />
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div
+          className={`rounded-lg border p-2 ${
+            consistent
+              ? "border-success/40 bg-success/10"
+              : "border-border bg-secondary/30 opacity-50"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1 text-xs font-bold text-success">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Matches
+          </div>
+          <div className="text-[10px] text-muted-foreground">No issue</div>
+        </div>
+        <div
+          className={`rounded-lg border p-2 ${
+            !consistent && !uncertain
+              ? "border-destructive/40 bg-destructive/10"
+              : "border-border bg-secondary/30 opacity-50"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1 text-xs font-bold text-destructive">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Mismatch
+          </div>
+          <div className="text-[10px] text-muted-foreground">May impact value or exemptions</div>
+        </div>
       </div>
+      <div className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-accent/10 px-3 py-2 text-xs font-semibold text-accent">
+        <Scale className="h-4 w-4 shrink-0" />
+        Verify &amp; support any discrepancies
+        <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+      </div>
+    </div>
+  );
+}
+
+function ZoningImpactCol({
+  title,
+  tone = "success",
+  children,
+}: {
+  title: string;
+  tone?: "success" | "accent";
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div
+        className={`mb-1.5 text-xs font-semibold uppercase tracking-wide ${
+          tone === "accent" ? "text-accent" : "text-success"
+        }`}
+      >
+        {title}
+      </div>
+      <div className="text-sm text-muted-foreground">{children}</div>
+    </div>
+  );
+}
+
+// ── Module 7 (Income Value) ───────────────────────────────────────────────
+// Every figure rendered here is the deterministic result from
+// src/lib/income-approach.ts (computed from owner-confirmed data) — never an
+// AI value. The AI narrative (moduleData.income) only explains these.
+
+const INCOME_DOC_KINDS = ["P&L", "Operating Statement", "Rent Roll", "Appraisal"] as const;
+
+// A recharts waterfall: Potential Income → −Vacancy → −Operating Expenses →
+// NOI → (÷ Cap Rate) → Indicated Value. Two stacked bars — a transparent
+// spacer that lifts each step to its running total, then the visible delta.
+function IncomeWaterfall({
+  c,
+  height = 210,
+  compact = false,
+}: {
+  c: IncomeApproach;
+  height?: number;
+  compact?: boolean;
+}) {
+  // Caller renders the ladder preview / table for the incomplete state.
+  if (!c.dataComplete || c.gpi == null || c.egi == null || c.noi == null) return null;
+  const potential = c.gpi + c.otherIncome;
+  const vac = c.vacancyLoss ?? 0;
+  const opex = c.operatingExpenses ?? 0;
+  const indicated = c.indicatedValue;
+  // name = short axis label; base = transparent lift to the running total;
+  // delta = the visible change; show = the number printed on the bar.
+  const steps: { name: string; base: number; delta: number; fill: string; show: string }[] = [
+    {
+      name: "Potential",
+      base: 0,
+      delta: potential,
+      fill: "#3b82f6",
+      show: compactCurrency(potential),
+    },
+    {
+      name: "Vacancy",
+      base: potential - vac,
+      delta: vac,
+      fill: "#f87171",
+      show: `−${compactCurrency(vac)}`,
+    },
+    {
+      name: "Op. Exp.",
+      base: c.noi,
+      delta: opex,
+      fill: "#fb923c",
+      show: `−${compactCurrency(opex)}`,
+    },
+    { name: "NOI", base: 0, delta: c.noi, fill: "#1d4ed8", show: compactCurrency(c.noi) },
+    {
+      name: `Cap ${c.capRatePct != null ? `${c.capRatePct}%` : ""}`.trim(),
+      base: 0,
+      delta: 0,
+      fill: "#2dd4bf",
+      show: "",
+    },
+    indicated != null
+      ? {
+          name: "Value",
+          base: 0,
+          delta: indicated,
+          fill: "#22c55e",
+          show: compactCurrency(indicated),
+        }
+      : { name: "Value", base: 0, delta: 0, fill: "#94a3b8", show: "cap rate needed" },
+  ];
+  const yMax = Math.ceil(Math.max(potential, indicated ?? 0) * 1.18);
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart
+        data={steps}
+        margin={{ top: 18, right: 8, left: 8, bottom: 4 }}
+        barCategoryGap="22%"
+      >
+        <CartesianGrid vertical={false} stroke="currentColor" strokeOpacity={0.08} />
+        <XAxis
+          dataKey="name"
+          tick={{ fontSize: compact ? 9 : 10 }}
+          interval={0}
+          axisLine={false}
+          tickLine={false}
+        />
+        <YAxis
+          hide={compact}
+          width={compact ? 0 : 44}
+          domain={[0, yMax]}
+          tick={{ fontSize: 9 }}
+          tickFormatter={compactCurrency}
+          axisLine={false}
+          tickLine={false}
+        />
+        <Bar dataKey="base" stackId="w" fill="transparent" isAnimationActive={false} />
+        <Bar dataKey="delta" stackId="w" isAnimationActive={false} radius={[2, 2, 0, 0]}>
+          {steps.map((s, i) => (
+            <Cell key={i} fill={s.fill} />
+          ))}
+          <LabelList dataKey="show" position="top" fontSize={compact ? 9 : 10} fontWeight={600} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Card empty/partial state — the exact ladder the module computes. When
+// `editable`, the four owner-driven rows (GPI, Vacancy %, Operating
+// Expenses, Cap Rate %) are inline inputs so the values can be entered right
+// on the card, without opening the module; EGI / NOI / Indicated Value stay
+// computed. Nothing here is estimated.
+function IncomeLadderPreview({
+  computed,
+  editable,
+  analysis,
+  onSave,
+  onOpen,
+}: {
+  computed: IncomeApproach;
+  editable?: boolean;
+  analysis?: IncomeAnalysis | null;
+  onSave?: (input: IncomeAnalysisInput) => void;
+  onOpen?: () => void;
+}) {
+  const seed = () => ({
+    gpi: computed.gpi != null ? String(computed.gpi) : "",
+    vac: computed.vacancyPct != null ? String(computed.vacancyPct) : "",
+    opex: computed.operatingExpenses != null ? String(computed.operatingExpenses) : "",
+    cap: computed.capRatePct != null ? String(computed.capRatePct) : "",
+  });
+  const [f, setF] = useState(seed);
+  const extKey = [
+    computed.gpi,
+    computed.vacancyPct,
+    computed.operatingExpenses,
+    computed.capRatePct,
+  ].join("|");
+  useEffect(() => {
+    setF(seed());
+  }, [extKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const parse = (v: string): number | null => {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return v.trim() !== "" && Number.isFinite(n) ? n : null;
+  };
+  const dirty =
+    f.gpi !== seed().gpi || f.vac !== seed().vac || f.opex !== seed().opex || f.cap !== seed().cap;
+  const money = (v: number | null | undefined) => (v != null ? compactCurrency(v) : "—");
+
+  // One fixed-width value column so every input box and read-only value
+  // shares the same right edge and width, whatever the $ / % affix.
+  const VALUE_COL = "w-24 shrink-0 sm:w-[8.5rem]";
+  const inputCell = (key: "gpi" | "vac" | "opex" | "cap", prefix?: string, suffix?: string) => (
+    <span
+      className={`${VALUE_COL} flex items-center rounded border border-border bg-background px-1.5 focus-within:border-accent`}
+    >
+      <span className="w-2.5 shrink-0 text-muted-foreground">{prefix ?? ""}</span>
+      <input
+        inputMode="decimal"
+        value={f[key]}
+        placeholder="—"
+        onChange={(e) => setF((s) => ({ ...s, [key]: e.target.value }))}
+        className="min-w-0 flex-1 bg-transparent py-0.5 text-right text-xs tabular-nums outline-none"
+      />
+      <span className="w-2.5 shrink-0 text-right text-muted-foreground">{suffix ?? ""}</span>
+    </span>
+  );
+  const readCell = (v: string) => (
+    <span className={`${VALUE_COL} text-right tabular-nums`}>{v}</span>
+  );
+
+  const rows: { label: string; cell: React.ReactNode }[] = [
+    {
+      label: "Gross Potential Income",
+      cell: editable ? inputCell("gpi", "$") : readCell(money(computed.gpi)),
+    },
+    {
+      label: "(−) Vacancy",
+      cell: editable ? inputCell("vac", "", "%") : readCell(money(computed.vacancyLoss)),
+    },
+    { label: "Effective Gross Income", cell: readCell(money(computed.egi)) },
+    {
+      label: "(−) Operating Expenses",
+      cell: editable ? inputCell("opex", "$") : readCell(money(computed.operatingExpenses)),
+    },
+    { label: "Net Operating Income", cell: readCell(money(computed.noi)) },
+    {
+      label: "÷ Market Cap Rate",
+      cell: editable ? inputCell("cap", "", "%") : readCell(money(computed.capRatePct)),
+    },
+  ];
+
+  function save() {
+    if (!onSave) return;
+    onSave({
+      grossPotentialIncome: parse(f.gpi),
+      vacancyPct: parse(f.vac),
+      operatingExpenses: parse(f.opex),
+      capRatePct: parse(f.cap),
+      capRateSource: parse(f.cap) != null ? (analysis?.capRateSource ?? "owner") : null,
+      otherIncome: analysis?.otherIncome ?? null,
+      noiStated: analysis?.noiStated ?? null,
+      rentableSqft: analysis?.rentableSqft ?? null,
+      sourceDocumentIds: analysis?.sourceDocumentIds ?? [],
+      notes: analysis?.notes ?? null,
+    });
+  }
+
+  return (
+    <div className="grid gap-2">
+      <div
+        className={`rounded-lg border p-3 ${editable ? "border-border" : "border-dashed border-border"}`}
+      >
+        <div className="grid gap-1 text-xs text-muted-foreground">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center justify-between gap-2">
+              <span>{r.label}</span>
+              {r.cell}
+            </div>
+          ))}
+          <div className="mt-1 flex items-center justify-between border-t border-border/60 pt-1.5 text-sm font-semibold text-foreground">
+            <span>Indicated Value</span>
+            <span className={`${VALUE_COL} pr-2.5 text-right tabular-nums`}>
+              {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+            </span>
+          </div>
+        </div>
+        {computed.cadValue != null && (
+          <div className="mt-2 flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Current CAD value</span>
+            <span
+              className={`${VALUE_COL} pr-2.5 text-right font-semibold tabular-nums text-foreground`}
+            >
+              {compactCurrency(computed.cadValue)}
+            </span>
+          </div>
+        )}
+      </div>
+      {editable ? (
+        <div className="flex items-center justify-between gap-2">
+          {onOpen && (
+            <button
+              type="button"
+              onClick={onOpen}
+              className="text-xs font-medium text-accent hover:underline"
+            >
+              More options & upload docs
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={save}
+            disabled={!dirty}
+            className="btn-primary text-xs disabled:opacity-50"
+          >
+            Save values
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <FileWarning className="h-4 w-4 shrink-0" />
+          <span className="text-xs">Add a P&amp;L, rent roll, or appraisal to run this</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const INCOME_VERDICT: Record<
+  "supports" | "does-not-support" | "inconclusive",
+  { label: string; cls: string }
+> = {
+  supports: { label: "Income Supports CAD Value", cls: "bg-success/10 text-success" },
+  "does-not-support": {
+    label: "Income Does Not Support CAD Value",
+    cls: "bg-accent/10 text-accent",
+  },
+  inconclusive: {
+    label: "Income Analysis Inconclusive",
+    cls: "bg-secondary text-muted-foreground",
+  },
+};
+
+function IncomeVerdictBand({
+  supports,
+  onClick,
+}: {
+  supports: "supports" | "does-not-support" | "inconclusive";
+  onClick?: () => void;
+}) {
+  const v = INCOME_VERDICT[supports];
+  const inner = (
+    <>
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/60">
+        <DollarSign className="h-4 w-4" />
+      </span>
+      <span className="flex-1 text-left text-sm font-semibold">{v.label}</span>
+      {onClick && <ArrowRight className="h-4 w-4 shrink-0" />}
+    </>
+  );
+  return onClick ? (
+    <button
+      onClick={onClick}
+      className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 ${v.cls}`}
+    >
+      {inner}
+    </button>
+  ) : (
+    <div className={`mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 ${v.cls}`}>
+      {inner}
+    </div>
+  );
+}
+
+// Compact card visual (ModuleVisual) — mini waterfall + Income Value vs CAD
+// Value tiles + the verdict band. Mirrors the reference card.
+function IncomeCardVisual({
+  computed,
+  supports,
+  onOpen,
+}: {
+  computed: IncomeApproach;
+  supports: "supports" | "does-not-support" | "inconclusive";
+  onOpen: () => void;
+}) {
+  return (
+    <div>
+      <IncomeWaterfall c={computed} height={130} compact />
+      <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <div className="rounded-lg bg-accent/10 p-2 text-center">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-accent">
+            Income Value
+          </div>
+          <div className="text-sm font-bold text-accent">
+            {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+          </div>
+        </div>
+        <span className="text-[10px] font-bold text-muted-foreground">vs</span>
+        <div className="rounded-lg bg-destructive/10 p-2 text-center">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-destructive">
+            CAD Value
+          </div>
+          <div className="text-sm font-bold text-destructive">
+            {computed.cadValue != null ? compactCurrency(computed.cadValue) : "—"}
+          </div>
+        </div>
+      </div>
+      <IncomeVerdictBand supports={supports} onClick={onOpen} />
+    </div>
+  );
+}
+
+// The full 3-up value comparison in the modal: Income Value · AI Market Value
+// Range (from Module 3's comps) · CAD Value, then the verdict band.
+function IncomeValueComparison({
+  computed,
+  compsRange,
+  supports,
+}: {
+  computed: IncomeApproach;
+  compsRange: { min: number; max: number } | null;
+  supports: "supports" | "does-not-support" | "inconclusive";
+}) {
+  return (
+    <div>
+      <div className={`grid gap-2 ${compsRange ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+        <div className="rounded-lg bg-accent/10 p-3 text-center">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+            Income Value
+          </div>
+          <div className="font-serif text-xl font-bold text-accent">
+            {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {computed.reliability} reliability
+          </div>
+        </div>
+        {compsRange && (
+          <div className="rounded-lg bg-success/10 p-3 text-center">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-success">
+              AI Market Value Range
+            </div>
+            <div className="font-serif text-xl font-bold text-success">
+              {compactCurrency(compsRange.min)}–{compactCurrency(compsRange.max)}
+            </div>
+            <div className="text-[10px] text-muted-foreground">from comparable sales</div>
+          </div>
+        )}
+        <div className="rounded-lg bg-destructive/10 p-3 text-center">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-destructive">
+            CAD Value
+          </div>
+          <div className="font-serif text-xl font-bold text-destructive">
+            {computed.cadValue != null ? compactCurrency(computed.cadValue) : "—"}
+          </div>
+          <div className="text-[10px] text-muted-foreground">current assessed</div>
+        </div>
+      </div>
+      <IncomeVerdictBand supports={supports} />
+    </div>
+  );
+}
+
+// The income-approach summary ladder — every value straight from `c`.
+function IncomeApproachTable({ c }: { c: IncomeApproach }) {
+  const money = (v: number | null | undefined) => (v != null ? currency(v) : "—");
+  const rows: {
+    label: string;
+    value: string;
+    hint?: string;
+    strong?: boolean;
+    accent?: boolean;
+  }[] = [
+    {
+      label: "Gross Potential Income",
+      value: money(c.gpi),
+      hint: c.gpi == null ? "Needs data" : undefined,
+    },
+    {
+      label: `(−) Vacancy${c.vacancyPct != null ? ` (${c.vacancyPct}%)` : ""}`,
+      value: c.vacancyLoss != null ? `(${currency(c.vacancyLoss)})` : "—",
+      hint: c.vacancyPct == null ? "Needs data" : undefined,
+    },
+    c.otherIncome
+      ? { label: "(+) Other Income", value: currency(c.otherIncome) }
+      : { label: "(+) Other Income", value: "—" },
+    { label: "Effective Gross Income", value: money(c.egi), strong: true },
+    {
+      label: `(−) Operating Expenses${c.opexRatioPct != null ? ` (${c.opexRatioPct}% of EGI)` : ""}`,
+      value: c.operatingExpenses != null ? `(${currency(c.operatingExpenses)})` : "—",
+      hint: c.operatingExpenses == null ? "Needs data" : undefined,
+    },
+    { label: "Net Operating Income (NOI)", value: money(c.noi), strong: true },
+    {
+      label: "÷ Market Cap Rate",
+      value:
+        c.capRatePct != null
+          ? `${c.capRatePct}%${c.capRateSource ? ` (${c.capRateSource === "appraisal" ? "appraisal" : "your input"})` : ""}`
+          : "—",
+      hint: c.capRatePct == null ? "Needs a cap rate" : undefined,
+    },
+    {
+      label: "Indicated Value",
+      value: c.indicatedValue != null ? currency(c.indicatedValue) : "—",
+      accent: true,
+      hint: c.indicatedValue == null ? "Complete the figures above" : undefined,
+    },
+  ];
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Income Approach (Summary)
+      </div>
+      <table className="w-full text-xs sm:text-sm">
+        <tbody>
+          {rows.map((r) => (
+            <tr
+              key={r.label}
+              className={`border-t border-border/60 ${r.accent ? "bg-success/10" : r.strong ? "bg-secondary/30" : ""}`}
+            >
+              <td className={`px-3 py-2 sm:px-4 ${r.strong || r.accent ? "font-semibold" : ""}`}>
+                {r.label}
+              </td>
+              <td
+                className={`whitespace-nowrap px-3 py-2 text-right tabular-nums sm:px-4 ${
+                  r.accent
+                    ? "font-serif text-sm font-bold text-success sm:text-base"
+                    : r.strong
+                      ? "font-semibold"
+                      : ""
+                }`}
+              >
+                {r.value}
+                {r.hint && (
+                  <span className="ml-2 rounded-full bg-warning/20 px-1.5 py-0.5 text-[9px] font-semibold text-warning-foreground">
+                    {r.hint}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Data Availability panel — which source documents the owner has provided,
+// with a per-kind upload control. Mirrors ZoningClassificationTable's
+// per-row upload.
+function IncomeDataAvailability({
+  docKinds,
+  onUpload,
+  uploading,
+}: {
+  docKinds: string[];
+  onUpload?: (kind: string, files: File[]) => void;
+  uploading?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Data Availability
+      </div>
+      <ul className="divide-y divide-border/60">
+        {INCOME_DOC_KINDS.map((kind) => {
+          const has = docKinds.includes(kind);
+          return (
+            <li
+              key={kind}
+              className="flex items-center justify-between gap-2 px-3 py-2.5 text-xs sm:px-4 sm:text-sm"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                {has ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                ) : (
+                  <FileWarning className="h-4 w-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="truncate">
+                  {kind}
+                  {kind === "Appraisal" && (
+                    <span className="ml-1 text-muted-foreground">(cap rate)</span>
+                  )}
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                <span
+                  className={`hidden text-xs font-semibold sm:inline ${has ? "text-success" : "text-muted-foreground"}`}
+                >
+                  {has ? "Provided" : "Not provided"}
+                </span>
+                {onUpload && (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
+                    <input
+                      type="file"
+                      accept="image/*,.pdf,.csv,.xlsx,.xls"
+                      multiple
+                      disabled={uploading}
+                      className="hidden"
+                      onChange={(e) => {
+                        const sel = Array.from(e.target.files ?? []);
+                        if (sel.length > 0) onUpload(kind, sel);
+                        e.target.value = "";
+                      }}
+                    />
+                    <Upload className="h-3 w-3" />
+                    {uploading ? "Uploading…" : has ? "Replace" : "Upload"}
+                  </label>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+type IncomeFormState = {
+  grossPotentialIncome: string;
+  otherIncome: string;
+  vacancyPct: string;
+  operatingExpenses: string;
+  noiStated: string;
+  rentableSqft: string;
+  capRatePct: string;
+  capRateSource: "appraisal" | "owner";
+};
+
+function toFormState(a: IncomeAnalysis | null): IncomeFormState {
+  const s = (v: number | null | undefined) => (v != null ? String(v) : "");
+  return {
+    grossPotentialIncome: s(a?.grossPotentialIncome),
+    otherIncome: s(a?.otherIncome),
+    vacancyPct: s(a?.vacancyPct),
+    operatingExpenses: s(a?.operatingExpenses),
+    noiStated: s(a?.noiStated),
+    rentableSqft: s(a?.rentableSqft),
+    capRatePct: s(a?.capRatePct),
+    capRateSource: a?.capRateSource ?? "owner",
+  };
+}
+
+const numOrNull = (v: string): number | null => {
+  const n = Number(v.replace(/[^0-9.-]/g, ""));
+  return v.trim() !== "" && Number.isFinite(n) ? n : null;
+};
+
+// The editable review form — pre-fills from AI-extracted document figures,
+// the owner confirms/corrects, then Save persists and re-runs Module 7.
+function IncomeFiguresForm({
+  analysis,
+  incomeDocs,
+  canEdit,
+  onExtractIncome,
+  onSave,
+}: {
+  analysis: IncomeAnalysis | null;
+  incomeDocs: DocumentRecord[];
+  canEdit: boolean;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  onSave: (input: IncomeAnalysisInput) => void;
+}) {
+  const [form, setForm] = useState<IncomeFormState>(() => toFormState(analysis));
+  const [extracting, setExtracting] = useState(false);
+  const [extractNote, setExtractNote] = useState<string | null>(null);
+  const analysisKey = analysis?.updatedAt ?? "none";
+  useEffect(() => {
+    setForm(toFormState(analysis));
+  }, [analysisKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = <K extends keyof IncomeFormState>(k: K, v: IncomeFormState[K]) =>
+    setForm((f) => ({ ...f, [k]: v }));
+
+  async function runExtract() {
+    if (incomeDocs.length === 0) return;
+    setExtracting(true);
+    setExtractNote(null);
+    try {
+      const results = await Promise.all(
+        incomeDocs.map((d) => onExtractIncome(d.id).catch(() => null)),
+      );
+      setForm((f) => {
+        const next = { ...f };
+        const fill = (k: Exclude<keyof IncomeFormState, "capRateSource">, v: number | null) => {
+          if (v != null && next[k] === "") next[k] = String(v);
+        };
+        for (const r of results) {
+          if (!r) continue;
+          fill("grossPotentialIncome", r.grossPotentialIncome);
+          fill("otherIncome", r.otherIncome);
+          fill("vacancyPct", r.vacancyPct);
+          fill("operatingExpenses", r.operatingExpenses);
+          fill("noiStated", r.noi);
+          fill("rentableSqft", r.rentableSqft);
+          if (r.capRatePct != null && next.capRatePct === "") {
+            next.capRatePct = String(r.capRatePct);
+            next.capRateSource = "appraisal";
+          }
+        }
+        return next;
+      });
+      const got = results.filter(Boolean).length;
+      setExtractNote(
+        got > 0
+          ? `Read ${got} document${got === 1 ? "" : "s"}. Review and correct anything below, then Save.`
+          : "Couldn't read figures from the uploaded documents — enter them below.",
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function submit() {
+    onSave({
+      grossPotentialIncome: numOrNull(form.grossPotentialIncome),
+      otherIncome: numOrNull(form.otherIncome),
+      vacancyPct: numOrNull(form.vacancyPct),
+      operatingExpenses: numOrNull(form.operatingExpenses),
+      noiStated: numOrNull(form.noiStated),
+      rentableSqft: numOrNull(form.rentableSqft),
+      capRatePct: numOrNull(form.capRatePct),
+      capRateSource: form.capRatePct.trim() !== "" ? form.capRateSource : null,
+      sourceDocumentIds: incomeDocs.map((d) => d.id),
+    });
+  }
+
+  const field = (
+    label: string,
+    k: keyof IncomeFormState,
+    opts?: { prefix?: string; suffix?: string },
+  ) => (
+    <label className="grid gap-1 text-xs">
+      <span className="font-medium text-muted-foreground">{label}</span>
+      <span className="flex items-center rounded-md border border-border bg-background px-2 focus-within:border-accent">
+        {opts?.prefix && <span className="text-muted-foreground">{opts.prefix}</span>}
+        <input
+          inputMode="decimal"
+          disabled={!canEdit}
+          value={form[k] as string}
+          onChange={(e) => set(k, e.target.value)}
+          className="w-full bg-transparent py-1.5 text-sm outline-none disabled:opacity-60"
+        />
+        {opts?.suffix && <span className="text-muted-foreground">{opts.suffix}</span>}
+      </span>
+    </label>
+  );
+
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Income Figures
+        </div>
+        {canEdit && incomeDocs.length > 0 && (
+          <button
+            type="button"
+            onClick={runExtract}
+            disabled={extracting}
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10 disabled:opacity-60"
+          >
+            {extracting ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Activity className="h-3.5 w-3.5" />
+            )}
+            {extracting ? "Reading documents…" : "Extract from uploaded documents"}
+          </button>
+        )}
+      </div>
+      {extractNote && <p className="mt-1.5 text-[11px] text-muted-foreground">{extractNote}</p>}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {field("Gross potential income (annual)", "grossPotentialIncome", { prefix: "$" })}
+        {field("Other income (annual)", "otherIncome", { prefix: "$" })}
+        {field("Vacancy / collection loss", "vacancyPct", { suffix: "%" })}
+        {field("Operating expenses (annual)", "operatingExpenses", { prefix: "$" })}
+        {field("Stated NOI (optional, from a doc)", "noiStated", { prefix: "$" })}
+        {field("Rentable area (optional)", "rentableSqft", { suffix: "SF" })}
+        {field("Capitalization rate", "capRatePct", { suffix: "%" })}
+        <label className="grid gap-1 text-xs">
+          <span className="font-medium text-muted-foreground">Cap rate source</span>
+          <select
+            disabled={!canEdit}
+            value={form.capRateSource}
+            onChange={(e) => set("capRateSource", e.target.value as "owner" | "appraisal")}
+            className="rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-accent disabled:opacity-60"
+          >
+            <option value="owner">I'm providing this rate</option>
+            <option value="appraisal">From an appraisal</option>
+          </select>
+        </label>
+      </div>
+      {canEdit && (
+        <div className="mt-3 flex justify-end">
+          <button type="button" onClick={submit} className="btn-primary text-sm">
+            Save figures
+          </button>
+        </div>
+      )}
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Figures come only from your documents or your entry — nothing here is estimated. The
+        indicated value is <span className="font-medium">NOI ÷ cap rate</span>, computed from what
+        you enter.
+      </p>
+    </div>
+  );
+}
+
+// The full Module 7 workspace shown in the preview modal.
+function IncomeWorkspace({
+  m,
+  state,
+  moduleState,
+  compsMap,
+  analysis,
+  computed,
+  evidenceDocs,
+  allowEvidenceUpload,
+  uploadingEvidence,
+  onUploadEvidence,
+  onSaveIncomeAnalysis,
+  onExtractIncome,
+  onForceReload,
+  onMarkNotApplicable,
+}: {
+  m: Module;
+  state: IntakeState;
+  moduleState: ModuleAsyncState | undefined;
+  compsMap: { data: CompsResult | null; loading: boolean };
+  analysis: IncomeAnalysis | null;
+  computed: IncomeApproach;
+  evidenceDocs: DocumentRecord[];
+  allowEvidenceUpload: boolean;
+  uploadingEvidence: boolean;
+  onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  onForceReload: () => void;
+  onMarkNotApplicable: () => void;
+}) {
+  const incomeDocs = evidenceDocs.filter((d) => d.documentType?.startsWith("Income: "));
+  const docKinds = [
+    ...new Set(
+      incomeDocs
+        .map((d) => d.documentType?.replace(/^Income:\s*/, "").trim())
+        .filter((k): k is string => !!k),
+    ),
+  ];
+  const d = moduleState?.data as ModuleResultMap["income"] | undefined;
+  const supports = d?.supportsCadValue ?? incomeSupportsCad(computed);
+  const cs = computeComparableStats(
+    compsMap.data?.subject ?? null,
+    compsMap.data?.comps ?? [],
+    state.totalValue,
+  );
+  const compsRange = cs.indicated ? { min: cs.indicated.min, max: cs.indicated.max } : null;
+  const aiLoading = computed.dataComplete && (!moduleState || moduleState.loading);
+
+  return (
+    <div className="mt-4 grid gap-4">
+      <p className="-mb-1 text-sm text-muted-foreground">
+        AI models the income approach when the figures are available — every number below is yours,
+        computed as <span className="font-medium">NOI ÷ cap rate</span>, never estimated.
+      </p>
+      <AnalysisPipeline
+        steps={[
+          { eyebrow: "User input", label: "Income data (P&L, rent roll)", Icon: User },
+          { eyebrow: "AI processing", label: "Income modeling engine", Icon: Cpu },
+          { eyebrow: "Logic / decision", label: "NOI & cap-rate model", Icon: Scale },
+          { eyebrow: "AI output", label: "Income value estimate", Icon: Gauge, current: true },
+          { eyebrow: "Next step", label: "Compare & apply weight", Icon: ArrowRight },
+        ]}
+      />
+
+      <IncomeDataAvailability
+        docKinds={docKinds}
+        onUpload={
+          allowEvidenceUpload
+            ? (kind, files) => onUploadEvidence(files, undefined, `Income: ${kind}`)
+            : undefined
+        }
+        uploading={uploadingEvidence}
+      />
+
+      <IncomeFiguresForm
+        analysis={analysis}
+        incomeDocs={incomeDocs}
+        canEdit={allowEvidenceUpload}
+        onExtractIncome={onExtractIncome}
+        onSave={onSaveIncomeAnalysis}
+      />
+
+      <IncomeApproachTable c={computed} />
+      {computed.dataComplete && (
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Income Waterfall
+          </div>
+          <IncomeWaterfall c={computed} />
+        </div>
+      )}
+      <IncomeValueComparison computed={computed} compsRange={compsRange} supports={supports} />
+
+      {aiLoading && <LoadingLine text="Modeling the income approach…" className="text-sm" />}
+      {d && (
+        <div className="grid gap-3">
+          <AiVerdictLine icon={m.icon} text={d.assessment} color={m.color} />
+          {d.cadComparisonNarrative && (
+            <p className="text-sm text-muted-foreground">{d.cadComparisonNarrative}</p>
+          )}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <ZoningImpactCol title="Valuation basis" tone="success">
+              <p className="mb-1">
+                <span className="font-medium text-foreground">Vacancy:</span>{" "}
+                {d.vacancyBasis || "—"}
+              </p>
+              <p className="mb-1">
+                <span className="font-medium text-foreground">Operating expenses:</span>{" "}
+                {d.opexBasis || "—"}
+              </p>
+              <p>
+                <span className="font-medium text-foreground">Cap rate:</span>{" "}
+                {d.capRateBasis || "—"}
+              </p>
+            </ZoningImpactCol>
+            <ZoningImpactCol title="Assumptions & sources" tone="accent">
+              {d.assumptions.length > 0 && (
+                <ul className="mb-2 grid list-disc gap-1 pl-4">
+                  {d.assumptions.map((a, i) => (
+                    <li key={i}>{a}</li>
+                  ))}
+                </ul>
+              )}
+              {d.sources.length > 0 ? (
+                <p className="text-[11px]">
+                  <span className="font-medium text-foreground">Sources:</span>{" "}
+                  {d.sources.join("; ")}
+                </p>
+              ) : (
+                <p>—</p>
+              )}
+            </ZoningImpactCol>
+            <ZoningImpactCol title="Confidence & missing info" tone="success">
+              <p className="mb-1">{d.confidenceNote || "—"}</p>
+              {d.missingInformation.length > 0 && (
+                <ul className="grid list-disc gap-1 pl-4">
+                  {d.missingInformation.map((mi, i) => (
+                    <li key={i}>{mi}</li>
+                  ))}
+                </ul>
+              )}
+            </ZoningImpactCol>
+          </div>
+        </div>
+      )}
+      {moduleState?.error && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+          <span className="text-destructive">Couldn't generate the income narrative.</span>
+          <button onClick={onForceReload} className="btn-outline text-xs">
+            Retry
+          </button>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={onMarkNotApplicable}
+        className="justify-self-start text-xs font-medium text-accent hover:underline"
+      >
+        I don't have this — mark Not Applicable
+      </button>
     </div>
   );
 }
@@ -4614,6 +6432,582 @@ function CostBenefitRow({ savings }: { savings: number }) {
         label="net benefit"
         tone="bg-success/15 text-success"
       />
+    </div>
+  );
+}
+
+// ── Module 9 (Estimated Savings) ─────────────────────────────────────────
+// Every figure here is the deterministic result from
+// src/lib/savings-analysis.ts — no AI value anywhere, identical on every
+// refresh.
+
+const SAVINGS_CONF_STYLE: Record<SavingsAnalysis["financialConfidence"], string> = {
+  High: "bg-success/15 text-success",
+  Moderate: "bg-warning/20 text-warning-foreground",
+  Limited: "bg-secondary text-muted-foreground",
+};
+
+function ConfPill({ level }: { level: SavingsAnalysis["financialConfidence"] }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${SAVINGS_CONF_STYLE[level]}`}
+    >
+      {level}
+    </span>
+  );
+}
+
+// Compact card visual — CAD → Indicated → Reduction → Annual Savings, then a
+// Net Benefit / ROI chip. Mirrors the reference infographic's compact form.
+function SavingsCardVisual({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div className="grid gap-2">
+      <div className="flex items-center justify-center gap-1">
+        <FormulaIcon
+          Icon={Building2}
+          value={compactCurrency(a.cadValue)}
+          label="CAD value"
+          tone="bg-destructive/10 text-destructive"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={Home}
+          value={
+            a.indicatedRange
+              ? `${compactCurrency(a.indicatedRange.low)}+`
+              : compactCurrency(a.indicatedValue)
+          }
+          label="indicated"
+          tone="bg-sky-500/15 text-sky-600"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={TrendingDown}
+          value={`${compactCurrency(a.reductionBase)}`}
+          label={`${a.reductionPct}% off`}
+          tone="bg-warning/20 text-warning-foreground"
+        />
+        <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <FormulaIcon
+          Icon={DollarSign}
+          value={`${compactCurrency(a.annualSavings)}/yr`}
+          label="tax savings"
+          tone="bg-success/15 text-success"
+        />
+      </div>
+      <div className="flex items-center justify-center gap-2 text-xs">
+        <span className="text-muted-foreground">Net benefit</span>
+        <span className="font-serif font-bold text-success">{compactCurrency(a.netBenefit)}</span>
+        {a.roiPct != null ? (
+          <span className="rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold text-success">
+            {a.roiPct}% ROI
+          </span>
+        ) : a.savingsToCostMultiple != null ? (
+          <span className="rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold text-success">
+            {a.savingsToCostMultiple}x
+          </span>
+        ) : (
+          <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+            no cost entered
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The Value Reduction Impact stepped strip.
+function SavingsFlowStrip({ a }: { a: SavingsAnalysis }) {
+  const indicated = a.indicatedRange
+    ? `${compactCurrency(a.indicatedRange.low)} – ${compactCurrency(a.indicatedRange.high)}`
+    : compactCurrency(a.indicatedValue);
+  const steps: { label: string; value: string; tone: string; Icon: LucideIcon }[] = [
+    {
+      label: "Current CAD Value",
+      value: currency(a.cadValue),
+      tone: "border-destructive/40 bg-destructive/5 text-destructive",
+      Icon: Building2,
+    },
+    {
+      label: a.indicatedRange ? "AI-Indicated Value Range" : "AI-Indicated Value",
+      value: indicated,
+      tone: "border-sky-500/40 bg-sky-500/5 text-sky-600",
+      Icon: Home,
+    },
+    {
+      label: "Potential Reduction",
+      value: `${compactCurrency(a.reductionBase)}  ·  ${a.reductionPct}%`,
+      tone: "border-warning/40 bg-warning/10 text-warning-foreground",
+      Icon: TrendingDown,
+    },
+    {
+      label: "Est. Annual Tax Savings",
+      value: currency(a.annualSavings),
+      tone: "border-success/40 bg-success/10 text-success",
+      Icon: DollarSign,
+    },
+  ];
+  return (
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
+      {steps.map((s, i) => (
+        <Fragment key={s.label}>
+          <div
+            className={`flex min-w-[104px] flex-1 flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-center sm:min-w-[130px] ${s.tone}`}
+          >
+            <s.Icon className="h-4 w-4" />
+            <div className="text-[9px] font-semibold uppercase leading-tight tracking-wide opacity-80">
+              {s.label}
+            </div>
+            <div className="text-[11px] font-bold tabular-nums text-foreground sm:text-xs">
+              {s.value}
+            </div>
+          </div>
+          {i < steps.length - 1 && (
+            <ArrowRight className="h-4 w-4 shrink-0 self-center text-muted-foreground" />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+const SAVINGS_DISCLAIMER =
+  "Estimated savings are based on the current valuation and tax assumptions available to CorvusPT. Actual savings depend on the final value the county sets and the applicable tax rates, exemptions, and taxable-value rules.";
+
+function SavingsSummaryList({ a }: { a: SavingsAnalysis }) {
+  const rows: [string, string][] = [
+    ["Current CAD Value", currency(a.cadValue)],
+    [
+      a.indicatedRange ? "AI-Indicated Value Range" : "AI-Indicated Value",
+      a.indicatedRange
+        ? `${currency(a.indicatedRange.low)} – ${currency(a.indicatedRange.high)}`
+        : currency(a.indicatedValue),
+    ],
+    ["Potential Value Reduction", currency(a.reductionBase)],
+    ["Potential Reduction", `${a.reductionPct}%`],
+    ["Estimated Annual Tax Savings", currency(a.annualSavings)],
+    ["Protest Cost", a.protestCostSource === "none" ? "Not entered" : currency(a.protestCost)],
+    ["Estimated Net Benefit", currency(a.netBenefit)],
+    [
+      "Savings-to-Cost Multiple",
+      a.savingsToCostMultiple != null ? `${a.savingsToCostMultiple}x` : "—",
+    ],
+  ];
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Financial Opportunity
+      </div>
+      <table className="w-full text-xs sm:text-sm">
+        <tbody>
+          {rows.map(([k, v], i) => (
+            <tr key={k} className={i > 0 ? "border-t border-border/60" : ""}>
+              <td className="px-3 py-2 text-muted-foreground sm:px-4">{k}</td>
+              <td className="whitespace-nowrap px-3 py-2 text-right font-medium tabular-nums sm:px-4">
+                {v}
+              </td>
+            </tr>
+          ))}
+          <tr className="border-t border-border/60">
+            <td className="px-3 py-2 text-muted-foreground sm:px-4">Financial Confidence</td>
+            <td className="px-3 py-2 text-right sm:px-4">
+              <ConfPill level={a.financialConfidence} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground sm:px-4">
+        {SAVINGS_DISCLAIMER}
+      </p>
+    </div>
+  );
+}
+
+function SavingsScenarioCards({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Scenario Analysis
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {a.scenarios.map((s) => (
+          <div
+            key={s.key}
+            className={`rounded-lg border p-3 text-center ${
+              s.key === "base" ? "border-accent/40 bg-accent/5" : "border-border"
+            }`}
+          >
+            <div
+              className={`text-[10px] font-semibold uppercase tracking-wide ${
+                s.key === "base" ? "text-accent" : "text-muted-foreground"
+              }`}
+            >
+              {s.label} Scenario
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {s.reductionPct}% reduction
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              {compactCurrency(s.valueReduction)} off value
+            </div>
+            <div className="mt-1 font-serif text-lg font-bold text-success">
+              {currency(s.annualSavings)}
+              <span className="text-xs font-normal text-muted-foreground"> / yr</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        The High scenario is a supportable higher-end opportunity based on the available analysis —
+        not the expected outcome.
+      </p>
+    </div>
+  );
+}
+
+function SavingsRoiRow({ a }: { a: SavingsAnalysis }) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        ROI Analysis (Base Scenario)
+      </div>
+      {/* Annual figures only — ROI is defined on the annual net benefit
+          (spec §8). The multi-year projection is its own line below. */}
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        <FormulaIcon
+          Icon={DollarSign}
+          value={currency(a.annualSavings)}
+          label="annual savings"
+          tone="bg-success/15 text-success"
+        />
+        <span className="text-sm text-muted-foreground">−</span>
+        <FormulaIcon
+          Icon={DollarSign}
+          value={a.protestCostSource === "none" ? "$0" : currency(a.protestCost)}
+          label="protest cost"
+          tone="bg-violet-500/15 text-violet-600"
+        />
+        <span className="text-sm text-muted-foreground">=</span>
+        <FormulaIcon
+          Icon={BarChart3}
+          value={currency(a.netBenefit)}
+          label="net benefit / yr"
+          tone="bg-success/15 text-success"
+        />
+      </div>
+      <div className="mt-2 text-center text-sm">
+        {a.roiPct != null ? (
+          <>
+            <span className="text-muted-foreground">Annual ROI </span>
+            <span className="font-serif text-lg font-bold text-success">{a.roiPct}%</span>
+            {a.savingsToCostMultiple != null && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                ({a.savingsToCostMultiple}x savings-to-cost)
+              </span>
+            )}
+          </>
+        ) : a.protestCostSource === "none" ? (
+          <span className="text-xs text-muted-foreground">
+            No direct protest cost entered — ROI not calculated. Net benefit equals the estimated
+            savings.
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            Protest cost needed to calculate ROI.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type SavingsFormState = {
+  taxableValue: string;
+  exemptionsTotal: string;
+  protestCostOverride: string;
+  projectionYears: string;
+};
+const savingsToForm = (t: SavingsTaxInputs | null): SavingsFormState => {
+  const s = (v: number | null | undefined) => (v != null ? String(v) : "");
+  return {
+    taxableValue: s(t?.taxableValue),
+    exemptionsTotal: s(t?.exemptionsTotal),
+    protestCostOverride: s(t?.protestCostOverride),
+    projectionYears: s(t?.projectionYears),
+  };
+};
+
+function SavingsTaxDetailsForm({
+  taxInputs,
+  onSave,
+}: {
+  taxInputs: SavingsTaxInputs | null;
+  onSave: (input: SavingsTaxInputsInput) => void;
+}) {
+  const [form, setForm] = useState<SavingsFormState>(() => savingsToForm(taxInputs));
+  const key = JSON.stringify(taxInputs ?? {});
+  useEffect(() => {
+    setForm(savingsToForm(taxInputs));
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (k: keyof SavingsFormState, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const parse = (v: string): number | null => {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return v.trim() !== "" && Number.isFinite(n) ? n : null;
+  };
+  const field = (label: string, k: keyof SavingsFormState, prefix?: string, suffix?: string) => (
+    <label className="grid gap-1 text-xs">
+      <span className="font-medium text-muted-foreground">{label}</span>
+      <span className="flex items-center rounded-md border border-border bg-background px-2 focus-within:border-accent">
+        {prefix && <span className="text-muted-foreground">{prefix}</span>}
+        <input
+          inputMode="decimal"
+          value={form[k]}
+          onChange={(e) => set(k, e.target.value)}
+          className="w-full bg-transparent py-1.5 text-sm outline-none"
+        />
+        {suffix && <span className="text-muted-foreground">{suffix}</span>}
+      </span>
+    </label>
+  );
+  return (
+    <details className="rounded-lg border border-border">
+      <summary className="cursor-pointer px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Adjust tax details
+      </summary>
+      <div className="border-t border-border/60 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {field("Taxable value (if different from appraised)", "taxableValue", "$")}
+          {field("Total exemptions", "exemptionsTotal", "$")}
+          {field("Protest cost (override — enter 0 for DIY)", "protestCostOverride", "$")}
+          {field("Projection years for multi-year estimate", "projectionYears")}
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button
+            type="button"
+            onClick={() =>
+              onSave({
+                taxableValue: parse(form.taxableValue),
+                exemptionsTotal: parse(form.exemptionsTotal),
+                protestCostOverride: parse(form.protestCostOverride),
+                projectionYears: parse(form.projectionYears),
+              })
+            }
+            className="btn-primary text-sm"
+          >
+            Save &amp; recalculate
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Every figure here is yours — nothing is estimated. Leave a field blank to use the default
+          assumption.
+        </p>
+      </div>
+    </details>
+  );
+}
+
+function SavingsViewDetails({ a }: { a: SavingsAnalysis }) {
+  const line = (k: string, v: string) => (
+    <div className="flex justify-between gap-4">
+      <span className="text-muted-foreground">{k}</span>
+      <span className="text-right font-medium tabular-nums">{v}</span>
+    </div>
+  );
+  return (
+    <details className="rounded-lg border border-border">
+      <summary className="cursor-pointer px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        View details
+      </summary>
+      <div className="grid gap-4 border-t border-border/60 p-4 text-xs">
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Valuation Reconciliation</div>
+          {line("Current CAD value", currency(a.cadValue))}
+          {line(
+            a.indicatedRange ? "AI-indicated range" : "AI-indicated value",
+            a.indicatedRange
+              ? `${currency(a.indicatedRange.low)} – ${currency(a.indicatedRange.high)}`
+              : currency(a.indicatedValue),
+          )}
+          {line("Potential reduction", `${currency(a.reductionBase)} (${a.reductionPct}%)`)}
+          {line("Value reduction basis", a.valueBasisLabel)}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Tax Assumptions</div>
+          {line("Tax year", a.taxYear != null ? String(a.taxYear) : "—")}
+          {line("Combined tax rate", `${a.taxRate.pct}%`)}
+          {line("Tax rate unit", "decimal (fraction of value)")}
+          {line(
+            "Taxable value used",
+            `${currency(a.taxableValueUsed)}${a.taxableValueAssumed ? " (assumed = appraised)" : ""}`,
+          )}
+          {line(
+            "Exemptions applied",
+            a.exemptionsApplied > 0 ? currency(a.exemptionsApplied) : "none on file",
+          )}
+          {line("Rate source", a.taxRate.source)}
+          {line("Rate effective year", String(a.taxRate.effectiveYear))}
+          {line("Taxing-entity detail", "combined county rate used — entity detail not available")}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Financial Analysis</div>
+          {line("Estimated annual tax savings", currency(a.annualSavings))}
+          {line(
+            "Protest cost",
+            a.protestCostSource === "none" ? "not entered" : currency(a.protestCost),
+          )}
+          {line("Net benefit", currency(a.netBenefit))}
+          {line("ROI", a.roiPct != null ? `${a.roiPct}%` : "n/a (cost 0 or unknown)")}
+          {line(
+            "Savings-to-cost multiple",
+            a.savingsToCostMultiple != null ? `${a.savingsToCostMultiple}x` : "n/a",
+          )}
+          {a.multiYearSavings != null &&
+            line(
+              "Potential multi-year savings",
+              `${currency(a.multiYearSavings)} over ${a.projectionYears} yrs (estimate)`,
+            )}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Confidence</div>
+          {line("Valuation confidence", a.valuationConfidence)}
+          {line("Tax data confidence", a.taxDataConfidence)}
+          {line("Financial confidence", a.financialConfidence)}
+        </div>
+        <div className="grid gap-1">
+          <div className="font-semibold text-foreground">Calculation Methodology</div>
+          <p className="text-muted-foreground">
+            Annual tax savings = value reduction × combined tax rate ={" "}
+            {currency(Math.min(a.reductionBase, a.taxableValueUsed))} × {a.taxRate.pct}% ={" "}
+            {currency(a.annualSavings)}.
+          </p>
+          {a.protestCostSource === "contingency" && (
+            <p className="text-muted-foreground">
+              Protest cost = 25% × annual savings = {currency(a.protestCost)}. Net benefit ={" "}
+              {currency(a.annualSavings)} − {currency(a.protestCost)} = {currency(a.netBenefit)}.
+            </p>
+          )}
+          {a.roiPct != null && (
+            <p className="text-muted-foreground">
+              ROI = net benefit ÷ protest cost × 100 = {currency(a.netBenefit)} ÷{" "}
+              {currency(a.protestCost)} × 100 = {a.roiPct}%.
+            </p>
+          )}
+          <ul className="mt-1 grid list-disc gap-0.5 pl-4 text-muted-foreground">
+            {a.assumptions.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function SavingsWorkspace({
+  analysis: a,
+  taxInputs,
+  allowEdit,
+  onSaveTaxInputs,
+  onOpenModule,
+  headlineSavings,
+  currentValue,
+  reducedValue,
+  rationale,
+  incomeNote,
+}: {
+  analysis: SavingsAnalysis;
+  taxInputs: SavingsTaxInputs | null;
+  allowEdit: boolean;
+  onSaveTaxInputs: (input: SavingsTaxInputsInput) => void;
+  onOpenModule: (moduleId: string) => void;
+  headlineSavings: number;
+  currentValue: number;
+  reducedValue: number;
+  rationale: string | null;
+  incomeNote: string | null;
+}) {
+  if (!a.sufficient) {
+    return (
+      <div className="mt-4 rounded-lg border border-warning/40 bg-warning/10 p-4">
+        <div className="text-sm font-semibold text-warning-foreground">Additional Data Needed</div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The financial opportunity can't be calculated yet. Missing:
+        </p>
+        <ul className="mt-2 grid list-disc gap-1 pl-5 text-sm">
+          {a.missing.map((x) => (
+            <li key={x}>{x}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 grid gap-4">
+      <div className="text-center">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Estimated Annual Tax Savings
+        </div>
+        <div className="font-serif text-4xl font-bold text-success">
+          <AnimatedNumber value={headlineSavings} format={currency} duration={900} />
+        </div>
+      </div>
+
+      {a.conflicts.length > 0 && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+          <div className="text-xs font-semibold text-destructive">
+            Data Conflict — Review Required
+          </div>
+          <ul className="mt-1 grid list-disc gap-0.5 pl-5 text-xs text-muted-foreground">
+            {a.conflicts.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <SavingsFlowStrip a={a} />
+      <ValueComparisonChart current={currentValue} reduced={reducedValue} />
+      <SavingsSummaryList a={a} />
+      <SavingsScenarioCards a={a} />
+      <SavingsRoiRow a={a} />
+
+      {a.multiYearSavings != null && (
+        <p className="rounded-lg bg-secondary/40 p-3 text-xs text-muted-foreground">
+          <span className="font-semibold text-foreground">
+            Potential multi-year savings (estimate): {currency(a.multiYearSavings)} over{" "}
+            {a.projectionYears} years.
+          </span>{" "}
+          Assumes the reduced value holds as the base. Not guaranteed — actual carry-over depends on
+          the county's re-appraisal.
+        </p>
+      )}
+
+      <div className="rounded-lg bg-secondary/40 p-3 text-xs">
+        <div className="font-semibold text-foreground">
+          How this connects to the protest strategy
+        </div>
+        <p className="mt-1 text-muted-foreground">
+          CAD value is {compactCurrency(a.reductionBase)} above the AI-indicated value → potential
+          reduction {compactCurrency(a.reductionBase)} → est. annual tax savings{" "}
+          {compactCurrency(a.annualSavings)} → protest cost{" "}
+          {a.protestCostSource === "none" ? "$0" : compactCurrency(a.protestCost)} → est. net
+          benefit {compactCurrency(a.netBenefit)}.
+        </p>
+        {rationale && <p className="mt-1 text-muted-foreground">{rationale}</p>}
+        {incomeNote && <p className="mt-1 text-muted-foreground">{incomeNote}</p>}
+      </div>
+
+      {allowEdit && <SavingsTaxDetailsForm taxInputs={taxInputs} onSave={onSaveTaxInputs} />}
+      <SavingsViewDetails a={a} />
+
+      <button
+        type="button"
+        onClick={() => onOpenModule("executive")}
+        className="btn-primary flex items-center justify-center gap-2 text-sm"
+      >
+        View Final Protest Recommendation
+        <ArrowRight className="h-4 w-4" />
+      </button>
     </div>
   );
 }
@@ -5132,6 +7526,13 @@ function ModulePreviewContent({
   onSaveCompSelection,
   onRemoveCompSelection,
   onExtractCompSale,
+  incomeAnalysis,
+  incomeComputed,
+  onSaveIncomeAnalysis,
+  onExtractIncome,
+  savingsAnalysis,
+  savingsTaxInputs,
+  onSaveSavingsTaxInputs,
 }: {
   m: Module;
   estimated: {
@@ -5177,6 +7578,20 @@ function ModulePreviewContent({
   // Uploads one sale document and returns the AI-extracted figures, or null
   // (no-op in the printable report view).
   onExtractCompSale: (file: File) => Promise<CompSaleExtraction | null>;
+  // Module 7 (Income Value) — the owner-confirmed income figures (see
+  // income-analysis.ts) and the deterministic income-approach result
+  // (income-approach.ts). onSaveIncomeAnalysis / onExtractIncome are no-ops
+  // in the printable report view (allowEvidenceUpload false).
+  incomeAnalysis: IncomeAnalysis | null;
+  incomeComputed: IncomeApproach;
+  onSaveIncomeAnalysis: (input: IncomeAnalysisInput) => void;
+  onExtractIncome: (documentId: string) => Promise<IncomeExtraction>;
+  // Module 9 (Estimated Savings) — the deterministic financial analysis
+  // (savings-analysis.ts) and the optional tax-inputs saver (a no-op in the
+  // printable report view).
+  savingsAnalysis: SavingsAnalysis;
+  savingsTaxInputs: SavingsTaxInputs | null;
+  onSaveSavingsTaxInputs: (input: SavingsTaxInputsInput) => void;
 }) {
   // Real AI analysis of the customer's own uploaded evidence — see Module
   // 8's "evidence" case below and analyzeEvidence() in protest-reason.ts.
@@ -5200,41 +7615,41 @@ function ModulePreviewContent({
   const [categorizingEvidence, setCategorizingEvidence] = useState(false);
 
   if (m.requiresUserData) {
-    const isNotApplicable = isModuleNotApplicable(overrides, "income");
+    if (isModuleNotApplicable(overrides, "income")) {
+      return (
+        <div className="mt-4 card-elev p-4 bg-secondary/60">
+          <p className="flex items-center gap-2 text-sm">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+            Marked not applicable — no P&L, rent roll, or operating statement is available for this
+            property. The income approach is excluded from this protest.
+          </p>
+          <button
+            type="button"
+            onClick={() => onClearNotApplicable("income")}
+            className="mt-2 text-xs font-medium text-accent hover:underline"
+          >
+            Undo — I can upload financials
+          </button>
+        </div>
+      );
+    }
     return (
-      <div className="mt-4 card-elev p-4 bg-secondary/60">
-        {isNotApplicable ? (
-          <>
-            <p className="flex items-center gap-2 text-sm">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-              Marked not applicable — no P&L, rent roll, or operating statement is available for
-              this property. The income approach is excluded from this protest.
-            </p>
-            <button
-              type="button"
-              onClick={() => onClearNotApplicable("income")}
-              className="mt-2 text-xs font-medium text-accent hover:underline"
-            >
-              Undo — I can upload financials
-            </button>
-          </>
-        ) : (
-          <>
-            <p className="text-sm">
-              This module requires private financial data (P&L, rent roll, or operating statement)
-              to complete. Upload once you subscribe — AI will run the income approach and compare
-              to your assessed value.
-            </p>
-            <button
-              type="button"
-              onClick={() => onMarkNotApplicable("income")}
-              className="mt-2 text-xs font-medium text-accent hover:underline"
-            >
-              I don't have this — mark Not Applicable
-            </button>
-          </>
-        )}
-      </div>
+      <IncomeWorkspace
+        m={m}
+        state={state}
+        moduleState={moduleState}
+        compsMap={compsMap}
+        analysis={incomeAnalysis}
+        computed={incomeComputed}
+        evidenceDocs={evidenceDocs}
+        allowEvidenceUpload={allowEvidenceUpload}
+        uploadingEvidence={uploadingEvidence}
+        onUploadEvidence={onUploadEvidence}
+        onSaveIncomeAnalysis={onSaveIncomeAnalysis}
+        onExtractIncome={onExtractIncome}
+        onForceReload={onForceReload}
+        onMarkNotApplicable={() => onMarkNotApplicable("income")}
+      />
     );
   }
 
@@ -5269,23 +7684,26 @@ function ModulePreviewContent({
       );
     }
     return (
-      <div className="mt-4 grid gap-3">
-        <div className="text-center">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            Estimated Tax Savings
-          </div>
-          <div className="font-serif text-4xl font-bold text-success">
-            <AnimatedNumber value={estimated.savings} format={currency} duration={900} />
-          </div>
-        </div>
-        <ValueComparisonChart current={current} reduced={reduced} />
-        <div className="flex justify-center">
-          <CostBenefitRow savings={estimated.savings} />
-        </div>
-        <p className="text-center text-xs text-muted-foreground">
-          {estimated.rationale ?? "Based on your county's real effective tax rate."}
-        </p>
-      </div>
+      <SavingsWorkspace
+        analysis={savingsAnalysis}
+        taxInputs={savingsTaxInputs}
+        allowEdit={allowEvidenceUpload}
+        onSaveTaxInputs={onSaveSavingsTaxInputs}
+        onOpenModule={onOpenModule}
+        headlineSavings={estimated.savings}
+        currentValue={current}
+        reducedValue={reduced}
+        rationale={estimated.rationale}
+        incomeNote={
+          incomeComputed.complete && incomeComputed.indicatedValue != null
+            ? `Income approach also indicates ${compactCurrency(incomeComputed.indicatedValue)}${
+                incomeComputed.gapPct != null
+                  ? ` (${Math.abs(incomeComputed.gapPct)}% ${incomeComputed.gapPct > 0 ? "below" : "above"} CAD)`
+                  : ""
+              }. See Module 7.`
+            : null
+        }
+      />
     );
   }
 
@@ -6229,14 +8647,112 @@ function ModulePreviewContent({
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
       return (
-        <div className="mt-4 grid gap-3">
-          <ZoningBadge matches={d.matches} />
-          <ZoningFlow
-            matches={d.matches}
-            stated={state.propertyType}
-            typical={d.typicalClassification || undefined}
+        <div className="mt-4 grid gap-4">
+          <p className="-mb-1 text-sm text-muted-foreground">
+            AI checks alignment across classification, use, and zoning, then identifies issues.
+          </p>
+          <AnalysisPipeline
+            steps={[
+              { eyebrow: "User input", label: "Property & zoning data", Icon: User },
+              { eyebrow: "AI processing", label: "Zoning & use analyzer", Icon: Cpu },
+              { eyebrow: "Logic / decision", label: "Alignment & impact model", Icon: Scale },
+              {
+                eyebrow: "AI output",
+                label: "Zoning analysis report",
+                Icon: Gauge,
+                current: true,
+              },
+              { eyebrow: "Next step", label: "Apply to value relevance", Icon: ArrowRight },
+            ]}
           />
+
+          <ZoningBadge matches={d.matches} />
           <AiVerdictLine icon={m.icon} text={d.assessment} color={m.color} />
+
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Category:</span>
+            <span className="badge-soft">{d.category}</span>
+            <span className="text-muted-foreground">· Typical CAD class:</span>
+            <span className="font-medium">{d.typicalClassification || "—"}</span>
+          </div>
+
+          <ZoningClassificationTable
+            aspects={d.aspects}
+            matches={d.matches}
+            onUpload={
+              allowEvidenceUpload
+                ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
+                : undefined
+            }
+            uploading={uploadingEvidence}
+          />
+
+          {d.discrepancies.length > 0 && (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4">
+              <div className="text-sm font-semibold text-warning-foreground">
+                Detected discrepancies
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                A classification or zoning mismatch is a fact to explain — not, by itself, proof the
+                property is overvalued.
+              </p>
+              <ul className="mt-2.5 grid gap-2 text-sm">
+                {d.discrepancies.map((dc, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{dc.between}</span>
+                    <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                      {dc.confidence} confidence
+                    </span>
+                    <div className="text-muted-foreground">{dc.detail}</div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              AI Analysis &amp; Impact
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <ZoningImpactCol title="Valuation relevance" tone="success">
+                <p>{d.valuationRelevance}</p>
+              </ZoningImpactCol>
+              <ZoningImpactCol title="Possible exemptions" tone="accent">
+                {d.possibleExemptions.length > 0 ? (
+                  <ul className="grid gap-1.5 pl-4 list-disc">
+                    {d.possibleExemptions.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>None identified from the data on file.</p>
+                )}
+              </ZoningImpactCol>
+              <ZoningImpactCol title="Evidence required" tone="success">
+                {d.evidenceRequired.length > 0 ? (
+                  <ul className="grid gap-1.5 pl-4 list-disc">
+                    {d.evidenceRequired.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>—</p>
+                )}
+              </ZoningImpactCol>
+            </div>
+          </div>
+
+          <div className="grid gap-3 rounded-lg bg-secondary/40 p-4 text-sm sm:grid-cols-2">
+            <div>
+              <div className="font-semibold text-foreground">Restrictions</div>
+              <p className="text-muted-foreground">{d.restrictions || "—"}</p>
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">Comparable classifications</div>
+              <p className="text-muted-foreground">{d.comparableClassifications || "—"}</p>
+            </div>
+          </div>
         </div>
       );
     }
@@ -6451,7 +8967,7 @@ function ModulePreviewContent({
               </div>
               {!analysis && !analyzing && !analysisError && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Corvus reads your {protestEvidenceDocs.length} uploaded document
+                  Corvus AI reads your {protestEvidenceDocs.length} uploaded document
                   {protestEvidenceDocs.length === 1 ? "" : "s"} and tells you what it actually found
                   — including flagging anything that doesn't look like real supporting evidence.
                 </p>
