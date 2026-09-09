@@ -469,7 +469,7 @@ function Properties() {
                 >
                   <div className="flex items-start justify-between gap-4 flex-wrap">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         {bulkEligible(p) && (
                           <input
                             type="checkbox"
@@ -479,7 +479,9 @@ function Properties() {
                             className="h-4 w-4 shrink-0"
                           />
                         )}
-                        <span className="text-xs text-muted-foreground">{p.cad}</span>
+                        <span className="min-w-0 truncate text-xs text-muted-foreground">
+                          {p.cad}
+                        </span>
                         <ActionStatusBadge property={p} protests={protests} />
                         {!isBeta && <PaymentStatusBadge property={p} />}
                       </div>

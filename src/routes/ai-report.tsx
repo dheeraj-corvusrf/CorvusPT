@@ -5238,26 +5238,30 @@ function AnalysisPipeline({
   steps: { eyebrow: string; label: string; Icon: LucideIcon; current?: boolean }[];
 }) {
   return (
-    <div className="flex items-stretch gap-1.5 overflow-x-auto pb-1">
+    <div className="flex items-stretch gap-1 overflow-x-auto pb-1 sm:gap-1.5">
       {steps.map((s, i) => (
         <Fragment key={s.label}>
           <div
-            className={`flex min-w-[120px] flex-1 flex-col items-center gap-1.5 rounded-lg px-3 py-3 text-center ${
+            className={`flex min-w-[88px] flex-1 flex-col items-center gap-1 rounded-lg px-2 py-2 text-center sm:min-w-[120px] sm:gap-1.5 sm:px-3 sm:py-3 ${
               s.current ? "bg-accent/15 ring-1 ring-accent/30" : "bg-secondary/50"
             }`}
           >
-            <s.Icon className={`h-5 w-5 ${s.current ? "text-accent" : "text-muted-foreground"}`} />
+            <s.Icon
+              className={`h-4 w-4 sm:h-5 sm:w-5 ${s.current ? "text-accent" : "text-muted-foreground"}`}
+            />
             <div
-              className={`text-[10px] font-bold uppercase leading-none tracking-wide ${
+              className={`text-[9px] font-bold uppercase leading-none tracking-wide sm:text-[10px] ${
                 s.current ? "text-accent" : "text-muted-foreground"
               }`}
             >
               {s.eyebrow}
             </div>
-            <div className="text-xs font-medium leading-tight text-foreground">{s.label}</div>
+            <div className="text-[10px] font-medium leading-tight text-foreground sm:text-xs">
+              {s.label}
+            </div>
           </div>
           {i < steps.length - 1 && (
-            <ArrowRight className="h-4 w-4 shrink-0 self-center text-muted-foreground" />
+            <ArrowRight className="h-3.5 w-3.5 shrink-0 self-center text-muted-foreground sm:h-4 sm:w-4" />
           )}
         </Fragment>
       ))}
@@ -5622,7 +5626,7 @@ function IncomeLadderPreview({
 
   // One fixed-width value column so every input box and read-only value
   // shares the same right edge and width, whatever the $ / % affix.
-  const VALUE_COL = "w-[8.5rem] shrink-0";
+  const VALUE_COL = "w-24 shrink-0 sm:w-[8.5rem]";
   const inputCell = (key: "gpi" | "vac" | "opex" | "cap", prefix?: string, suffix?: string) => (
     <span
       className={`${VALUE_COL} flex items-center rounded border border-border bg-background px-1.5 focus-within:border-accent`}
@@ -5924,20 +5928,20 @@ function IncomeApproachTable({ c }: { c: IncomeApproach }) {
       <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Income Approach (Summary)
       </div>
-      <table className="w-full text-sm">
+      <table className="w-full text-xs sm:text-sm">
         <tbody>
           {rows.map((r) => (
             <tr
               key={r.label}
               className={`border-t border-border/60 ${r.accent ? "bg-success/10" : r.strong ? "bg-secondary/30" : ""}`}
             >
-              <td className={`px-4 py-2 ${r.strong || r.accent ? "font-semibold" : ""}`}>
+              <td className={`px-3 py-2 sm:px-4 ${r.strong || r.accent ? "font-semibold" : ""}`}>
                 {r.label}
               </td>
               <td
-                className={`whitespace-nowrap px-4 py-2 text-right tabular-nums ${
+                className={`whitespace-nowrap px-3 py-2 text-right tabular-nums sm:px-4 ${
                   r.accent
-                    ? "font-serif text-base font-bold text-success"
+                    ? "font-serif text-sm font-bold text-success sm:text-base"
                     : r.strong
                       ? "font-semibold"
                       : ""
@@ -5979,23 +5983,26 @@ function IncomeDataAvailability({
         {INCOME_DOC_KINDS.map((kind) => {
           const has = docKinds.includes(kind);
           return (
-            <li key={kind} className="flex items-center justify-between gap-2 px-4 py-2.5 text-sm">
-              <span className="flex items-center gap-2">
+            <li
+              key={kind}
+              className="flex items-center justify-between gap-2 px-3 py-2.5 text-xs sm:px-4 sm:text-sm"
+            >
+              <span className="flex min-w-0 items-center gap-2">
                 {has ? (
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
                 ) : (
                   <FileWarning className="h-4 w-4 shrink-0 text-muted-foreground" />
                 )}
-                <span>
+                <span className="truncate">
                   {kind}
                   {kind === "Appraisal" && (
-                    <span className="ml-1 text-xs text-muted-foreground">(cap rate)</span>
+                    <span className="ml-1 text-muted-foreground">(cap rate)</span>
                   )}
                 </span>
               </span>
-              <span className="flex items-center gap-2">
+              <span className="flex shrink-0 items-center gap-2">
                 <span
-                  className={`text-xs font-semibold ${has ? "text-success" : "text-muted-foreground"}`}
+                  className={`hidden text-xs font-semibold sm:inline ${has ? "text-success" : "text-muted-foreground"}`}
                 >
                   {has ? "Provided" : "Not provided"}
                 </span>
@@ -6527,13 +6534,15 @@ function SavingsFlowStrip({ a }: { a: SavingsAnalysis }) {
       {steps.map((s, i) => (
         <Fragment key={s.label}>
           <div
-            className={`flex min-w-[130px] flex-1 flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-center ${s.tone}`}
+            className={`flex min-w-[104px] flex-1 flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-center sm:min-w-[130px] ${s.tone}`}
           >
             <s.Icon className="h-4 w-4" />
-            <div className="text-[9px] font-semibold uppercase tracking-wide opacity-80">
+            <div className="text-[9px] font-semibold uppercase leading-tight tracking-wide opacity-80">
               {s.label}
             </div>
-            <div className="text-xs font-bold tabular-nums text-foreground">{s.value}</div>
+            <div className="text-[11px] font-bold tabular-nums text-foreground sm:text-xs">
+              {s.value}
+            </div>
           </div>
           {i < steps.length - 1 && (
             <ArrowRight className="h-4 w-4 shrink-0 self-center text-muted-foreground" />
@@ -6571,23 +6580,25 @@ function SavingsSummaryList({ a }: { a: SavingsAnalysis }) {
       <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Financial Opportunity
       </div>
-      <table className="w-full text-sm">
+      <table className="w-full text-xs sm:text-sm">
         <tbody>
           {rows.map(([k, v], i) => (
             <tr key={k} className={i > 0 ? "border-t border-border/60" : ""}>
-              <td className="px-4 py-2 text-muted-foreground">{k}</td>
-              <td className="px-4 py-2 text-right font-medium tabular-nums">{v}</td>
+              <td className="px-3 py-2 text-muted-foreground sm:px-4">{k}</td>
+              <td className="whitespace-nowrap px-3 py-2 text-right font-medium tabular-nums sm:px-4">
+                {v}
+              </td>
             </tr>
           ))}
           <tr className="border-t border-border/60">
-            <td className="px-4 py-2 text-muted-foreground">Financial Confidence</td>
-            <td className="px-4 py-2 text-right">
+            <td className="px-3 py-2 text-muted-foreground sm:px-4">Financial Confidence</td>
+            <td className="px-3 py-2 text-right sm:px-4">
               <ConfPill level={a.financialConfidence} />
             </td>
           </tr>
         </tbody>
       </table>
-      <p className="border-t border-border/60 px-4 py-2 text-[11px] text-muted-foreground">
+      <p className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground sm:px-4">
         {SAVINGS_DISCLAIMER}
       </p>
     </div>

@@ -86,7 +86,9 @@ export function Modal({
             safety net on top of that real fix, not a substitute for it —
             content that still overflows horizontally now clips instead of
             becoming scrollable, which is a much more visible bug to catch. */}
-        <div className="p-6 pr-12 max-h-[90vh] overflow-y-auto overflow-x-hidden">{children}</div>
+        <div className="p-4 pr-11 sm:p-6 sm:pr-12 max-h-[90vh] overflow-y-auto overflow-x-hidden">
+          {children}
+        </div>
       </div>
     </div>,
     document.body,
