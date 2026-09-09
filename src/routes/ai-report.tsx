@@ -5498,20 +5498,27 @@ function IncomeLadderPreview({
     f.gpi !== seed().gpi || f.vac !== seed().vac || f.opex !== seed().opex || f.cap !== seed().cap;
   const money = (v: number | null | undefined) => (v != null ? compactCurrency(v) : "—");
 
+  // One fixed-width value column so every input box and read-only value
+  // shares the same right edge and width, whatever the $ / % affix.
+  const VALUE_COL = "w-[8.5rem] shrink-0";
   const inputCell = (key: "gpi" | "vac" | "opex" | "cap", prefix?: string, suffix?: string) => (
-    <span className="flex items-center gap-0.5">
-      {prefix && <span className="text-muted-foreground">{prefix}</span>}
+    <span
+      className={`${VALUE_COL} flex items-center rounded border border-border bg-background px-1.5 focus-within:border-accent`}
+    >
+      <span className="w-2.5 shrink-0 text-muted-foreground">{prefix ?? ""}</span>
       <input
         inputMode="decimal"
         value={f[key]}
         placeholder="—"
         onChange={(e) => setF((s) => ({ ...s, [key]: e.target.value }))}
-        className="w-20 rounded border border-border bg-background px-1 py-0.5 text-right text-xs tabular-nums outline-none focus:border-accent"
+        className="min-w-0 flex-1 bg-transparent py-0.5 text-right text-xs tabular-nums outline-none"
       />
-      {suffix && <span className="text-muted-foreground">{suffix}</span>}
+      <span className="w-2.5 shrink-0 text-right text-muted-foreground">{suffix ?? ""}</span>
     </span>
   );
-  const readCell = (v: string) => <span className="tabular-nums">{v}</span>;
+  const readCell = (v: string) => (
+    <span className={`${VALUE_COL} text-right tabular-nums`}>{v}</span>
+  );
 
   const rows: { label: string; cell: React.ReactNode }[] = [
     {
@@ -5564,7 +5571,7 @@ function IncomeLadderPreview({
           ))}
           <div className="mt-1 flex items-center justify-between border-t border-border/60 pt-1.5 text-sm font-semibold text-foreground">
             <span>Indicated Value</span>
-            <span className="tabular-nums">
+            <span className={`${VALUE_COL} pr-2.5 text-right tabular-nums`}>
               {computed.indicatedValue != null ? compactCurrency(computed.indicatedValue) : "—"}
             </span>
           </div>
@@ -5572,7 +5579,9 @@ function IncomeLadderPreview({
         {computed.cadValue != null && (
           <div className="mt-2 flex items-center justify-between text-xs">
             <span className="text-muted-foreground">Current CAD value</span>
-            <span className="font-semibold tabular-nums text-foreground">
+            <span
+              className={`${VALUE_COL} pr-2.5 text-right font-semibold tabular-nums text-foreground`}
+            >
               {compactCurrency(computed.cadValue)}
             </span>
           </div>
