@@ -28,7 +28,6 @@ import { PaymentsModeChip } from "@/components/PaymentsModeChip";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
 import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
-import { createPortal } from "react-dom";
 import { getPropertyProtestStatus, type ActionStatus } from "@/lib/portfolio-status";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
@@ -292,38 +291,6 @@ function Properties() {
     setBulkDeleting(false);
   }
 
-  // Bulk "Run AI Report" — opens each selected property's AI Report in its
-  // own new tab via ?propertyId, so each tab loads its own property (no
-  // shared-intake race). Browsers only allow a burst of window.open() calls
-  // inside one user gesture and usually cap it — count the ones that came
-  // back null and tell the user to allow pop-ups. BASE_URL is "/" in dev,
-  // "/corvuspt/" on the Pages build.
-  function handleRunAiReportSelected() {
-    const chosen = sortedProperties.filter((p) => selectedIds.has(p.id));
-    if (chosen.length === 0) return;
-    // Chrome/Edge only honour ONE window.open() per click (the first spends
-    // the user-activation, the rest are blocked). A synthetic <a target=
-    // "_blank"> click per property isn't subject to that limit — it's the
-    // standard way to open several tabs from one button. Firefox/Safari are
-    // stricter and may still open only the first; the toast tells the user
-    // how to fix that. Each tab is self-contained via ?propertyId, so
-    // rel="noopener" is safe.
-    for (const p of chosen) {
-      const a = document.createElement("a");
-      a.href = `${import.meta.env.BASE_URL}ai-report?propertyId=${encodeURIComponent(p.id)}`;
-      a.target = "_blank";
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-    if (chosen.length > 1) {
-      toast.info(
-        `Opening ${chosen.length} AI Reports in new tabs. If only one opened, allow pop-ups for this site.`,
-      );
-    }
-  }
-
   // Most recently added first, per explicit request — the property you just
   // added/imported should be the first thing you see, not wherever its own
   // protest deadline happens to rank it.
@@ -388,7 +355,42 @@ function Properties() {
           )}
           <PaymentsModeChip />
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Bulk actions for a multi-selection — shown inline here beside the
+              page actions (not a floating bar) once one or more property
+              checkboxes are ticked. */}
+          {selectedIds.size > 0 && (
+            <div className="mr-1 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 py-1 pl-3 pr-1">
+              <span className="text-sm font-medium">{selectedIds.size} selected</span>
+              <button
+                type="button"
+                disabled={bulkDeleting}
+                onClick={handleDeleteSelected}
+                className="btn-outline text-destructive text-sm disabled:opacity-60"
+              >
+                {bulkDeleting ? "Deleting…" : "Delete"}
+              </button>
+              {stripeConfigured && subscribableSelected.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setBulkOpen(true)}
+                  className="btn-primary btn-primary-hover text-sm"
+                >
+                  Protest
+                  {subscribableSelected.length !== selectedIds.size &&
+                    ` (${subscribableSelected.length})`}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                aria-label="Clear selection"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
           <button type="button" onClick={() => setImportOpen(true)} className="btn-outline">
             Bulk Upload
           </button>
@@ -427,57 +429,6 @@ function Properties() {
           onClose={() => setOwnershipsOpen(false)}
         />
       )}
-
-      {/* One action bar for the whole multi-selection — Delete / Run AI
-          Report / Protest selected. Portaled to <body> and position:fixed so
-          it stays pinned to the viewport bottom no matter how far the list
-          is scrolled (a transformed dashboard-layout ancestor would otherwise
-          trap a plain `fixed` child into the page flow). */}
-      {selectedIds.size > 0 &&
-        createPortal(
-          <div className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4 print:hidden">
-            <div className="card-elev flex flex-wrap items-center gap-2 p-2 pl-4 shadow-xl">
-              <span className="text-sm font-medium">
-                {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
-              </span>
-              <button
-                type="button"
-                disabled={bulkDeleting}
-                onClick={handleDeleteSelected}
-                className="btn-outline text-destructive text-sm disabled:opacity-60"
-              >
-                {bulkDeleting ? "Deleting…" : "Delete"}
-              </button>
-              <button
-                type="button"
-                onClick={handleRunAiReportSelected}
-                className="btn-outline text-sm"
-              >
-                Run AI Report
-              </button>
-              {stripeConfigured && subscribableSelected.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setBulkOpen(true)}
-                  className="btn-primary btn-primary-hover text-sm"
-                >
-                  Protest selected
-                  {subscribableSelected.length !== selectedIds.size &&
-                    ` (${subscribableSelected.length})`}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setSelectedIds(new Set())}
-                aria-label="Clear selection"
-                className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>,
-          document.body,
-        )}
 
       <BulkSubscribeModal
         properties={subscribableSelected}
