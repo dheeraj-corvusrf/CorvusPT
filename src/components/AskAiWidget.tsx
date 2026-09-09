@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Sparkles, X, Send } from "lucide-react";
+import { Sparkles, X, Send, Mic } from "lucide-react";
 import { askRouter } from "@/lib/ask-router";
 import { askAboutDocument } from "@/lib/document-ai";
 import { buildUserContext } from "@/lib/ai-context";
 import { useAuth } from "@/lib/auth";
+import { useSpeechInput } from "@/hooks/use-speech-input";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 type ChatMessage = {
@@ -27,6 +28,8 @@ export function AskAiWidget() {
   const [asking, setAsking] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Voice input — fills the box as you speak; you still press Send.
+  const speech = useSpeechInput(setQuery);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -101,11 +104,17 @@ export function AskAiWidget() {
             <div ref={scrollRef} className="mt-3 max-h-80 overflow-y-auto grid gap-2 pr-1">
               {messages.map((m, i) =>
                 m.role === "user" ? (
-                  <div key={i} className="ml-auto max-w-[85%] rounded-md bg-accent text-accent-foreground px-3 py-2 text-sm">
+                  <div
+                    key={i}
+                    className="ml-auto max-w-[85%] rounded-md bg-accent text-accent-foreground px-3 py-2 text-sm"
+                  >
                     {m.text}
                   </div>
                 ) : (
-                  <div key={i} className="mr-auto max-w-[90%] rounded-md bg-secondary/50 px-3 py-2 text-sm">
+                  <div
+                    key={i}
+                    className="mr-auto max-w-[90%] rounded-md bg-secondary/50 px-3 py-2 text-sm"
+                  >
                     <p className="whitespace-pre-wrap">{m.text}</p>
                     {m.destination && (
                       <Link
@@ -131,11 +140,33 @@ export function AskAiWidget() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={messages.length === 0 ? "Describe the situation…" : "Ask a follow-up…"}
+              placeholder={
+                speech.listening
+                  ? "Listening…"
+                  : messages.length === 0
+                    ? "Describe the situation…"
+                    : "Ask a follow-up…"
+              }
               disabled={asking}
               autoFocus
               className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            {speech.supported && (
+              <button
+                type="button"
+                onClick={speech.toggle}
+                disabled={asking}
+                aria-label={speech.listening ? "Stop listening" : "Speak your question"}
+                title={speech.listening ? "Stop listening" : "Speak your question"}
+                className={`rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50 ${
+                  speech.listening
+                    ? "bg-destructive/15 text-destructive animate-pulse"
+                    : "border border-input text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Mic className="h-4 w-4" />
+              </button>
+            )}
             <button
               type="submit"
               disabled={asking || !query.trim()}
