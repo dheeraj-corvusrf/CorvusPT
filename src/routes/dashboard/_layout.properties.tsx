@@ -27,7 +27,11 @@ import { BulkSubscribeModal } from "@/components/BulkSubscribeModal";
 import { PaymentsModeChip } from "@/components/PaymentsModeChip";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { listProtests, type ProtestRecord } from "@/lib/protests";
-import { listHealthScores, type PropertyAiScore } from "@/lib/property-scores";
+import {
+  listHealthScores,
+  computeAndStoreHealthScore,
+  type PropertyAiScore,
+} from "@/lib/property-scores";
 import { getPropertyProtestStatus, type ActionStatus } from "@/lib/portfolio-status";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
@@ -38,7 +42,7 @@ import { ImportPropertiesModal } from "@/components/ImportPropertiesModal";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
 import { BulkProtestAuthorizationFlow } from "@/components/BulkProtestAuthorizationFlow";
 import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, X } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
   // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
@@ -81,6 +85,7 @@ function Properties() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [runningBulkAi, setRunningBulkAi] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -291,6 +296,26 @@ function Properties() {
     setBulkDeleting(false);
   }
 
+  // Bulk "Run AI Report" — regenerates each selected property's AI health
+  // score (the "AI Score: X/100" line on the card). computeAndStoreHealthScore
+  // never throws; a slow/failed one just doesn't update. Opening the full
+  // per-property AI Report is still one property at a time.
+  async function handleRunAiReportSelected() {
+    const chosen = properties.filter((p) => selectedIds.has(p.id));
+    if (chosen.length === 0) return;
+    setRunningBulkAi(true);
+    toast.info(
+      `Running AI analysis for ${chosen.length} propert${chosen.length === 1 ? "y" : "ies"}…`,
+    );
+    const results = await Promise.allSettled(chosen.map((p) => computeAndStoreHealthScore(p)));
+    const ok = results.filter((r) => r.status === "fulfilled" && r.value != null).length;
+    if (user) listHealthScores(user.id).then(setHealthScores).catch(console.error);
+    if (ok > 0) toast.success(`AI analysis updated for ${ok} propert${ok === 1 ? "y" : "ies"}.`);
+    if (ok < chosen.length)
+      toast.warning(`${chosen.length - ok} could not be analyzed right now — try again shortly.`);
+    setRunningBulkAi(false);
+  }
+
   // Most recently added first, per explicit request — the property you just
   // added/imported should be the first thing you see, not wherever its own
   // protest deadline happens to rank it.
@@ -395,38 +420,50 @@ function Properties() {
         />
       )}
 
+      {/* One floating action bar for the whole multi-selection — Delete /
+          Run AI Report / Protest selected. Fixed to the bottom so it stays
+          reachable however far the list is scrolled. */}
       {selectedIds.size > 0 && (
-        <div className="card-elev mt-4 flex flex-wrap items-center justify-between gap-3 p-3">
-          <span className="text-sm font-medium">
-            {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
-          </span>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setSelectedIds(new Set())}
-              className="btn-outline text-sm"
-            >
-              Clear
-            </button>
+        <div className="fixed inset-x-0 bottom-4 z-40 flex justify-center px-4 print:hidden">
+          <div className="card-elev flex flex-wrap items-center gap-2 p-2 pl-4 shadow-lg">
+            <span className="text-sm font-medium">
+              {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
+            </span>
             <button
               type="button"
               disabled={bulkDeleting}
               onClick={handleDeleteSelected}
               className="btn-outline text-destructive text-sm disabled:opacity-60"
             >
-              {bulkDeleting ? "Deleting…" : "Delete selected"}
+              {bulkDeleting ? "Deleting…" : "Delete"}
+            </button>
+            <button
+              type="button"
+              disabled={runningBulkAi}
+              onClick={handleRunAiReportSelected}
+              className="btn-outline text-sm disabled:opacity-60"
+            >
+              {runningBulkAi ? "Running…" : "Run AI Report"}
             </button>
             {stripeConfigured && subscribableSelected.length > 0 && (
               <button
                 type="button"
                 onClick={() => setBulkOpen(true)}
-                className="btn-accent text-sm"
+                className="btn-primary btn-primary-hover text-sm"
               >
-                Subscribe selected
+                Protest selected
                 {subscribableSelected.length !== selectedIds.size &&
                   ` (${subscribableSelected.length})`}
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              aria-label="Clear selection"
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </div>
       )}
@@ -565,7 +602,7 @@ function Properties() {
                       <button
                         onClick={() => setProtestingProperty(p)}
                         disabled={!!subscribing}
-                        className="btn-primary btn-primary-hover disabled:opacity-60"
+                        className="btn-outline disabled:opacity-60"
                       >
                         {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
                       </button>
