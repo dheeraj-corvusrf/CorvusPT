@@ -357,6 +357,17 @@ function Report() {
   // until the owner has provided anything.
   const [incomeAnalysis, setIncomeAnalysis] = useState<IncomeAnalysis | null>(null);
 
+  // The eager module batch folds overrides / comp selections / income figures
+  // into the modules' cache-hash inputs (notApplicableContext, excluded comps,
+  // the income NOI line). Each loads in its own effect below with no natural
+  // "done" signal, so without these flags a page reload races them: the batch
+  // fires with an empty list, hashes differently from the stored row, and
+  // regenerates for nothing. One flag per source; the batch waits on all.
+  const [overridesLoaded, setOverridesLoaded] = useState(false);
+  const [compSelectionsLoaded, setCompSelectionsLoaded] = useState(false);
+  const [incomeAnalysisLoaded, setIncomeAnalysisLoaded] = useState(false);
+  const auxDataLoaded = overridesLoaded && compSelectionsLoaded && incomeAnalysisLoaded;
+
   useEffect(() => {
     const s = readIntake();
     if (!s.confirmed) {
@@ -427,27 +438,40 @@ function Report() {
   }, [user?.id, resolvedProperty]);
 
   useEffect(() => {
-    if (!resolvedProperty) return;
+    if (!resolvedProperty) {
+      setOverridesLoaded(true); // no property (intake preview) => nothing to wait for
+      return;
+    }
+    setOverridesLoaded(false); // real property just arrived — hold the batch until this settles
     listModuleOverrides(resolvedProperty.id)
       .then(setOverrides)
-      .catch((err) => console.error("Could not load module overrides for this property:", err));
+      .catch((err) => console.error("Could not load module overrides for this property:", err))
+      .finally(() => setOverridesLoaded(true));
   }, [resolvedProperty]);
 
   useEffect(() => {
-    if (!resolvedProperty) return;
+    if (!resolvedProperty) {
+      setCompSelectionsLoaded(true);
+      return;
+    }
+    setCompSelectionsLoaded(false);
     listCompSelections(resolvedProperty.id)
       .then(setCompSelections)
-      .catch((err) => console.error("Could not load comp selections for this property:", err));
+      .catch((err) => console.error("Could not load comp selections for this property:", err))
+      .finally(() => setCompSelectionsLoaded(true));
   }, [resolvedProperty]);
 
   useEffect(() => {
     if (!resolvedProperty) {
       setIncomeAnalysis(null);
+      setIncomeAnalysisLoaded(true);
       return;
     }
+    setIncomeAnalysisLoaded(false);
     getIncomeAnalysis(resolvedProperty.id)
       .then(setIncomeAnalysis)
-      .catch((err) => console.error("Could not load income analysis for this property:", err));
+      .catch((err) => console.error("Could not load income analysis for this property:", err))
+      .finally(() => setIncomeAnalysisLoaded(true));
   }, [resolvedProperty]);
 
   // Which Module-7 source documents the owner has uploaded, by kind — drives
@@ -1665,6 +1689,15 @@ function Report() {
   const SEQUENCED_AFTER_STRATEGY = new Set(["comps"]);
   // Generated lazily on first open, never in an eager batch.
   const LAZY_MODULES = new Set(["site", "improvement", "zoning", "executive"]);
+  // How long the sequenced/executive effects wait for Strategy (or evidence)
+  // to settle before firing anyway. It has to comfortably exceed one real
+  // module call on the reasoning model (~25-30s observed for gemini-3.1-pro-
+  // preview) — a shorter cap makes comps/executive fire WITHOUT the upstream
+  // priorityContext on a cold first visit but WITH it on a cache-served
+  // reload, so the two hash differently and the module regenerates every
+  // reload. Better to wait: a genuinely stuck Strategy is rare, and the
+  // module still generates, just a beat later.
+  const STRATEGY_SETTLE_FALLBACK_MS = 40_000;
   // Module 10 (executive) reconciles Module 2's strategy AND Module 8's
   // evidence — firing it in this same immediate batch (as it did before this
   // sequencing was added) meant its own AI call went out before either had
@@ -1683,7 +1716,18 @@ function Report() {
     // just below (also keyed on state.totalValue); this one is defined
     // first, so on the first pass compsMap.attempted is false and we wait
     // one render for it to settle.
-    if (!state.totalValue || !evidenceDocsLoaded || !compsMap.attempted || compsMap.loading) return;
+    // auxDataLoaded: same reasoning for overrides / comp selections / income
+    // figures — strategy's notApplicableContext (and site/improvement's
+    // notApplicable* lists) is built from them, so a reload must not hash
+    // the batch before all three have come back.
+    if (
+      !state.totalValue ||
+      !evidenceDocsLoaded ||
+      !auxDataLoaded ||
+      !compsMap.attempted ||
+      compsMap.loading
+    )
+      return;
     for (const m of MODULES) {
       if (
         m.id === "savings" ||
@@ -1702,7 +1746,14 @@ function Report() {
     // bug earlier. Property identity and access level are the only real
     // triggers for "should we start loading modules."
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.totalValue, hasFullAccess, evidenceDocsLoaded, compsMap.attempted, compsMap.loading]);
+  }, [
+    state.totalValue,
+    hasFullAccess,
+    evidenceDocsLoaded,
+    auxDataLoaded,
+    compsMap.attempted,
+    compsMap.loading,
+  ]);
 
   // comps/site/improvement/zoning wait for Module 2 (Strategy) to resolve —
   // or a capped 6s timeout, so a slow/failed Strategy call never stalls the
@@ -1757,7 +1808,7 @@ function Report() {
       fire();
       return;
     }
-    const t = setTimeout(fire, 6000);
+    const t = setTimeout(fire, STRATEGY_SETTLE_FALLBACK_MS);
     return () => clearTimeout(t);
     // Same rationale as the effect above for omitting loadModule/loadCompsMap/
     // loadSiteGis; moduleData.strategy's data/error (plus compsMap.loading/
@@ -1784,8 +1835,9 @@ function Report() {
   // Module 10 (executive) reconciles Module 2's strategy and Module 8's
   // evidence into one final recommendation — it needs to actually read their
   // real output, so it waits for both to settle (data or error) before firing
-  // its own call, same 6s-capped-timeout pattern as the comps/strategy effect
-  // above (a slow/failed dependency shouldn't stall Module 10 indefinitely).
+  // its own call, same STRATEGY_SETTLE_FALLBACK_MS-capped pattern as the
+  // comps/strategy effect above (a slow/failed dependency shouldn't stall
+  // Module 10 indefinitely).
   //
   // Only fires once the user has actually opened Module 10 at least once
   // (executiveOpenedRef) — a first-visit AI call the user may never look at
@@ -1801,7 +1853,7 @@ function Report() {
       loadModule("executive");
       return;
     }
-    const t = setTimeout(() => loadModule("executive"), 6000);
+    const t = setTimeout(() => loadModule("executive"), STRATEGY_SETTLE_FALLBACK_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
