@@ -9,6 +9,7 @@ import { useSpeechInput } from "@/hooks/use-speech-input";
 import { listProperties } from "@/lib/properties";
 import { looksLikeReminderRequest, parseReminderRequest, addReminder } from "@/lib/reminders";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { MarkdownLite } from "@/components/MarkdownLite";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -165,7 +166,7 @@ export function AskAiWidget() {
                     key={i}
                     className="mr-auto max-w-[90%] rounded-md bg-secondary/50 px-3 py-2 text-sm"
                   >
-                    <p className="whitespace-pre-wrap">{m.text}</p>
+                    <MarkdownLite text={m.text} />
                     {m.destination && (
                       <Link
                         to={m.destination}

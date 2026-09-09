@@ -12,7 +12,7 @@
 // value, never make a fraud/forgery call.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
-import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { PROSE_STYLE, BULLET_STYLE } from "../_shared/prose-style.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -20,18 +20,20 @@ const corsHeaders = {
   "Content-Type": "application/json",
 };
 
-const BASE_SYSTEM = `You are CorvusPT's document reviewer for a Texas property-tax protest platform. You are given ONE uploaded document and the real facts of the property it is filed under. Read the document's actual content. Never invent a value, date, account number, or term that is not printed on the page. Do NOT make a forgery, tampering, or fraud judgement. Plain text only — no markdown, no bullet lists, no headers.
+const BASE_SYSTEM = `You are CorvusPT's document reviewer for a Texas property-tax protest platform. You are given ONE uploaded document and the real facts of the property it is filed under. Read the document's actual content. Never invent a value, date, account number, or term that is not printed on the page. Do NOT make a forgery, tampering, or fraud judgement.
 
-${PROSE_STYLE}`;
+${PROSE_STYLE}
+
+${BULLET_STYLE}`;
 
 const EXPLAIN_SYSTEM = `${BASE_SYSTEM}
 
-Return ONLY a JSON object: {"explanation": "<2 to 4 short paragraphs, separated by a blank line: (1) what this document is, (2) the key facts printed on it — values, dates, account/parcel, parties, (3) what it means for this property's protest, (4) anything incomplete, expired, illegible, or inconsistent with the property facts. Say plainly if the document is unrelated to a property-tax protest.>"}`;
+Return ONLY a JSON object: {"explanation": "<markdown. Cover, as bullets and/or a table: what this document is; the key facts printed on it (values, dates, account/parcel, parties) — a table when there are 3+; what it means for this property's protest; anything incomplete, expired, illegible, or inconsistent with the property facts. Say plainly if the document is unrelated to a property-tax protest.>"}`;
 
 const ANSWER_SYSTEM = `${BASE_SYSTEM}
 
-Answer the user's question about the attached document in 1-4 short sentences, grounded only in what the document says and the property facts given. If the document does not contain the answer, say so.
-Return ONLY a JSON object: {"answer": "<your answer>"}`;
+Answer the user's question about the attached document, grounded only in what the document says and the property facts given. If the document does not contain the answer, say so.
+Return ONLY a JSON object: {"answer": "<markdown bullets, or a table when comparing 3+ facts>"}`;
 
 const str = (v: unknown, len: number): string =>
   typeof v === "string" ? v.trim().slice(0, len) : "";
