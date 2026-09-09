@@ -4,6 +4,7 @@
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions (classify-document, ask-about-document, route-intent).
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { GEMINI_MODEL_REASONING, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -114,7 +115,7 @@ score>}`;
 // instead of waiting forever; on abort this throws a TimeoutError the catch
 // block below turns into a 504 the client already knows to retry (see the
 // 429-retry loop in src/lib/edge-functions.ts, extended to also cover 504).
-const GEMINI_TIMEOUT_MS = 20_000;
+const GEMINI_TIMEOUT_MS = 45_000;
 
 class TimeoutError extends Error {}
 
@@ -231,14 +232,11 @@ Deno.serve(async (req: Request) => {
         // Every other AI function here already pins temperature 0 — this one
         // was the outlier. Same input -> same score now.
         temperature: 0,
-        thinkingConfig: { thinkingBudget: 512 },
+        thinkingConfig: { thinkingBudget: 2048 },
       },
     };
 
-    const res = await fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      body,
-    );
+    const res = await fetchWithTimeout(geminiUrl(GEMINI_MODEL_REASONING, apiKey), body);
 
     if (!res.ok) {
       const text = await res.text();

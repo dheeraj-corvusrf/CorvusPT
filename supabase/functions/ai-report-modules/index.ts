@@ -19,6 +19,7 @@
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions.
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { GEMINI_MODEL_REASONING, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -1459,7 +1460,9 @@ type GeminiPart = { text: string } | { inline_data: { mime_type: string; data: s
 // against instead of waiting forever — see the 504 handling below and the
 // matching retry-on-504 in src/lib/edge-functions.ts (previously only
 // retried 429).
-const GEMINI_TIMEOUT_MS = 20_000;
+// The reasoning-tier model is slower than flash — give it more headroom
+// before we abort and let the client retry.
+const GEMINI_TIMEOUT_MS = 45_000;
 
 async function generateJson(
   apiKey: string,
@@ -1473,7 +1476,10 @@ async function generateJson(
   // until "executive" needed real reconciliation across several other
   // modules' outputs plus property-specific Q&A generation, genuinely more
   // reasoning than a single-topic module's short schema.
-  thinkingBudget = 512,
+  // Raised for the reasoning tier — a larger thinking budget is what buys
+  // the more stable structured output the model switch is for. "executive"
+  // gets more still (see its call site).
+  thinkingBudget = 2048,
 ): Promise<Record<string, unknown>> {
   const body = {
     systemInstruction: { parts: [{ text: system }] },
@@ -1500,15 +1506,12 @@ async function generateJson(
   const t = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      },
-    );
+    res = await fetch(geminiUrl(GEMINI_MODEL_REASONING, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       const timeoutErr = new Error("AI response timed out. Please try again.") as Error & {
@@ -1645,7 +1648,7 @@ Deno.serve(async (req: Request) => {
       apiKey,
       system,
       [{ text: record }, ...evidenceParts],
-      input.moduleId === "executive" ? 1536 : undefined,
+      input.moduleId === "executive" ? 4096 : undefined,
     );
     const result = spec.parse(parsed ?? {});
     // Real-data enforcement for Module 4 — see enforceSiteFactorRealData's

@@ -49,6 +49,24 @@ export async function setGlobalStripeMode(mode: StripeMode): Promise<void> {
   await logStripeModeChange(`Global payments default set to ${mode.toUpperCase()}`);
 }
 
+// Whether AI Report module results are cached & reused (see
+// src/lib/module-results-cache.ts). Never throws — defaults to `true` (cache
+// on) on any read failure, so a transient error doesn't silently switch the
+// app to expensive live-every-time mode.
+export async function getAiReportCacheEnabled(): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("ai_report_cache_enabled")
+      .eq("id", true)
+      .maybeSingle();
+    if (error) return true;
+    return data?.ai_report_cache_enabled !== false;
+  } catch {
+    return true;
+  }
+}
+
 // ── Per-admin override (public.admin_stripe_overrides) ──
 // A row here puts this one admin in a different mode from the global — in
 // practice 'test'. RLS scopes reads/writes to the caller's own row and admins

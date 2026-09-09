@@ -20,6 +20,7 @@
 //    guidance field this app's AI functions return) — same discipline as
 //    informal-review-guidance's requestedValueGuidance.
 import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -65,7 +66,8 @@ Deno.serve(async (req: Request) => {
       lines.push(`Improvement value: $${caseContext.improvementValue}`);
     if (caseContext?.strategyRecommendation)
       lines.push(`Case strategy: ${caseContext.strategyRecommendation}`);
-    if (caseContext?.strategyRationale) lines.push(`Strategy rationale: ${caseContext.strategyRationale}`);
+    if (caseContext?.strategyRationale)
+      lines.push(`Strategy rationale: ${caseContext.strategyRationale}`);
 
     if (hearingNotice) {
       lines.push("--- Real hearing notice on file ---");
@@ -79,9 +81,13 @@ Deno.serve(async (req: Request) => {
         lines.push(`Evidence submission deadline: ${hearingNotice.evidenceSubmissionDeadline}`);
       if (hearingNotice.submissionInstructions)
         lines.push(`Submission instructions on notice: ${hearingNotice.submissionInstructions}`);
-      if (Array.isArray(hearingNotice.requiredDocuments) && hearingNotice.requiredDocuments.length > 0)
+      if (
+        Array.isArray(hearingNotice.requiredDocuments) &&
+        hearingNotice.requiredDocuments.length > 0
+      )
         lines.push(`Required documents per notice: ${hearingNotice.requiredDocuments.join("; ")}`);
-      if (hearingNotice.countyContact) lines.push(`County contact on notice: ${hearingNotice.countyContact}`);
+      if (hearingNotice.countyContact)
+        lines.push(`County contact on notice: ${hearingNotice.countyContact}`);
       if (hearingNotice.appraiserContact)
         lines.push(`Appraiser contact on notice: ${hearingNotice.appraiserContact}`);
     }
@@ -100,7 +106,8 @@ Deno.serve(async (req: Request) => {
         fm.inPerson ? `in person (${fm.inPerson.address})` : null,
         fm.email?.available && fm.email.address ? `email (${fm.email.address})` : null,
       ].filter(Boolean);
-      if (methods.length > 0) lines.push(`Real submission channels this county confirms: ${methods.join("; ")}`);
+      if (methods.length > 0)
+        lines.push(`Real submission channels this county confirms: ${methods.join("; ")}`);
     }
 
     if (Array.isArray(evidence?.fileNames) && evidence.fileNames.length > 0) {
@@ -108,12 +115,14 @@ Deno.serve(async (req: Request) => {
     } else {
       lines.push("No evidence documents have been uploaded to this case yet.");
     }
-    if (evidence?.analysisSummary) lines.push(`Prior AI evidence analysis summary: ${evidence.analysisSummary}`);
+    if (evidence?.analysisSummary)
+      lines.push(`Prior AI evidence analysis summary: ${evidence.analysisSummary}`);
     if (Array.isArray(evidence?.documentFindings) && evidence.documentFindings.length > 0) {
       lines.push(
         `Per-document findings: ${evidence.documentFindings
-          .map((f: { fileName?: string; status?: string; assessment?: string }) =>
-            `${f.fileName ?? "?"} — ${f.status ?? "?"} — ${f.assessment ?? ""}`,
+          .map(
+            (f: { fileName?: string; status?: string; assessment?: string }) =>
+              `${f.fileName ?? "?"} — ${f.status ?? "?"} — ${f.assessment ?? ""}`,
           )
           .join(" | ")}`,
       );
@@ -123,15 +132,23 @@ Deno.serve(async (req: Request) => {
       lines.push("--- Real comparable-sales data (already computed, not to be altered) ---");
       lines.push(
         `Comps-indicated value: min $${comps.indicated.min}, median $${comps.indicated.median}, max $${comps.indicated.max}` +
-          (comps.valuationGapPct != null ? `, subject sits ${comps.valuationGapPct}% above the median` : ""),
+          (comps.valuationGapPct != null
+            ? `, subject sits ${comps.valuationGapPct}% above the median`
+            : ""),
       );
-      if (comps.confidencePct != null) lines.push(`Confidence in this comps read: ${comps.confidencePct}%`);
+      if (comps.confidencePct != null)
+        lines.push(`Confidence in this comps read: ${comps.confidencePct}%`);
       if (Array.isArray(comps.ranked) && comps.ranked.length > 0) {
         lines.push(
           `Top comparable properties: ${comps.ranked
             .slice(0, 5)
             .map(
-              (c: { address?: string; distanceMi?: number; marketValue?: number | null; similarity?: number }) =>
+              (c: {
+                address?: string;
+                distanceMi?: number;
+                marketValue?: number | null;
+                similarity?: number;
+              }) =>
                 `${c.address ?? "?"} (${c.distanceMi?.toFixed(2) ?? "?"} mi, $${c.marketValue ?? "?"}, ${c.similarity ?? "?"}% similar)`,
             )
             .join("; ")}`,
@@ -156,14 +173,11 @@ Deno.serve(async (req: Request) => {
       generationConfig: { responseMimeType: "application/json", temperature: 0 },
     };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (!res.ok) {
       const text = await res.text();

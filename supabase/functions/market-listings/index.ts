@@ -28,6 +28,8 @@
 // nothing calls it) in case it starts working once grounding is enabled on
 // the Google Cloud Console side; do not wire this into the client or trust
 // its output until a real call actually succeeds.
+import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -88,15 +90,12 @@ Deno.serve(async (req: Request) => {
     const t = setTimeout(() => controller.abort(), 20_000);
     let res: Response;
     try {
-      res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        },
-      );
+      res = await fetch(geminiUrl(GEMINI_MODEL_FAST, apiKey), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         return new Response(JSON.stringify({ error: "AI response timed out. Please try again." }), {

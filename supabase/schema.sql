@@ -1525,6 +1525,11 @@ create policy "Admins can view all settlement agreements"
 create table if not exists public.app_settings (
   id boolean primary key default true,
   enforce_per_property_entitlement boolean not null default false,
+  -- When true (the default), each AI Report module's result is stored in
+  -- public.module_results and reused on later visits instead of re-calling
+  -- the AI — see src/lib/module-results-cache.ts. Flip to false (admin, no
+  -- redeploy) to go back to generating every module live on every page load.
+  ai_report_cache_enabled boolean not null default true,
   -- The GLOBAL Stripe environment default — what every ordinary user's
   -- payments use. Meant to be 'live'; a single admin can override just
   -- themselves to 'test' for staff testing (see admin_stripe_overrides
@@ -1832,6 +1837,54 @@ create policy "Users can delete their own savings tax inputs"
 drop policy if exists "Admins can view all savings tax inputs" on public.savings_tax_inputs;
 create policy "Admins can view all savings tax inputs"
   on public.savings_tax_inputs for select
+  using (public.is_admin());
+
+-- Stored AI Report module results — one row per (property, module). On a
+-- later visit the client serves this instead of re-calling the AI, so the
+-- report is identical every time and costs one generation per property
+-- rather than one per page view. Regenerated only when the module's real
+-- inputs change (input_hash mismatch) or the user clicks Regenerate. See
+-- src/lib/module-results-cache.ts and the ai_report_cache_enabled flag on
+-- app_settings above.
+create table if not exists public.module_results (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  property_id uuid not null references public.properties (id) on delete cascade,
+  module_id text not null,
+  input_hash text not null,
+  model text not null,
+  result jsonb not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (property_id, module_id)
+);
+
+alter table public.module_results enable row level security;
+
+drop policy if exists "Users can view their own module results" on public.module_results;
+create policy "Users can view their own module results"
+  on public.module_results for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own module results" on public.module_results;
+create policy "Users can insert their own module results"
+  on public.module_results for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own module results" on public.module_results;
+create policy "Users can update their own module results"
+  on public.module_results for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete their own module results" on public.module_results;
+create policy "Users can delete their own module results"
+  on public.module_results for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Admins can view all module results" on public.module_results;
+create policy "Admins can view all module results"
+  on public.module_results for select
   using (public.is_admin());
 
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
