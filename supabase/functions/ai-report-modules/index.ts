@@ -1460,9 +1460,13 @@ type GeminiPart = { text: string } | { inline_data: { mime_type: string; data: s
 // against instead of waiting forever — see the 504 handling below and the
 // matching retry-on-504 in src/lib/edge-functions.ts (previously only
 // retried 429).
-// The reasoning-tier model is slower than flash — give it more headroom
-// before we abort and let the client retry.
-const GEMINI_TIMEOUT_MS = 45_000;
+// The reasoning-tier model is slower than flash — a real module call on
+// gemini-3.1-pro-preview runs ~25-35s, and the heavier modules (site /
+// improvement with evidence images, executive) more. 45s was clipping those
+// mid-generation, which the client then auto-retried into a visible spin
+// loop. Give it real headroom; a first-visit module generates once and is
+// cached (module_results) so this longer wait is paid at most once.
+const GEMINI_TIMEOUT_MS = 75_000;
 
 async function generateJson(
   apiKey: string,

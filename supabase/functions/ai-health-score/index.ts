@@ -111,11 +111,13 @@ score>}`;
 // (confirmed live: a plain "reply OK" ping ranged from ~2s to 30s+ with
 // nothing on our side to explain the difference — this is external
 // congestion, not something a prompt/config change here can fix outright).
-// 20s bounds the worst case to something the client can retry against
-// instead of waiting forever; on abort this throws a TimeoutError the catch
-// block below turns into a 504 the client already knows to retry (see the
-// 429-retry loop in src/lib/edge-functions.ts, extended to also cover 504).
-const GEMINI_TIMEOUT_MS = 45_000;
+// Bounds the worst case to something the client can retry against instead of
+// waiting forever; on abort this throws a TimeoutError the catch block below
+// turns into a 504 the client already knows to retry (see the 429-retry loop
+// in src/lib/edge-functions.ts, extended to also cover 504). Set to 75s to
+// match ai-report-modules — gemini-3.1-pro-preview runs slower than flash and
+// 45s was clipping calls mid-generation into client-side retry spin.
+const GEMINI_TIMEOUT_MS = 75_000;
 
 class TimeoutError extends Error {}
 
