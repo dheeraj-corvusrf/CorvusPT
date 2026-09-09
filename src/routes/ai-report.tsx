@@ -7635,10 +7635,10 @@ type DataRequirementRow = {
   source: string;
   usedFor: string;
   status: "Available" | "Partial" | "Not integrated";
-  // Rows where a document the owner already has would genuinely move this
-  // analysis forward — the AI can't fetch these anywhere, so surface an
-  // upload control right on the row. `documentType` tags the file so
-  // ai-report-modules picks it up for the right module.
+  // Retained for reference only — the per-row upload controls were replaced
+  // by one "Upload supporting documents" button at the bottom of the list
+  // (the AI sorts each file to the categories it helps), so `hint` no longer
+  // renders. Left in place as documentation of what each row wants.
   userUpload?: { hint: string; documentType: string };
 };
 
@@ -7776,10 +7776,12 @@ function DataRequirementsTable({
   onUpload,
   uploading,
 }: {
-  // When present, rows whose data the owner could supply get an Upload
-  // control. Absent for a signed-out / no-access viewer — they still see
-  // what's needed, just can't act on it here.
-  onUpload?: (files: File[], documentType: string) => void;
+  // One upload control at the bottom (not per row). Files go into the
+  // property's evidence pool and the AI re-runs the analysis on its own,
+  // sorting each document to the categories it actually helps — the owner
+  // doesn't have to match a file to a row. Absent for a signed-out / no-
+  // access viewer: they still see what's needed, just can't act on it here.
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -7787,55 +7789,25 @@ function DataRequirementsTable({
     <div className="grid gap-1.5">
       {DATA_REQUIREMENTS.map((r) => {
         const isOpen = expanded === r.category;
-        const canUpload = !!(onUpload && r.userUpload);
         return (
           <div key={r.category} className="rounded-lg border border-border">
-            <div className="flex w-full items-center justify-between gap-2 px-3 py-2">
-              <button
-                type="button"
-                onClick={() => setExpanded(isOpen ? null : r.category)}
-                className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              >
-                <span className="truncate text-xs font-medium">{r.category}</span>
-              </button>
+            <button
+              type="button"
+              onClick={() => setExpanded(isOpen ? null : r.category)}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
+            >
+              <span className="truncate text-xs font-medium">{r.category}</span>
               <span className="flex shrink-0 items-center gap-2">
-                {canUpload && (
-                  <label
-                    className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/10"
-                    title={r.userUpload!.hint}
-                  >
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const selected = Array.from(e.target.files ?? []);
-                        if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : "Upload"}
-                  </label>
-                )}
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${DATA_STATUS_STYLE[r.status]}`}
                 >
                   {r.status}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setExpanded(isOpen ? null : r.category)}
-                  aria-label={isOpen ? "Collapse" : "Expand"}
-                >
-                  <ArrowRight
-                    className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
-                  />
-                </button>
+                <ArrowRight
+                  className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                />
               </span>
-            </div>
+            </button>
             {isOpen && (
               <div className="grid gap-2 border-t border-border/60 px-3 py-2 text-xs">
                 <div>
@@ -7856,35 +7828,37 @@ function DataRequirementsTable({
                   </div>
                   <p className="text-muted-foreground">{r.usedFor}</p>
                 </div>
-                {canUpload && (
-                  <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
-                      Provide This Data
-                    </div>
-                    <p className="text-muted-foreground">{r.userUpload!.hint}</p>
-                    <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
-                      <input
-                        type="file"
-                        accept="image/*,.pdf"
-                        multiple
-                        disabled={uploading}
-                        className="hidden"
-                        onChange={(e) => {
-                          const selected = Array.from(e.target.files ?? []);
-                          if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
-                          e.target.value = "";
-                        }}
-                      />
-                      <Upload className="h-3.5 w-3.5" />
-                      {uploading ? "Uploading…" : "Upload document"}
-                    </label>
-                  </div>
-                )}
               </div>
             )}
           </div>
         );
       })}
+
+      {onUpload && (
+        <div className="mt-1 rounded-lg border border-dashed border-accent/40 bg-accent/5 px-3 py-3 text-center">
+          <p className="text-xs text-muted-foreground">
+            Have documents that fill any of these gaps — an appraisal, survey, rent roll, photos,
+            prior protest results? Upload them and the AI re-runs its analysis, sorting each file to
+            where it helps.
+          </p>
+          <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              multiple
+              disabled={uploading}
+              className="hidden"
+              onChange={(e) => {
+                const selected = Array.from(e.target.files ?? []);
+                if (selected.length > 0) onUpload(selected);
+                e.target.value = "";
+              }}
+            />
+            <Upload className="h-3.5 w-3.5" />
+            {uploading ? "Uploading…" : "Upload supporting documents"}
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -8512,7 +8486,7 @@ function ModulePreviewContent({
           <DataRequirementsTable
             onUpload={
               allowEvidenceUpload
-                ? (files, documentType) => onUploadEvidence(files, undefined, documentType)
+                ? (files) => onUploadEvidence(files, undefined, PROTEST_EVIDENCE_DOCUMENT_TYPE)
                 : undefined
             }
             uploading={uploadingEvidence}
