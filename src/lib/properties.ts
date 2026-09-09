@@ -238,6 +238,7 @@ export async function updatePropertyIdentity(
     ownerName?: string;
     taxYear?: number;
     protestDeadline?: string;
+    propertyType?: string;
   },
 ): Promise<PropertyRecord> {
   const update: Record<string, unknown> = {};
@@ -247,6 +248,7 @@ export async function updatePropertyIdentity(
   if (patch.ownerName !== undefined) update.owner_name = patch.ownerName;
   if (patch.taxYear !== undefined) update.tax_year = patch.taxYear;
   if (patch.protestDeadline !== undefined) update.protest_deadline = patch.protestDeadline;
+  if (patch.propertyType !== undefined) update.property_type = patch.propertyType;
   const { data, error } = await supabase
     .from("properties")
     .update(update)

@@ -127,8 +127,10 @@ import {
   addProperty,
   listProperties,
   buildAiReportIntakePatch,
+  updatePropertyIdentity,
   type PropertyRecord,
 } from "@/lib/properties";
+import { cadLookup, cadLookupByAccount, type CadRecord } from "@/lib/cad-lookup";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -341,6 +343,48 @@ function Report() {
   const [resolvedProperty, setResolvedProperty] = useState<PropertyRecord | null>(null);
   const [existingProtest, setExistingProtest] = useState<ProtestRecord | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
+  const [cadFetching, setCadFetching] = useState(false);
+
+  // "Fetch details" (Module 6) — re-pull this property's CAD record from the
+  // live county source and update the classification-relevant field
+  // (property type / CAD class). Only 6 counties expose a real API (see the
+  // texas_cad_vendor_landscape memory); the rest just report "no live
+  // source". Never touches assessed values or history — only the field the
+  // zoning module actually reads — so it can't silently change the numbers
+  // shown elsewhere.
+  async function handleFetchCadDetails() {
+    setCadFetching(true);
+    try {
+      let record: CadRecord | null = null;
+      if (state.cad && state.accountNumber) {
+        record = await cadLookupByAccount(state.cad, state.accountNumber).catch(() => null);
+      }
+      if (!record && state.address) {
+        const res = await cadLookup(state.address).catch(() => null);
+        if (res && res.matched === true) record = res.record;
+      }
+      if (!record) {
+        toast.error("No live CAD source returned details for this property's county.");
+        return;
+      }
+      const freshType = record.propertyType?.trim() || null;
+      if (!freshType || freshType === (state.propertyType ?? "").trim()) {
+        toast.info("CAD classification is already current.");
+        return;
+      }
+      setState((s) => ({ ...s, propertyType: freshType }));
+      updateIntake({ propertyType: freshType });
+      if (resolvedProperty?.id) {
+        updatePropertyIdentity(resolvedProperty.id, { propertyType: freshType })
+          .then((p) => setResolvedProperty(p))
+          .catch((err) => console.error("Could not persist the fetched CAD class:", err));
+      }
+      toast.success(`Updated CAD classification to "${freshType}".`);
+      loadModule("zoning", { force: true });
+    } finally {
+      setCadFetching(false);
+    }
+  }
   // Which tier's checkout is currently redirecting, for the unpaid-property
   // "Subscribe" buttons in the banner below (real, one-click checkout right
   // here — see handleSubscribeToProperty — rather than sending the user off
@@ -2276,6 +2320,8 @@ function Report() {
                 uploadingEvidence={false}
                 onUploadEvidence={() => {}}
                 onForceReload={() => {}}
+                onFetchCadDetails={() => {}}
+                cadFetching={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
                 existingProtest={null}
@@ -2352,6 +2398,8 @@ function Report() {
             uploadingEvidence={uploadingEvidence}
             onUploadEvidence={handleUploadEvidence}
             onForceReload={() => loadModule(openModel.id, { force: true })}
+            onFetchCadDetails={handleFetchCadDetails}
+            cadFetching={cadFetching}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
             existingProtest={existingProtest}
@@ -5689,83 +5737,145 @@ const ZONING_ASPECT_ICON: Record<string, LucideIcon> = {
 // The 4-column classification line-up from the spec's screenshot: the four
 // aspects are the columns, one value row, then a muted source / upload row.
 // The Permitted Use column also carries the overall consistent/mismatch mark.
+const ZONING_ASPECT_KINDS = [
+  "CAD Classification",
+  "Actual Use",
+  "Zoning District",
+  "Permitted Use",
+] as const;
+
 function ZoningClassificationTable({
   aspects,
   matches,
+  zoningDocs,
   onUpload,
+  onFetchDetails,
   uploading,
+  categorizing,
+  fetching,
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
-  onUpload?: (aspectLabel: string, files: File[]) => void;
+  zoningDocs: DocumentRecord[];
+  // One upload -> the AI reads each file and tags it to the aspect it
+  // documents (see the zoning case's handleAutoUpload). Absent for a
+  // signed-out / no-access viewer.
+  onUpload?: (files: File[]) => void;
+  // Re-pull this property's CAD record and update its classification-
+  // relevant fields, then re-run the module.
+  onFetchDetails?: () => void;
   uploading?: boolean;
+  categorizing?: boolean;
+  fetching?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full min-w-[560px] table-fixed text-left text-sm">
-        <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
-          <tr>
-            {aspects.map((a) => (
-              <th key={a.label} className="px-4 py-2.5 font-semibold">
-                {a.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <tr className="border-t border-border/60 align-top">
-            {aspects.map((a) => {
-              const st = ZONING_ASPECT_STATUS[a.status];
-              const isPermitted = a.label === "Permitted Use";
-              const showMismatch = isPermitted && matches === "inconsistent";
-              const showMatch = isPermitted && matches === "consistent";
-              return (
+    <div className="rounded-lg border border-border">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+          <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
+            <tr>
+              {aspects.map((a) => (
+                <th key={a.label} className="px-4 py-2.5 font-semibold">
+                  {a.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-border/60 align-top">
+              {aspects.map((a) => {
+                const st = ZONING_ASPECT_STATUS[a.status];
+                const isPermitted = a.label === "Permitted Use";
+                const showMismatch = isPermitted && matches === "inconsistent";
+                const showMatch = isPermitted && matches === "consistent";
+                return (
+                  <td key={a.label} className="px-4 py-3">
+                    <div className="flex items-start gap-1.5">
+                      {showMismatch ? (
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                      ) : showMatch ? (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                      ) : (
+                        <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
+                      )}
+                      <span
+                        className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
+                      >
+                        {a.value || "—"}
+                      </span>
+                    </div>
+                  </td>
+                );
+              })}
+            </tr>
+            <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
+              {aspects.map((a) => (
                 <td key={a.label} className="px-4 py-3">
-                  <div className="flex items-start gap-1.5">
-                    {showMismatch ? (
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-                    ) : showMatch ? (
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-                    ) : (
-                      <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
-                    )}
-                    <span
-                      className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
-                    >
-                      {a.value || "—"}
-                    </span>
-                  </div>
+                  {a.source || "—"}
                 </td>
-              );
-            })}
-          </tr>
-          <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
-            {aspects.map((a) => (
-              <td key={a.label} className="px-4 py-3">
-                <div>{a.source || "—"}</div>
-                {onUpload && a.status === "Additional Data Needed" && (
-                  <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 font-semibold text-accent hover:bg-accent/10">
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        if (sel.length > 0) onUpload(a.label, sel);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : "Upload"}
-                  </label>
-                )}
-              </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {zoningDocs.length > 0 && (
+        <div className="border-t border-border/60 px-4 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Documents in this section
+          </div>
+          <ul className="mt-1 grid gap-1">
+            {zoningDocs.map((doc) => (
+              <li key={doc.id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate">{doc.fileName}</span>
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  {doc.documentType?.replace(/^Zoning:\s*/, "") || "Zoning"}
+                </span>
+              </li>
             ))}
-          </tr>
-        </tbody>
-      </table>
+          </ul>
+        </div>
+      )}
+
+      {(onUpload || onFetchDetails) && (
+        <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 px-4 py-3">
+          {onUpload && (
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                multiple
+                disabled={uploading || categorizing}
+                className="hidden"
+                onChange={(e) => {
+                  const sel = Array.from(e.target.files ?? []);
+                  if (sel.length > 0) onUpload(sel);
+                  e.target.value = "";
+                }}
+              />
+              <Upload className="h-3.5 w-3.5" />
+              {categorizing ? "Reading documents…" : uploading ? "Uploading…" : "Upload documents"}
+            </label>
+          )}
+          {onFetchDetails && (
+            <button
+              type="button"
+              onClick={onFetchDetails}
+              disabled={fetching}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${fetching ? "animate-spin" : ""}`} />
+              {fetching ? "Fetching…" : "Fetch details"}
+            </button>
+          )}
+        </div>
+      )}
+      {(onUpload || onFetchDetails) && (
+        <p className="px-4 pb-3 text-center text-[10px] text-muted-foreground">
+          Upload a zoning letter, plat, deed, or use permit — the AI tags each to the right aspect.
+          Fetch details re-pulls the county's classification for this property.
+        </p>
+      )}
     </div>
   );
 }
@@ -7934,6 +8044,8 @@ function ModulePreviewContent({
   uploadingEvidence,
   onUploadEvidence,
   onForceReload,
+  onFetchCadDetails,
+  cadFetching,
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
@@ -7976,6 +8088,9 @@ function ModulePreviewContent({
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onForceReload: () => void;
+  // Module 6 only — re-pull the CAD record and update the classification.
+  onFetchCadDetails: () => void;
+  cadFetching: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
   // Module 10 only — real case state + navigation, so it can show real
@@ -9087,6 +9202,32 @@ function ModulePreviewContent({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
+      const zoningDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Zoning: "));
+      // One upload -> AI tags each file to the aspect it documents. Mirrors
+      // Module 7 / Module 8's bulk categorize-then-upload. Reuses the shared
+      // "reading documents" flag (only one module modal is open at a time).
+      async function handleZoningAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads([...ZONING_ASPECT_KINDS], files);
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && (ZONING_ASPECT_KINDS as readonly string[]).includes(matched)
+                ? matched
+                : "General";
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [kind, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, `Zoning: ${kind}`);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       return (
         <div className="mt-4 grid gap-4">
           <p className="-mb-1 text-sm text-muted-foreground">
@@ -9120,12 +9261,12 @@ function ModulePreviewContent({
           <ZoningClassificationTable
             aspects={d.aspects}
             matches={d.matches}
-            onUpload={
-              allowEvidenceUpload
-                ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
-                : undefined
-            }
+            zoningDocs={zoningDocs}
+            onUpload={allowEvidenceUpload ? handleZoningAutoUpload : undefined}
+            onFetchDetails={allowEvidenceUpload ? onFetchCadDetails : undefined}
             uploading={uploadingEvidence}
+            categorizing={categorizingEvidence}
+            fetching={cadFetching}
           />
 
           {d.discrepancies.length > 0 && (
