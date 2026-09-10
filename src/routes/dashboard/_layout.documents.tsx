@@ -1184,6 +1184,14 @@ function DocRow({
                   AI-generated
                 </span>
               )}
+              {doc.documentType === "AI Fetched — Property Base Data" && (
+                <span
+                  className="badge-soft bg-accent/10 text-accent"
+                  title="Auto-fetched from public county + federal sources — verify against your official notice"
+                >
+                  AI-fetched
+                </span>
+              )}
               {(doc.modules ?? []).map((m) => (
                 <span
                   key={m}

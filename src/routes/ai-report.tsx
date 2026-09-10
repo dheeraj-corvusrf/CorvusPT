@@ -131,6 +131,12 @@ import {
   type PropertyRecord,
 } from "@/lib/properties";
 import { cadLookup, cadLookupByAccount, type CadRecord } from "@/lib/cad-lookup";
+import {
+  getPropertyBaseData,
+  savePropertyBaseData,
+  fetchPropertyBaseSnapshot,
+  type PropertyBaseData,
+} from "@/lib/property-base-data";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -357,6 +363,13 @@ function Report() {
   // checklist items against real records before asking the user.
   const [evidenceCadRecord, setEvidenceCadRecord] = useState<CadRecord | null>(null);
   const [autoSourcingEvidence, setAutoSourcingEvidence] = useState(false);
+  // The property's AI-fetched base data (structured CAD + FEMA/USGS + record
+  // link), stored as a document and tagged to every module — the single
+  // foundation modules read instead of the user re-entering facts. See
+  // src/lib/property-base-data.ts.
+  const [baseData, setBaseData] = useState<PropertyBaseData | null>(null);
+  const [baseDataBusy, setBaseDataBusy] = useState(false);
+  const baseDataFetchedFor = useRef<string | null>(null);
 
   // "Fetch details" (Module 6) — re-pull this property's CAD record from the
   // live county source and update the classification-relevant field
@@ -425,6 +438,11 @@ function Report() {
         loadSiteGis(siteCoords.lat, siteCoords.lng);
         pulled.push("site GIS (FEMA + USGS)");
       }
+      // Persist the pull as the property's base data so it survives the
+      // page and every module reads it — not just held in memory here.
+      if (user && resolvedProperty) {
+        void refreshBaseData({ silent: true });
+      }
       loadModule("evidence", { force: true });
       toast.success(
         pulled.length > 0
@@ -433,6 +451,70 @@ function Report() {
       );
     } finally {
       setAutoSourcingEvidence(false);
+    }
+  }
+
+  // Address → fetch the publicly-available property data, store it as the
+  // "AI Fetched — Property Base Data" document (tagged to every module), and
+  // upsert property_base_data. Runs automatically on report open when
+  // there's no base data or it's stale (see the effect below), and on the
+  // "Refresh" button. `silent` suppresses the toast (used by the auto path
+  // unless the data actually changed).
+  async function refreshBaseData(opts?: { silent?: boolean }) {
+    if (!user || !resolvedProperty || baseDataBusy) return;
+    setBaseDataBusy(true);
+    try {
+      const snapshot = await fetchPropertyBaseSnapshot(
+        {
+          address: resolvedProperty.address,
+          cad: resolvedProperty.cad,
+          accountNumber: resolvedProperty.accountNumber,
+        },
+        siteCoords ? { lat: siteCoords.lat, lng: siteCoords.lng } : null,
+      );
+      const { changed, changeNote } = await savePropertyBaseData(
+        user.id,
+        resolvedProperty,
+        snapshot,
+      );
+      const fresh = await getPropertyBaseData(resolvedProperty.id);
+      setBaseData(fresh);
+      // Bring the new document into the report's document set.
+      listDocuments(user.id)
+        .then((docs) => {
+          const forProperty = docs.filter(
+            (d) => d.propertyId === resolvedProperty.id && d.deletedAt == null,
+          );
+          setCaseDocuments(forProperty);
+          setEvidenceDocs(
+            forProperty.filter(
+              (d) =>
+                d.useAsEvidence !== false &&
+                (d.useAsEvidence === true ||
+                  (d.modules?.length ?? 0) > 0 ||
+                  d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+                  d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
+                  d.documentType?.startsWith("Strategy Evidence: ") ||
+                  d.documentType?.startsWith("Zoning: ") ||
+                  d.documentType?.startsWith("Improvement: ") ||
+                  d.documentType?.startsWith("Site: ") ||
+                  d.documentType?.startsWith("Income: ")),
+            ),
+          );
+        })
+        .catch(() => {});
+      if (changed && changeNote) {
+        toast.success(`Property base data updated — ${changeNote}.`);
+        loadModule("health", { force: true });
+        loadModule("strategy", { force: true });
+      } else if (!opts?.silent) {
+        toast.success("Property base data refreshed.");
+      }
+    } catch (err) {
+      if (!opts?.silent)
+        toast.error(err instanceof Error ? err.message : "Could not refresh property base data.");
+    } finally {
+      setBaseDataBusy(false);
     }
   }
   // Which tier's checkout is currently redirecting, for the unpaid-property
@@ -580,6 +662,37 @@ function Report() {
       })
       .catch((err) => console.error("Could not load uploaded evidence for this property:", err))
       .finally(() => setEvidenceDocsLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, resolvedProperty]);
+
+  // Address → AI-fetched property base data. Loads the stored copy so the
+  // "Property Base Data" strip renders immediately; auto-fetches once per
+  // property when there's none or it's older than 30 days. siteCoords may
+  // still be resolving — a manual Refresh or the weekly cron picks up site
+  // GIS if it isn't ready yet.
+  useEffect(() => {
+    if (!user || !resolvedProperty) return;
+    if (baseDataFetchedFor.current === resolvedProperty.id) return;
+    baseDataFetchedFor.current = resolvedProperty.id;
+    getPropertyBaseData(resolvedProperty.id)
+      .then((bd) => {
+        setBaseData(bd);
+        const stale =
+          !bd || Date.now() - new Date(bd.fetchedAt).getTime() > 30 * 24 * 60 * 60 * 1000;
+        // The weekly cron sets last_change_note when it detects a CAD change
+        // but leaves the doc for the client to rebuild — do that now, and
+        // refresh the two modules that lean hardest on the assessed value.
+        if (bd?.lastChangeNote) {
+          toast.message(`Property base data changed — ${bd.lastChangeNote}`);
+          void refreshBaseData({ silent: true }).then(() => {
+            loadModule("health", { force: true });
+            loadModule("strategy", { force: true });
+          });
+        } else if (stale) {
+          void refreshBaseData({ silent: true });
+        }
+      })
+      .catch((err) => console.error("Could not load property base data:", err));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, resolvedProperty]);
 
@@ -1332,6 +1445,33 @@ function Report() {
           ?.name ?? null;
 
       const facts: string[] = [];
+      // Prefer the live record pulled by "Auto-source evidence"; otherwise
+      // fall back to the property's stored AI-fetched base data so the
+      // checklist can still verify against real records with no extra call.
+      const bd = baseData?.snapshot;
+      if (!evidenceCadRecord && bd?.cad) {
+        const b = bd.cad;
+        if (b.totalValue != null)
+          facts.push(
+            `AI-fetched base data (CAD): total assessed value $${b.totalValue.toLocaleString()}${b.taxYear ? ` (tax year ${b.taxYear})` : ""}.`,
+          );
+        if (b.landValue != null)
+          facts.push(`AI-fetched base data (CAD): land value $${b.landValue.toLocaleString()}.`);
+        if (b.improvementValue != null)
+          facts.push(
+            `AI-fetched base data (CAD): improvement value $${b.improvementValue.toLocaleString()}.`,
+          );
+        if (b.legalDescription)
+          facts.push(`AI-fetched base data (CAD): legal description "${b.legalDescription}".`);
+        if (b.deeds.length > 0)
+          facts.push(
+            `AI-fetched base data (CAD): ${b.deeds.length} recorded deed/transfer${b.deeds.length === 1 ? "" : "s"} on file.`,
+          );
+        if (bd.siteGis?.floodZone)
+          facts.push(
+            `AI-fetched base data (FEMA): flood zone ${bd.siteGis.floodZone.zone} — ${bd.siteGis.floodZone.label}${bd.siteGis.floodZone.inSFHA ? " (Special Flood Hazard Area)" : ""}.`,
+          );
+      }
       const cr = evidenceCadRecord;
       if (cr) {
         if (cr.totalValue != null)
@@ -2497,6 +2637,45 @@ function Report() {
             ? "All modules unlocked with your AI Report subscription."
             : `Modules 1-${FREE_MODULE_COUNT} are free for everyone. Subscribe to unlock modules ${FREE_MODULE_COUNT + 1}-${MODULES.length}.`}
         </p>
+
+        {hasFullAccess && resolvedProperty && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-secondary/30 p-3 text-xs">
+            <div className="min-w-0">
+              <span className="font-semibold text-foreground">Property Base Data</span>
+              {baseData ? (
+                <span className="text-muted-foreground">
+                  {" — "}AI-fetched from{" "}
+                  {baseData.snapshot.sources.length > 0
+                    ? baseData.snapshot.sources.join(", ")
+                    : "the address (no live county source)"}{" "}
+                  · {new Date(baseData.fetchedAt).toLocaleDateString()}
+                  {baseData.lastChangeNote ? ` · last change: ${baseData.lastChangeNote}` : ""}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">
+                  {" — "}
+                  {baseDataBusy ? "fetching from county + federal sources…" : "not fetched yet"}
+                </span>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+              {baseData?.documentId && (
+                <Link to="/dashboard/documents" className="text-accent hover:underline">
+                  View in Documents
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={() => void refreshBaseData()}
+                disabled={baseDataBusy}
+                className="btn-outline text-xs py-1 disabled:opacity-60"
+              >
+                {baseDataBusy ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="mt-5 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((m) => (
             <ModuleCard

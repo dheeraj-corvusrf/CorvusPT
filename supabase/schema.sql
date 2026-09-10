@@ -1991,9 +1991,15 @@ create table if not exists public.user_reminders (
   remind_on date not null,
   note text not null,
   done boolean not null default false,
+  -- 'manual' = hand-typed, 'assistant' = parsed by the Ask AI assistant,
+  -- 'system' = created automatically (e.g. refresh-property-base-data
+  -- noticed the CAD data changed).
   source text not null default 'manual',
   created_at timestamptz not null default now()
 );
+alter table public.user_reminders drop constraint if exists user_reminders_source_check;
+alter table public.user_reminders add constraint user_reminders_source_check
+  check (source in ('manual', 'assistant', 'system'));
 create index if not exists user_reminders_user_idx on public.user_reminders (user_id, remind_on);
 alter table public.user_reminders enable row level security;
 drop policy if exists "Users manage their own reminders" on public.user_reminders;
@@ -2001,6 +2007,37 @@ create policy "Users manage their own reminders"
   on public.user_reminders for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- The property's AI-fetched "base data" — one synthesized record per property,
+-- assembled from the structured CAD lookup (cad-lookup), FEMA/USGS site data
+-- (site-gis), and the county's own record-page link. snapshot is the
+-- normalized fetched facts (see PropertyBaseSnapshot in
+-- src/lib/property-base-data.ts); document_id points at the "AI Fetched —
+-- Property Base Data" PDF filed in public.documents and tagged to every
+-- module. refresh-property-base-data (pg_cron, weekly) re-fetches, diffs
+-- against snapshot, and drops a source='system' user_reminders row on a
+-- material change. Owner-only + admin read; the cron edge fn writes with the
+-- service role.
+create table if not exists public.property_base_data (
+  property_id uuid primary key references public.properties (id) on delete cascade,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  snapshot jsonb not null,
+  document_id uuid references public.documents (id) on delete set null,
+  sources text[] not null default '{}',
+  fetched_at timestamptz not null default now(),
+  last_checked_at timestamptz not null default now(),
+  last_change_note text
+);
+alter table public.property_base_data enable row level security;
+drop policy if exists "Users manage their own base data" on public.property_base_data;
+create policy "Users manage their own base data"
+  on public.property_base_data for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+drop policy if exists "Admins can view all base data" on public.property_base_data;
+create policy "Admins can view all base data"
+  on public.property_base_data for select
+  using (public.is_admin());
 
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
