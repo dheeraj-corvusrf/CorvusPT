@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { askAboutDocument } from "@/lib/document-ai";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import {
   updatePropertyIdentity,
   buildAiReportIntakePatch,
@@ -81,6 +84,7 @@ import {
   getLatestHearingNotice,
   type HearingNoticeRecord,
   type HearingNoticeExtraction,
+  type HearingMode,
 } from "@/lib/hearing-notice";
 import {
   getInformalReviewGuidance,
@@ -286,6 +290,7 @@ export function CaseDetailView({
               protest={current}
               property={property}
               strategyRecommendation={caseData?.strategyRecommendation ?? null}
+              evidenceDocuments={evidenceDocuments}
               onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
             />
           )}
@@ -1726,25 +1731,88 @@ const INFORMAL_STATUS_OPTIONS: { value: InformalStatus; label: string }[] = [
   { value: "no_informal_available", label: "No Informal Available" },
 ];
 
+// "14:30" (the value an <input type="time"> yields) → "2:30 PM", the same
+// human display string the hearing-notice extraction stores, so the informal
+// review's time reads the same everywhere (calendar title included).
+function formatInputTime(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h)) return hhmm;
+  const period = h < 12 ? "AM" : "PM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m ?? 0).padStart(2, "0")} ${period}`;
+}
+
+// The reverse — a stored "2:30 PM" back to "14:30" so it can seed the
+// <input type="time"> when the section re-opens. Returns "" for anything
+// that doesn't parse.
+function parseTimeToInput(display: string | null | undefined): string {
+  if (!display) return "";
+  const m = display.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!m) return "";
+  let h = Number(m[1]);
+  const period = m[3]?.toUpperCase();
+  if (period === "PM" && h < 12) h += 12;
+  if (period === "AM" && h === 12) h = 0;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+const INFORMAL_REVIEW_MODES: HearingMode[] = [
+  "In Person",
+  "Phone",
+  "Videoconference",
+  "Affidavit",
+  "Unknown",
+];
+
 function InformalReviewSection({
   protest,
   property,
   strategyRecommendation,
+  evidenceDocuments,
   onUpdate,
 }: {
   protest: ProtestRecord;
   property: PropertyRecord;
   strategyRecommendation: string | null;
+  evidenceDocuments: DocumentRecord[];
   onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [dateInput, setDateInput] = useState(protest.informalReviewDate ?? "");
-  const [savingDate, setSavingDate] = useState(false);
+  const [timeInput, setTimeInput] = useState(parseTimeToInput(protest.informalReviewTime));
+  const [modeInput, setModeInput] = useState<HearingMode>(
+    protest.informalReviewMode ?? "In Person",
+  );
+  const [savingSchedule, setSavingSchedule] = useState(false);
   const [guidance, setGuidance] = useState<InformalReviewGuidance | null>(null);
   const [loadingGuidance, setLoadingGuidance] = useState(false);
   const [guidanceError, setGuidanceError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<HearingNoticeRecord | null>(null);
+
+  // Inline Q&A — stateless, same engine as the site-wide Ask AI widget
+  // (ask-about-document). Only the latest question/answer is kept on screen.
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [qaError, setQaError] = useState<string | null>(null);
 
   const countyInfo = getCountyProtestInfo(property.cad);
+
+  // The latest hearing/county notice already read for this case — grounds the
+  // guidance below (see getInformalReviewGuidance's noticeContext arg). Same
+  // call HearingNoticeSection and HearingPrepSection already make.
+  useEffect(() => {
+    getLatestHearingNotice(protest.id)
+      .then((n) => {
+        setNotice(n);
+        // Seed the date only from a notice that's actually about an informal
+        // review — never the formal ARB hearing date.
+        if (n?.hearingDate && /informal/i.test(n.hearingType ?? "")) {
+          setDateInput((prev) => prev || n.hearingDate!);
+        }
+      })
+      .catch((err) => console.error("Could not load hearing notice:", err));
+  }, [protest.id]);
 
   async function handleStatusChange(status: InformalStatus) {
     setUpdatingStatus(true);
@@ -1758,18 +1826,24 @@ function InformalReviewSection({
     }
   }
 
-  async function handleSaveDate(e: FormEvent) {
+  async function handleSaveSchedule(e: FormEvent) {
     e.preventDefault();
     if (!dateInput) return;
-    setSavingDate(true);
+    setSavingSchedule(true);
     try {
-      await scheduleInformalReview(protest.id, dateInput);
-      onUpdate({ informalStatus: "scheduled", informalReviewDate: dateInput });
-      toast.success("Informal review date saved.");
+      const displayTime = timeInput ? formatInputTime(timeInput) : null;
+      await scheduleInformalReview(protest.id, dateInput, { time: displayTime, mode: modeInput });
+      onUpdate({
+        informalStatus: "scheduled",
+        informalReviewDate: dateInput,
+        informalReviewTime: displayTime,
+        informalReviewMode: modeInput,
+      });
+      toast.success("Informal review scheduled — added to your calendar.");
     } catch (err) {
-      toast.error(getErrorMessage(err, "Could not save this date."));
+      toast.error(getErrorMessage(err, "Could not save this schedule."));
     } finally {
-      setSavingDate(false);
+      setSavingSchedule(false);
     }
   }
 
@@ -1782,7 +1856,8 @@ function InformalReviewSection({
         countyInfo,
         strategyRecommendation,
         property.estimatedSavings,
-        [],
+        evidenceDocuments.map((d) => d.fileName),
+        notice,
       );
       setGuidance(result);
       // Saved quietly — never its own prominent field, see the schema
@@ -1798,7 +1873,53 @@ function InformalReviewSection({
     }
   }
 
+  async function handleAsk(e: FormEvent) {
+    e.preventDefault();
+    const q = question.trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setQaError(null);
+    setAnswer(null);
+    try {
+      const context = [
+        `Property: ${property.address}${property.cad ? `, ${property.cad}` : ""}`,
+        property.accountNumber ? `Account: ${property.accountNumber}` : null,
+        property.taxYear ? `Tax year: ${property.taxYear}` : null,
+        strategyRecommendation ? `Case strategy: ${strategyRecommendation}` : null,
+        countyInfo?.informalReview?.howToRequest
+          ? `County informal-review process: ${countyInfo.informalReview.howToRequest}`
+          : null,
+        notice
+          ? `Uploaded notice — hearing date ${notice.hearingDate ?? "n/a"}, evidence deadline ${
+              notice.evidenceSubmissionDeadline ?? "n/a"
+            }, county contact ${notice.countyContact ?? "n/a"}, informal review available: ${
+              notice.informalReviewAvailable
+            }. Instructions: ${notice.submissionInstructions ?? "none stated"}`
+          : "No county notice uploaded for this case yet.",
+        guidance
+          ? `Guidance already shown to the user — steps: ${guidance.steps.join(
+              " | ",
+            )}; where to schedule: ${guidance.whereToSchedule || "unknown"}; deadlines: ${
+              guidance.applicableDeadlines.join(" | ") || "none"
+            }.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const { answer: a } = await askAboutDocument({
+        question: `About the informal review for this Texas property tax protest: ${q}`,
+        context,
+      });
+      setAnswer(a);
+    } catch (err) {
+      setQaError(getErrorMessage(err, "Could not answer that. Please try again."));
+    } finally {
+      setAsking(false);
+    }
+  }
+
   const mailto = guidance ? buildInformalReviewMailto(guidance) : null;
+  const scheduled = protest.informalStatus === "scheduled" && !!protest.informalReviewDate;
 
   return (
     <div id="case-informal-review" className="mt-5 border-t border-border pt-5">
@@ -1820,10 +1941,18 @@ function InformalReviewSection({
         </select>
       </div>
 
-      {protest.informalStatus === "scheduled" && (
-        <form onSubmit={handleSaveDate} className="mt-2 flex flex-wrap items-end gap-2">
+      {/* Schedule — always available, not gated behind the status dropdown.
+          Saving it sets the status to "scheduled" and feeds the in-platform
+          calendar + Google/ICS sync (see scheduleInformalReview). */}
+      <form onSubmit={handleSaveSchedule} className="mt-3 rounded-md border border-border p-3">
+        <div className="text-xs font-semibold text-foreground">Schedule the informal review</div>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          Enter the date, time, and mode you arranged with the appraisal district — it goes straight
+          onto your calendar.
+        </p>
+        <div className="mt-2 flex flex-wrap items-end gap-2">
           <label className="grid gap-1 text-xs">
-            Agreed date
+            Date
             <input
               type="date"
               value={dateInput}
@@ -1831,20 +1960,48 @@ function InformalReviewSection({
               className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             />
           </label>
+          <label className="grid gap-1 text-xs">
+            Time
+            <input
+              type="time"
+              value={timeInput}
+              onChange={(e) => setTimeInput(e.target.value)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="grid gap-1 text-xs">
+            Mode
+            <select
+              value={modeInput}
+              onChange={(e) => setModeInput(e.target.value as HearingMode)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            >
+              {INFORMAL_REVIEW_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="submit"
-            disabled={savingDate || !dateInput}
-            className="btn-outline text-xs py-1.5 disabled:opacity-60"
+            disabled={savingSchedule || !dateInput}
+            className="btn-accent text-xs py-1.5 disabled:opacity-60"
           >
-            {savingDate ? "Saving…" : "Save & Add to Calendar"}
+            {savingSchedule ? "Saving…" : "Save & add to calendar"}
           </button>
-          {protest.informalReviewDate && (
-            <span className="text-xs text-muted-foreground">
-              On file: {protest.informalReviewDate}
-            </span>
-          )}
-        </form>
-      )}
+        </div>
+        {scheduled && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            On file: {protest.informalReviewDate}
+            {protest.informalReviewTime ? ` at ${protest.informalReviewTime}` : ""}
+            {protest.informalReviewMode ? ` · ${protest.informalReviewMode}` : ""} ·{" "}
+            <Link to="/dashboard/calendar" className="text-accent hover:underline">
+              View on calendar
+            </Link>
+          </p>
+        )}
+      </form>
 
       <div className="mt-3">
         <button
@@ -1868,7 +2025,25 @@ function InformalReviewSection({
             <span className="font-semibold">Available: </span>
             <span className="text-muted-foreground">{guidance.available}</span>
           </div>
+
+          {guidance.steps.length > 0 && (
+            <div className="text-xs">
+              <div className="font-semibold text-foreground">
+                Steps to schedule &amp; complete it
+              </div>
+              <ol className="mt-1 grid list-decimal gap-1 pl-4 text-muted-foreground">
+                {guidance.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+
           <div className="grid gap-2 sm:grid-cols-2 text-xs">
+            <div>
+              <div className="font-semibold text-foreground">Where to Schedule</div>
+              <p className="text-muted-foreground">{guidance.whereToSchedule || "Not stated."}</p>
+            </div>
             <div>
               <div className="font-semibold text-foreground">Who to Contact</div>
               <p className="text-muted-foreground">{guidance.whoToContact || "Not confirmed."}</p>
@@ -1898,6 +2073,17 @@ function InformalReviewSection({
               <p className="text-muted-foreground">{guidance.acceptingEndsCase}</p>
             </div>
           </div>
+
+          {guidance.applicableDeadlines.length > 0 && (
+            <div className="text-xs">
+              <div className="font-semibold text-foreground">Applicable Deadlines</div>
+              <ul className="mt-0.5 grid gap-0.5 text-muted-foreground">
+                {guidance.applicableDeadlines.map((d, i) => (
+                  <li key={i}>• {d}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {guidance.documentsToProvide.length > 0 && (
             <div className="text-xs">
               <div className="font-semibold text-foreground">Documents to Provide</div>
@@ -1918,6 +2104,34 @@ function InformalReviewSection({
               </ul>
             </div>
           )}
+
+          {(guidance.missingInfo.length > 0 || guidance.nextSteps.length > 0) && (
+            <div className="rounded-md bg-accent/5 border border-accent/30 p-2 text-xs">
+              {guidance.missingInfo.length > 0 && (
+                <>
+                  <div className="font-semibold text-foreground">
+                    Missing from your notice — do this to fill the gap
+                  </div>
+                  <ul className="mt-0.5 grid gap-0.5 text-muted-foreground">
+                    {guidance.missingInfo.map((d, i) => (
+                      <li key={i}>• {d}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {guidance.nextSteps.length > 0 && (
+                <div className={guidance.missingInfo.length > 0 ? "mt-2" : ""}>
+                  <div className="font-semibold text-foreground">Next steps</div>
+                  <ol className="mt-0.5 grid list-decimal gap-0.5 pl-4 text-muted-foreground">
+                    {guidance.nextSteps.map((d, i) => (
+                      <li key={i}>{d}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </div>
+          )}
+
           {mailto ? (
             <div>
               <a href={mailto} className="btn-accent text-xs py-1.5 inline-flex">
@@ -1936,6 +2150,34 @@ function InformalReviewSection({
           )}
         </div>
       )}
+
+      {/* Ask the AI a follow-up about the informal review / preparation. */}
+      <form onSubmit={handleAsk} className="mt-3">
+        <div className="text-xs font-semibold text-foreground">Ask about the informal review</div>
+        <div className="mt-1 flex flex-wrap items-end gap-2">
+          <textarea
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            rows={2}
+            aria-label="Ask about the informal review"
+            placeholder="e.g. Can I bring new comps to the informal that weren't in my protest?"
+            className="min-w-[16rem] flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+          />
+          <button
+            type="submit"
+            disabled={asking || !question.trim()}
+            className="btn-outline text-xs py-1.5 disabled:opacity-60"
+          >
+            {asking ? "Asking…" : "Ask"}
+          </button>
+        </div>
+        {qaError && <p className="mt-1 text-xs text-destructive">{qaError}</p>}
+        {answer && (
+          <div className="mt-2 rounded-md border border-border bg-secondary/30 p-2 text-xs">
+            <MarkdownLite text={answer} />
+          </div>
+        )}
+      </form>
     </div>
   );
 }

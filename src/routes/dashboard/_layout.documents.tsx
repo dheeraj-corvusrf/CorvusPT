@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
@@ -30,6 +30,7 @@ import {
   assignAndUpload,
   type CategorizedUpload,
 } from "@/lib/document-categorize";
+import { attachHearingNoticeToCase } from "@/lib/hearing-notice-intake";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -306,6 +307,7 @@ function Documents() {
       if (result.status === "done" && result.document) {
         setDocuments((prev) => [result.document!, ...prev]);
         void handleAnalyze(result.document); // auto AI-check every new upload
+        void maybeAttachHearingNotice(result);
       }
     }
   }
@@ -320,11 +322,46 @@ function Documents() {
     if (result.status === "done" && result.document) {
       setDocuments((prev) => [result.document!, ...prev]);
       void handleAnalyze(result.document);
+      void maybeAttachHearingNotice(result);
     }
   }
 
   function dismissUpload(id: string) {
     setUploads((prev) => prev.filter((u) => u.id !== id));
+  }
+
+  // A file the classifier tagged "Hearing Notice / ARB", matched to a
+  // property that has an open protest → run the deep extraction, file it
+  // against that case, and put any stated hearing date on the calendar (see
+  // attachHearingNoticeToCase). Marks the upload row + toasts on success;
+  // a no-op for any other document type or an unmatched file.
+  async function maybeAttachHearingNotice(result: CategorizedUpload) {
+    if (
+      !user ||
+      result.status !== "done" ||
+      !result.document ||
+      !result.matchedProperty ||
+      result.extraction?.documentType !== "Hearing Notice / ARB"
+    ) {
+      return;
+    }
+    const attached = await attachHearingNoticeToCase(
+      user.id,
+      result.matchedProperty,
+      result.file,
+      result.document.id,
+    );
+    if (!attached) return;
+    setUploads((prev) =>
+      prev.map((u) =>
+        u.id === result.id ? { ...u, attachedToCaseId: attached.attachedToCaseId } : u,
+      ),
+    );
+    toast.success(
+      attached.hearingDate
+        ? `Hearing notice filed to your open protest for ${result.matchedProperty.address} — hearing details added to your calendar.`
+        : `Hearing notice filed to your open protest for ${result.matchedProperty.address}.`,
+    );
   }
 
   // Property already known (this is the upload button right on that
@@ -343,6 +380,7 @@ function Documents() {
       if (result.status === "done" && result.document) {
         setDocuments((prev) => [result.document!, ...prev]);
         void handleAnalyze(result.document);
+        void maybeAttachHearingNotice(result);
         succeeded++;
       } else {
         failures.push(result.error ?? `${file.name} — failed`);
@@ -718,6 +756,18 @@ function UploadRow({
             <div className="text-xs text-success">
               Matched to {upload.matchedProperty.address}
               {upload.extraction?.documentType ? ` — ${upload.extraction.documentType}` : ""}
+            </div>
+          )}
+          {upload.attachedToCaseId && upload.matchedProperty && (
+            <div className="mt-0.5 text-xs text-accent">
+              Filed to your open protest — AI read the hearing details onto your calendar.{" "}
+              <Link
+                to="/dashboard/case"
+                search={{ propertyId: upload.matchedProperty.id }}
+                className="underline hover:no-underline"
+              >
+                Open case
+              </Link>
             </div>
           )}
           {upload.status === "error" && (
