@@ -70,6 +70,9 @@ export async function validateDocument(input: {
 export async function askAboutDocument(input: {
   question: string;
   context?: string;
+  // The answer will be spoken aloud / shown in a chat bubble — ask for a
+  // natural spoken reply instead of the default bulleted/tabular format.
+  conversational?: boolean;
 }): Promise<{ answer: string }> {
   return invokeEdgeFunction<{ answer: string }>("ask-about-document", input);
 }

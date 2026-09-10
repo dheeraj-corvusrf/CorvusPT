@@ -283,7 +283,7 @@ function Overview() {
       // real in-app page.
       const context = user ? await buildUserContext(user.id).catch(() => "") : "";
       const [ansRes, routeRes] = await Promise.allSettled([
-        askAboutDocument({ question: q, context: context || undefined }),
+        askAboutDocument({ question: q, context: context || undefined, conversational: true }),
         askRouter(q),
       ]);
       const answer =

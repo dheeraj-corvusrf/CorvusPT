@@ -127,8 +127,12 @@ export function AskAiWidget() {
         .join("\n");
       const context = [accountContext, transcript].filter(Boolean).join("\n\n") || undefined;
 
+      // When the answer is going to be read aloud (voice question, or
+      // read-aloud toggled on), ask for a natural spoken reply instead of
+      // the scannable bullets a typed chat wants.
+      const wantSpoken = askedByVoice.current || tts.enabled;
       const [answerRes, routeRes] = await Promise.allSettled([
-        askAboutDocument({ question: q, context }),
+        askAboutDocument({ question: q, context, conversational: wantSpoken }),
         askRouter(q),
       ]);
       const answer =
