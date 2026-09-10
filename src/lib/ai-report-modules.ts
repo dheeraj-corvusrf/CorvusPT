@@ -23,6 +23,16 @@ export type ModuleAnalysisInput = {
   // missing. See loadModule()'s health branch in ai-report.tsx.
   valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
+  // "health" only — property detail the app really has (CAD record / AI-fetched
+  // base data), so Module 1 stops reporting these as missing. Omitted when the
+  // source didn't provide it; lastTransferDate is a deed date, never a price.
+  legalDescription?: string | null;
+  subdivision?: string | null;
+  buildingSqft?: number | null;
+  yearBuilt?: number | null;
+  buildingClass?: string | null;
+  lotSizeAcres?: number | null;
+  lastTransferDate?: string | null;
   // Module 8 (evidence) only — what the app can already verify before asking
   // the user for anything. evidenceOnFile: the protest-evidence documents
   // actually uploaded (+ their analyze-document read). authoritativeFacts:

@@ -19,6 +19,19 @@ export type HealthScoreInput = {
   // reporting them as missing.
   valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
+  // Property detail the app really does have — from the CAD record / the
+  // property's AI-fetched base data. Passed so the score stops reporting these
+  // as "missing" for the counties whose parcel data carries them. Any field the
+  // source didn't provide is simply omitted (never guessed).
+  legalDescription?: string | null;
+  subdivision?: string | null;
+  buildingSqft?: number | null;
+  yearBuilt?: number | null;
+  buildingClass?: string | null;
+  lotSizeAcres?: number | null;
+  // Most recent recorded deed/transfer date — NOT a sale price (Texas does not
+  // disclose those). Lets the score note recency of ownership change.
+  lastTransferDate?: string | null;
 };
 
 export type HealthScoreBreakdownEntry = { label: string; score: number };
