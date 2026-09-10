@@ -3057,6 +3057,17 @@ function cardDataGap(
             docType: GENERIC,
           }
         : null;
+    case "zoning": {
+      const z = data as ModuleResultMap["zoning"];
+      return z.matches === "uncertain" ||
+        z.aspects.some((a) => a.status === "Additional Data Needed")
+        ? {
+            label:
+              "Upload a zoning letter, plat, or the legal description to confirm classification",
+            docType: "Zoning: General",
+          }
+        : null;
+    }
     case "evidence":
       return (data as ModuleResultMap["evidence"]).items.some((i) => i.availability === "Low")
         ? { label: "Upload the documents this checklist is still missing", docType: GENERIC }
@@ -3665,18 +3676,9 @@ function ModuleVisual({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      return (
-        <ZoningAspectTiles
-          aspects={d.aspects}
-          matches={d.matches}
-          uploading={uploadingEvidence}
-          onUpload={
-            hasFullAccess
-              ? (files) => onUploadEvidence(files, undefined, "Zoning: General")
-              : undefined
-          }
-        />
-      );
+      // No mid-card upload — the card shows one "Upload data" control at the
+      // bottom (see cardDataGap's "zoning" case), same as Module 4.
+      return <ZoningAspectTiles aspects={d.aspects} matches={d.matches} />;
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
