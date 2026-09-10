@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { currency, resetIntake, updateIntake } from "@/lib/intake-store";
 import { useAuth } from "@/lib/auth";
@@ -38,7 +38,7 @@ import { ImportPropertiesModal } from "@/components/ImportPropertiesModal";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
 import { BulkProtestAuthorizationFlow } from "@/components/BulkProtestAuthorizationFlow";
 import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink, X, Search, LayoutGrid, LayoutList } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
   // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
@@ -57,6 +57,52 @@ const TIER_LABEL: Record<Tier, string> = {
   owner_managed: "Owner-Managed",
   corvusrf_managed: "CorvusPT-Managed",
 };
+
+// --- List view / sort / filter toolbar -----------------------------------
+// All client-side over the already-loaded `properties` array — no refetch.
+// The view + sort + status choices are remembered per browser (a plain UI
+// preference); the search box is always cleared on a fresh visit.
+type PropertyView = "cards" | "list";
+type SortKey = "recent" | "value_desc" | "savings_desc" | "score_desc" | "county" | "status";
+type StatusFilter = "all" | "protested" | "not_protested" | "needs_action" | "paid" | "unpaid";
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: "recent", label: "Recently added" },
+  { key: "value_desc", label: "Assessed value (high → low)" },
+  { key: "savings_desc", label: "Potential savings (high → low)" },
+  { key: "score_desc", label: "AI score (high → low)" },
+  { key: "county", label: "County (A → Z)" },
+  { key: "status", label: "Status (needs action first)" },
+];
+
+const STATUS_FILTER_OPTIONS: { key: StatusFilter; label: string }[] = [
+  { key: "all", label: "All properties" },
+  { key: "protested", label: "Protested" },
+  { key: "not_protested", label: "Not protested" },
+  { key: "needs_action", label: "Needs action" },
+  { key: "paid", label: "Paid" },
+  { key: "unpaid", label: "Not paid" },
+];
+
+const LS_VIEW = "corvus.properties.view";
+const LS_SORT = "corvus.properties.sort";
+const LS_FILTER = "corvus.properties.filter";
+
+function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const v = localStorage.getItem(key);
+    return v && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function writePref(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // storage blocked (private window etc.) — the choice just won't persist
+  }
+}
 
 function Properties() {
   const navigate = useNavigate();
@@ -81,6 +127,26 @@ function Properties() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  // Toolbar: how the list is shown, ordered, and filtered. View/sort/status
+  // are restored from the last visit; search always starts empty.
+  const [view, setView] = useState<PropertyView>(() =>
+    readPref(LS_VIEW, ["cards", "list"] as const, "cards"),
+  );
+  const [sortKey, setSortKey] = useState<SortKey>(() =>
+    readPref(
+      LS_SORT,
+      ["recent", "value_desc", "savings_desc", "score_desc", "county", "status"] as const,
+      "recent",
+    ),
+  );
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(() =>
+    readPref(
+      LS_FILTER,
+      ["all", "protested", "not_protested", "needs_action", "paid", "unpaid"] as const,
+      "all",
+    ),
+  );
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -154,6 +220,10 @@ function Properties() {
   // property map below) — there's no account-level entitlement math anymore
   // now that every property has its own independent Stripe subscription.
   const isBeta = billing?.plan === "beta";
+
+  useEffect(() => writePref(LS_VIEW, view), [view]);
+  useEffect(() => writePref(LS_SORT, sortKey), [sortKey]);
+  useEffect(() => writePref(LS_FILTER, statusFilter), [statusFilter]);
 
   useSavingsBackfill(properties, setProperties);
 
@@ -293,14 +363,95 @@ function Properties() {
 
   // Most recently added first, per explicit request — the property you just
   // added/imported should be the first thing you see, not wherever its own
-  // protest deadline happens to rank it.
+  // protest deadline happens to rank it. This stays the base order for the
+  // bulk-action derivations below; the toolbar's own sort applies only to
+  // what's rendered (displayProperties).
   const sortedProperties = [...properties].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
 
+  // What the list actually renders: the toolbar's search + status filter +
+  // sort applied over the loaded properties. Everything here is derived from
+  // data already on the page (protests, healthScores) — no refetch.
+  const displayProperties = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const scoreOf = (id: string) => healthScores[id]?.score ?? -1;
+    const isProtested = (p: PropertyRecord) => protests.some((pr) => pr.propertyId === p.id);
+    const isPaidP = (p: PropertyRecord) => isBeta || p.subscriptionStatus === "active";
+
+    let out = sortedProperties.filter((p) => {
+      if (q) {
+        const hay = [p.address, p.accountNumber, p.cad, p.propertyType]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      switch (statusFilter) {
+        case "protested":
+          return isProtested(p);
+        case "not_protested":
+          return !isProtested(p);
+        case "needs_action":
+          return getPropertyProtestStatus(p, protests).status === "needs_action";
+        case "paid":
+          return isPaidP(p);
+        case "unpaid":
+          return !isPaidP(p);
+        default:
+          return true;
+      }
+    });
+
+    const STATUS_RANK: Record<ActionStatus, number> = {
+      needs_action: 0,
+      in_progress: 1,
+      on_track: 2,
+      resolved: 3,
+    };
+    out = [...out];
+    switch (sortKey) {
+      case "value_desc":
+        out.sort((a, b) => (b.totalValue ?? 0) - (a.totalValue ?? 0));
+        break;
+      case "savings_desc":
+        out.sort((a, b) => (b.estimatedSavings ?? 0) - (a.estimatedSavings ?? 0));
+        break;
+      case "score_desc":
+        out.sort((a, b) => scoreOf(b.id) - scoreOf(a.id));
+        break;
+      case "county":
+        out.sort((a, b) => (a.cad ?? "").localeCompare(b.cad ?? ""));
+        break;
+      case "status":
+        out.sort(
+          (a, b) =>
+            STATUS_RANK[getPropertyProtestStatus(a, protests).status] -
+            STATUS_RANK[getPropertyProtestStatus(b, protests).status],
+        );
+        break;
+      // "recent" — already in sortedProperties order
+    }
+    return out;
+  }, [sortedProperties, search, statusFilter, sortKey, protests, healthScores, isBeta]);
+
   function openAiReport(p: PropertyRecord) {
     updateIntake(buildAiReportIntakePatch(p));
     navigate({ to: "/ai-report" });
+  }
+
+  // Per-property values both the card and the compact row need. Kept in one
+  // place so the two renderers can't drift.
+  function rowInfo(p: PropertyRecord) {
+    const existingProtest = protests.find((pr) => pr.propertyId === p.id);
+    const canReFile =
+      existingProtest?.status === "resolved" &&
+      existingProtest.taxYear != null &&
+      existingProtest.taxYear < CURRENT_YEAR;
+    const cad = p.cad;
+    const recordUrl = cad ? getCadRecordUrl({ cad, accountNumber: p.accountNumber }) : null;
+    const isPaid = isBeta || p.subscriptionStatus === "active";
+    return { existingProtest, canReFile, cad, recordUrl, isPaid };
   }
 
   // Live-ish = a Stripe subscription that already exists / is pending, so
@@ -437,31 +588,236 @@ function Properties() {
         onDone={handleBulkDone}
       />
 
-      <div className="mt-6">
+      {!propertiesLoading && properties.length > 0 && (
+        <div className="mt-6 flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[14rem] flex-1 sm:max-w-xs">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search address, account, county…"
+              aria-label="Search properties"
+              className="w-full rounded-md border border-input bg-background py-2 pl-9 pr-3 text-sm"
+            />
+          </div>
+
+          <label className="sr-only" htmlFor="prop-status-filter">
+            Filter by status
+          </label>
+          <select
+            id="prop-status-filter"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            className="rounded-md border border-input bg-background px-2.5 py-2 text-sm"
+          >
+            {STATUS_FILTER_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+
+          <label className="sr-only" htmlFor="prop-sort">
+            Sort properties
+          </label>
+          <select
+            id="prop-sort"
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value as SortKey)}
+            className="rounded-md border border-input bg-background px-2.5 py-2 text-sm"
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                Sort: {o.label}
+              </option>
+            ))}
+          </select>
+
+          <div className="ml-auto inline-flex overflow-hidden rounded-md border border-input">
+            <button
+              type="button"
+              onClick={() => setView("cards")}
+              aria-pressed={view === "cards"}
+              title="Card view"
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm ${
+                view === "cards" ? "bg-secondary font-medium" : "text-muted-foreground"
+              }`}
+            >
+              <LayoutGrid className="h-4 w-4" />
+              Cards
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("list")}
+              aria-pressed={view === "list"}
+              title="List view"
+              className={`inline-flex items-center gap-1.5 border-l border-input px-3 py-2 text-sm ${
+                view === "list" ? "bg-secondary font-medium" : "text-muted-foreground"
+              }`}
+            >
+              <LayoutList className="h-4 w-4" />
+              List
+            </button>
+          </div>
+
+          {(search.trim() || statusFilter !== "all") && (
+            <span className="w-full text-xs text-muted-foreground sm:w-auto">
+              {displayProperties.length} of {properties.length} shown
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch("");
+                  setStatusFilter("all");
+                }}
+                className="ml-2 underline underline-offset-2 hover:text-foreground"
+              >
+                Clear
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="mt-5">
         {listError && <p className="mb-4 text-sm text-destructive">{listError}</p>}
         {propertiesLoading ? (
           <div className="grid gap-4">
             <PropertyCardSkeleton />
             <PropertyCardSkeleton />
           </div>
-        ) : properties.length > 0 ? (
+        ) : properties.length === 0 ? (
+          <div className="card-elev p-8 text-center">
+            <h3 className="font-serif text-xl font-semibold">No properties yet.</h3>
+            <p className="text-muted-foreground mt-1">
+              Start with an address or upload an appraisal notice.
+            </p>
+            <Link
+              to="/intake"
+              onClick={() => resetIntake()}
+              className="btn-primary btn-primary-hover mt-4 inline-flex"
+            >
+              Start Free AI Property Review
+            </Link>
+          </div>
+        ) : displayProperties.length === 0 ? (
+          <div className="card-elev p-8 text-center">
+            <h3 className="font-serif text-xl font-semibold">No matches.</h3>
+            <p className="text-muted-foreground mt-1">No property matches your search or filter.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setStatusFilter("all");
+              }}
+              className="btn-outline mt-4"
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : view === "list" ? (
+          <div className="grid gap-2">
+            {displayProperties.map((p) => {
+              const { existingProtest, canReFile, isPaid } = rowInfo(p);
+              return (
+                <div key={p.id} className="card-elev p-3">
+                  <div className="flex items-center gap-3">
+                    {bulkEligible(p) && (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${p.address} for bulk subscribe`}
+                        checked={selectedIds.has(p.id)}
+                        onChange={() => toggleSelected(p.id)}
+                        className="h-4 w-4 shrink-0"
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="truncate font-semibold">{p.address}</span>
+                        <ActionStatusBadge property={p} protests={protests} />
+                        {!isBeta && <PaymentStatusBadge property={p} />}
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {p.cad}
+                        {p.accountNumber ? ` · Acct ${p.accountNumber}` : ""} · Tax year {p.taxYear}
+                        {healthScores[p.id] ? ` · AI ${healthScores[p.id].score}/100` : ""}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="font-semibold tabular-nums">
+                        {currency(p.totalValue ?? undefined)}
+                      </div>
+                      {p.estimatedSavings != null && p.estimatedSavings > 0 && (
+                        <div className="text-xs text-accent tabular-nums">
+                          {currency(p.estimatedSavings)} est.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <button
+                      onClick={() => openAiReport(p)}
+                      className="btn-outline px-2.5 py-1 text-xs"
+                    >
+                      Open AI Report
+                    </button>
+                    {existingProtest ? (
+                      isPaid ? (
+                        <Link
+                          to="/dashboard/case"
+                          search={{ propertyId: p.id }}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-outline px-2.5 py-1 text-xs"
+                        >
+                          View Case
+                        </Link>
+                      ) : null
+                    ) : isPaid ? (
+                      <button
+                        onClick={() => setAuthorizingProperty(p)}
+                        className="btn-outline px-2.5 py-1 text-xs"
+                      >
+                        Request Protest Filing
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setProtestingProperty(p)}
+                        disabled={!!subscribing}
+                        className="btn-outline px-2.5 py-1 text-xs disabled:opacity-60"
+                      >
+                        {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
+                      </button>
+                    )}
+                    {canReFile && (
+                      <button
+                        onClick={() => setAuthorizingProperty(p)}
+                        className="btn-primary btn-primary-hover px-2.5 py-1 text-xs"
+                      >
+                        Re-file for {CURRENT_YEAR}
+                      </button>
+                    )}
+                    <button
+                      disabled={deletingId === p.id || isPaid}
+                      onClick={() => handleDelete(p, isPaid)}
+                      className="btn-outline px-2.5 py-1 text-xs text-destructive disabled:opacity-60"
+                      title={
+                        isPaid
+                          ? "Cancel this property's subscription before deleting it."
+                          : undefined
+                      }
+                    >
+                      {deletingId === p.id ? "Removing…" : "Delete"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
           <div className="grid gap-4">
-            {sortedProperties.map((p, i) => {
-              const existingProtest = protests.find((pr) => pr.propertyId === p.id);
-              // A resolved protest from a prior tax year shouldn't permanently block
-              // filing again — only offer re-filing once the case is actually closed
-              // and a newer tax year has come around (never for an in-progress case).
-              const canReFile =
-                existingProtest?.status === "resolved" &&
-                existingProtest.taxYear != null &&
-                existingProtest.taxYear < CURRENT_YEAR;
-              const cad = p.cad;
-              const recordUrl = cad
-                ? getCadRecordUrl({ cad, accountNumber: p.accountNumber })
-                : null;
-              // Beta bypasses per-property billing entirely; every other
-              // plan reads this exact property's own real subscription.
-              const isPaid = isBeta || p.subscriptionStatus === "active";
+            {displayProperties.map((p, i) => {
+              const { existingProtest, canReFile, cad, recordUrl, isPaid } = rowInfo(p);
               return (
                 <div
                   key={p.id}
@@ -603,20 +959,6 @@ function Properties() {
                 </div>
               );
             })}
-          </div>
-        ) : (
-          <div className="card-elev p-8 text-center">
-            <h3 className="font-serif text-xl font-semibold">No properties yet.</h3>
-            <p className="text-muted-foreground mt-1">
-              Start with an address or upload an appraisal notice.
-            </p>
-            <Link
-              to="/intake"
-              onClick={() => resetIntake()}
-              className="btn-primary btn-primary-hover mt-4 inline-flex"
-            >
-              Start Free AI Property Review
-            </Link>
           </div>
         )}
       </div>
