@@ -2773,6 +2773,7 @@ function Report() {
                 compsMap={compsMap}
                 siteGisMap={siteGisMap}
                 siteCoords={siteCoords}
+                siteCoordsSettled={siteCoordsSettled}
                 onRetry={() => {}}
                 allowEvidenceUpload={false}
                 evidenceDocs={evidenceDocs}
@@ -2858,6 +2859,7 @@ function Report() {
             compsMap={compsMap}
             siteGisMap={siteGisMap}
             siteCoords={siteCoords}
+            siteCoordsSettled={siteCoordsSettled}
             onRetry={() => loadModule(openModel.id)}
             allowEvidenceUpload
             evidenceDocs={evidenceDocs}
@@ -8642,6 +8644,7 @@ function ModulePreviewContent({
   compsMap,
   siteGisMap,
   siteCoords,
+  siteCoordsSettled,
   onRetry,
   allowEvidenceUpload,
   evidenceDocs,
@@ -8692,6 +8695,9 @@ function ModulePreviewContent({
   compsMap: { data: CompsResult | null; loading: boolean };
   siteGisMap: { data: SiteGisResult | null; loading: boolean };
   siteCoords: GeocodedPoint | null;
+  // True once the CAD-subject / geocode resolution has finished — lets the
+  // comps map tell "still locating" apart from "couldn't locate".
+  siteCoordsSettled: boolean;
   onRetry: () => void;
   allowEvidenceUpload: boolean;
   evidenceDocs: DocumentRecord[];
@@ -8965,6 +8971,11 @@ function ModulePreviewContent({
       if (exclude) onSaveCompSelection({ compKey: comp.key, action: "exclude" });
       else onRemoveCompSelection(comp.key);
     }
+    const verifiedSaleCount = mapComps.filter((c) => c.kind === "sale-verified").length;
+    // No located subject yet, but there's an address and the CAD-subject /
+    // geocode resolution hasn't finished — show "locating", not "couldn't".
+    const locating = !mapSubject && !!(state.address || "").trim() && !siteCoordsSettled;
+
     return (
       <div className="mt-4 grid gap-4">
         <CompsWorkflowRibbon
@@ -8974,27 +8985,51 @@ function ModulePreviewContent({
           hasRecommendation={!!d?.protestRecommendation}
         />
 
+        {/* Map first — the visual centerpiece of Module 3: every located
+            comp plotted against the subject, sale data distinguished from
+            assessed-value comps by colour. Shown for every county; when the
+            county publishes no comp feed it's still the subject on the map
+            with an invitation to add a real sale. */}
+        <div>
+          <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-3">
+            <div className="text-sm font-medium">Comparable Sales — Located vs. Your Property</div>
+            <div className="text-[11px] text-muted-foreground">
+              {hasAnyComp
+                ? `${mapComps.length} located` +
+                  (verifiedSaleCount > 0
+                    ? ` · ${verifiedSaleCount} verified sale${verifiedSaleCount === 1 ? "" : "s"}`
+                    : "")
+                : "subject only"}
+            </div>
+          </div>
+          {compsMap.loading || locating ? (
+            <div className="grid h-[280px] place-items-center rounded-lg border border-border bg-secondary/40 text-xs text-muted-foreground">
+              Locating this property…
+            </div>
+          ) : mapSubject ? (
+            <>
+              <CompsMap subject={mapSubject} comps={mapComps} />
+              {!hasAnyComp && (
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  No comparable sales are published in {state.cad ?? "this county"}&apos;s public
+                  data. Texas doesn&apos;t disclose sale prices — add a real sale from a closing
+                  statement below and it&apos;ll appear on the map, distinguished from
+                  assessed-value comps.
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="grid h-[200px] place-items-center rounded-lg border border-border bg-secondary/40 text-xs text-muted-foreground">
+              Couldn&apos;t locate this property on the map — check the address.
+            </div>
+          )}
+        </div>
+
         {stats.limitedData && (
           <div className="rounded-lg bg-warning/15 p-3 text-sm text-warning-foreground">
             <span className="font-semibold">Limited Comparable Sales Data.</span> Fewer than 3
             reliable recent commercial sales were found. The system may use alternative market
             evidence, but will clearly distinguish it from actual sale data.
-          </div>
-        )}
-        {compsMap.loading && (
-          <div className="h-[280px] animate-pulse rounded-lg border border-border bg-secondary/40" />
-        )}
-
-        {/* Map — every county, not just the 4 with a comps feed. Shows the
-            subject's own point even when no comps have been located yet. */}
-        {mapSubject && (
-          <div>
-            <div className="mb-1.5 text-sm font-medium">
-              {hasAnyComp
-                ? `${mapComps.length} comparable${mapComps.length === 1 ? "" : "s"} located near this property`
-                : "No comparable sales located yet"}
-            </div>
-            <CompsMap subject={mapSubject} comps={mapComps} />
           </div>
         )}
 
