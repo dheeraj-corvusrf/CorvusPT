@@ -1602,18 +1602,20 @@ async function generateJson(
     generationConfig: {
       responseMimeType: "application/json",
       thinkingConfig: { thinkingBudget },
-      // 0, not left at Gemini's default (~1) — several downstream numbers
-      // (Module 10's Case Assessment / Defense Readiness gauges) are real
-      // deterministic formulas over classification fields the model itself
-      // assigns (evidence importance/availability, defenseQA status); at
-      // default sampling those classifications visibly drifted between two
-      // calls against the *same* underlying record, so a gauge could swing
-      // 20+ points with nothing about the actual case having changed. 0
-      // makes token selection always-greedy — not a mathematical guarantee
-      // of byte-identical output every time, but it removes sampling as a
-      // source of variance, leaving only genuine differences in the record
-      // fed in to move these numbers.
+      // Greedy + seeded decode. Several downstream numbers (Module 1's score is
+      // now a deterministic formula; Module 10's gauges are formulas over
+      // classification fields the model assigns; strategy strengthScore /
+      // Module 5-6 priorityScore are still model-produced) visibly drifted
+      // between two calls against the *same* record at default sampling —
+      // a gauge swinging 20+ points with nothing actually changed. temperature
+      // 0 + topK 1 + topP 0 makes selection always-greedy; a fixed seed pins
+      // the remaining tie-breaks. Not a mathematical guarantee of
+      // byte-identical output, but it removes sampling as a source of variance
+      // so only a genuinely changed record moves these numbers.
       temperature: 0,
+      topK: 1,
+      topP: 0,
+      seed: 7,
     },
   };
 

@@ -15,10 +15,14 @@ export function Modal({
   children,
   onClose,
   wide,
+  xl,
 }: {
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  // xl: near-full-viewport panel — for content that needs the room (an
+  // embedded PDF / image viewer). Wins over `wide` when both are set.
+  xl?: boolean;
 }) {
   // Without this, the page behind the modal keeps scrolling along with it —
   // there's nothing else stopping wheel/touch input from reaching the body
@@ -62,7 +66,9 @@ export function Modal({
           management, hence the same justified exception. */}
       {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
       <div
-        className={`relative overflow-hidden card-elev ${wide ? "w-[90vw] max-w-5xl" : "w-full max-w-lg"}`}
+        className={`relative overflow-hidden card-elev ${
+          xl ? "w-[96vw] max-w-[80rem]" : wide ? "w-[90vw] max-w-5xl" : "w-full max-w-lg"
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         <Tooltip>

@@ -38,17 +38,26 @@ type HealthScoreInput = {
   buildingClass?: string | null;
   lotSizeAcres?: number | null;
   lastTransferDate?: string | null;
+  // The protest-opportunity score + analysis confidence, already computed
+  // deterministically by CorvusPT from the CAD figures (see
+  // src/lib/health-score.ts). This function writes the narrative AROUND them —
+  // it does not produce or second-guess them.
+  computedScore?: number;
+  computedConfidencePct?: number;
+  computedDataSufficient?: boolean;
 };
 
 const PREAMBLE = `You are CorvusPT's AI property tax analyst for Texas commercial properties.
-Given only the official CAD (county appraisal district) record below, produce a "protest
-opportunity" health score for this property.
+CorvusPT has ALREADY computed this property's "protest opportunity" score and analysis
+confidence deterministically from the official CAD figures below (they appear in the record).
+Your job is ONLY to write the short narrative that accompanies those numbers — the takeaway
+sentence, the factor lists, and the one-line reasoning/methodology/next-step. Do NOT output a
+score or a confidence number, and never contradict the ones given: if the given score is 78,
+write as if this is a solid opportunity, not a weak one.
 
 Reason only from what's given plus general knowledge of Texas commercial property appraisal
 practice. Do NOT invent specific comparable sale prices, specific building square footage,
-specific site defects, or facts not given below — if you don't have enough information for a
-factor, say so (set dataSufficient to false and explain what's missing) rather than fabricating
-a number.
+specific site defects, or facts not given below.
 
 TEXAS IS A NON-DISCLOSURE STATE. Sale prices, sale dates as prices, and sale-based cap rates
 are NEVER public here and can never be obtained — a recorded transfer DATE is the most that
@@ -71,9 +80,6 @@ The word caps in the schema below still apply. These fields stay single sentence
 
 const str = (v: unknown, len: number): string => (typeof v === "string" ? v.slice(0, len) : "");
 
-const score100 = (v: unknown, fallback = 50): number =>
-  Math.max(0, Math.min(100, Math.round(Number(v)) || fallback));
-
 const strList = (v: unknown, max: number, len: number): string[] =>
   Array.isArray(v)
     ? v
@@ -82,36 +88,11 @@ const strList = (v: unknown, max: number, len: number): string[] =>
         .slice(0, max)
     : [];
 
-// Only the factor labels a CAD record (plus the real signals above) can
-// actually speak to — the AI picks whichever subset genuinely applies here
-// rather than always returning all 5, so a property with no real comps data
-// doesn't get a fabricated "Comparable Properties" score.
-const BREAKDOWN_LABELS = [
-  "CAD Valuation",
-  "Comparable Properties",
-  "Market Data",
-  "Property Condition",
-  "Historical Valuation",
-];
-
-type BreakdownEntry = { label: string; score: number };
-
-const scoreBreakdown = (v: unknown): BreakdownEntry[] =>
-  Array.isArray(v)
-    ? v
-        .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
-        .map((x) => ({ label: str(x.label, 40), score: score100(x.score) }))
-        .filter((x) => x.label.length > 0 && BREAKDOWN_LABELS.includes(x.label))
-        .slice(0, 5)
-    : [];
-
-const SCHEMA = `{"score": <integer 0-100, higher = stronger protest opportunity>,
+const SCHEMA = `{
 "executiveConclusion": "<1-2 short, plain sentences, max ~35 words total — the takeaway:
 does this property have a meaningful protest opportunity, and if the data is thin, what's
-missing and the one next step. Lead with the fact. No hedging, no restating numbers the
-gauge/chips already show>",
-"scoreBreakdown": [{"label": "<one of: ${BREAKDOWN_LABELS.join(" | ")}>", "score": <integer
-0-100>}, ...] (only include labels the given data can actually speak to),
+missing and the one next step. Lead with the fact. Consistent with the given score. No
+hedging, no restating numbers the gauge/chips already show>",
 "factorsIncreasing": ["<plain phrase, max ~12 words, that makes the protest STRONGER>",
 ...] (up to 5). Each a bare point, not a sentence — no dollar figures restated, no "warrants
 a detailed review" filler, no leading "The property". Style like: "CAD value is higher than
@@ -122,18 +103,15 @@ to win>", ...] (up to 5, empty array if none apply). Same terse style. Style lik
 comparable assessments nearby", "limited evidence of overvaluation", "county ratio study
 shows uniform assessments". Never "no sale price / no recent sale" — that is not obtainable
 in Texas and is not a weakness.
-"confidencePct": <integer 0-100, how confident this analysis is given the data actually
-available. Do NOT dock points for market sale prices — those never exist in Texas. With
-assessed values + multi-year history + a ratio study + comps present, this belongs in the
-55-80 band>,
 "confidenceReasoning": "<ONE short sentence, max ~15 words, naming only a gap the OWNER could
 close by uploading (rent roll, appraisal, condition photos, survey). Never mention sale price
-or building details that are already given above.>",
-"methodology": "<ONE short sentence, max ~18 words, on how the score was reached — not
-model internals>",
-"nextStep": "<ONE short sentence, max ~12 words: the single next action>",
-"dataSufficient": <true|false — false if there's genuinely too little data for a responsible
-score>}`;
+or building details that are already given above. Consistent with the given confidence
+number.>",
+"methodology": "<ONE short sentence, max ~18 words, on how the analysis reads the CAD figures
+— e.g. 'compares the CAD value against nearby equity comps and the county ratio study'. Not
+model internals.>",
+"nextStep": "<ONE short sentence, max ~12 words: the single next action>"
+}`;
 
 // Gemini call had no timeout at all before this — a slow/hung response on
 // Gemini's end just hung the edge function indefinitely, which is what
@@ -251,6 +229,14 @@ Deno.serve(async (req: Request) => {
         `Evidence documents already uploaded by the owner: ${input.evidenceFileNames.join(", ")}`,
       );
     }
+    if (input.computedScore != null) {
+      lines.push(
+        `\nCorvusPT's deterministic protest-opportunity score for this property: ` +
+          `${input.computedScore}/100. Analysis confidence: ${input.computedConfidencePct ?? "n/a"}/100. ` +
+          `Data ${input.computedDataSufficient === false ? "is thin — say so" : "is sufficient for a responsible read"}. ` +
+          `Write your narrative to match these — do not restate them as numbers, and never imply a different level of opportunity or confidence.`,
+      );
+    }
     const record = lines.filter((l): l is string => typeof l === "string").join("\n");
 
     const system = `${PREAMBLE}\n\nReturn ONLY a JSON object with exactly this shape:\n${SCHEMA}`;
@@ -270,12 +256,15 @@ Deno.serve(async (req: Request) => {
       // actually addresses the "spins forever" symptom.
       generationConfig: {
         responseMimeType: "application/json",
-        // Without this the model samples at its default temperature, so the
-        // same CAD record scored 50 ("Moderate Opportunity", 30% confidence)
-        // on one refresh and 85 ("Strong Opportunity", 55%) on the next.
-        // Every other AI function here already pins temperature 0 — this one
-        // was the outlier. Same input -> same score now.
+        // Greedy, seeded decode — the score/confidence numbers are now computed
+        // deterministically upstream (src/lib/health-score.ts), but the prose
+        // should be steady too: with temperature 0 + topK 1 + topP 0 + a fixed
+        // seed, the same record yields the same narrative on a re-run instead
+        // of a reworded (occasionally differently-slanted) one.
         temperature: 0,
+        topK: 1,
+        topP: 0,
+        seed: 7,
         thinkingConfig: { thinkingBudget: 2048 },
       },
     };
@@ -305,22 +294,17 @@ Deno.serve(async (req: Request) => {
       parsed = m ? JSON.parse(m[0]) : {};
     }
 
+    // Narrative only — score / confidencePct / scoreBreakdown / dataSufficient
+    // are computed deterministically in src/lib/health-score.ts and merged in
+    // by getHealthScore(). The char caps are a hard backstop against a single
+    // unusually long sentence; the prompt's word counts do the real enforcing.
     const result = {
-      score: score100(parsed.score, 0),
-      // Caps tightened alongside the SCHEMA's own word-count instructions
-      // above (500/300/500/200 chars was enough room for the paragraphs
-      // the old "2-3 sentences" instructions produced — these are a hard
-      // backstop against a single unusually long sentence, not the actual
-      // enforcement, which the prompt's word counts do).
       executiveConclusion: str(parsed.executiveConclusion, 260),
-      scoreBreakdown: scoreBreakdown(parsed.scoreBreakdown),
       factorsIncreasing: strList(parsed.factorsIncreasing, 5, 80),
       factorsReducing: strList(parsed.factorsReducing, 5, 80),
-      confidencePct: score100(parsed.confidencePct),
       confidenceReasoning: str(parsed.confidenceReasoning, 140),
       methodology: str(parsed.methodology, 160),
       nextStep: str(parsed.nextStep, 100),
-      dataSufficient: parsed.dataSufficient !== false,
     };
 
     return new Response(JSON.stringify(result), { status: 200, headers: corsHeaders });

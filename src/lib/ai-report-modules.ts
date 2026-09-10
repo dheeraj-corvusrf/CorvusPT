@@ -33,6 +33,9 @@ export type ModuleAnalysisInput = {
   buildingClass?: string | null;
   lotSizeAcres?: number | null;
   lastTransferDate?: string | null;
+  // "health" only — the comps valuation gap % (from computeComparableStats),
+  // fed to the deterministic health-score formula.
+  compsGapPct?: number | null;
   // Module 8 (evidence) only — what the app can already verify before asking
   // the user for anything. evidenceOnFile: the protest-evidence documents
   // actually uploaded (+ their analyze-document read). authoritativeFacts:

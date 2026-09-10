@@ -38,8 +38,31 @@ export async function invokeEdgeFunction<T>(
   name: string,
   body: Record<string, unknown>,
 ): Promise<T> {
+  let refreshedOn401 = false;
+
   for (let attempt = 0; ; attempt++) {
-    const { data, error } = await supabase.functions.invoke<T>(name, { body });
+    // supabase-js keeps the Functions client's auth token in sync only via
+    // auth events (TOKEN_REFRESHED / SIGNED_IN). If a scheduled refresh was
+    // missed — the tab was backgrounded or the laptop asleep past the token's
+    // 1-hour expiry — that cached token goes stale. Ordinary DB queries
+    // self-heal (each re-checks the session), but functions.invoke() does
+    // not, so an authenticated call comes back 401 "unauthenticated" even
+    // though the user is still signed in. getSession() refreshes an expired
+    // session, so read it here and pass the fresh token explicitly.
+    let authHeaders: Record<string, string> | undefined;
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (token) authHeaders = { Authorization: `Bearer ${token}` };
+    } catch {
+      // no session / storage blocked — let the call go out unauthenticated
+      // (guest-accessible functions still work; gated ones return their own 401)
+    }
+
+    const { data, error } = await supabase.functions.invoke<T>(name, {
+      body,
+      ...(authHeaders ? { headers: authHeaders } : {}),
+    });
     if (!error) return data as T;
 
     const context = (error as { context?: Response }).context;
@@ -53,6 +76,15 @@ export async function invokeEdgeFunction<T>(
       }
     }
     const thrown = extractedMessage ? new Error(extractedMessage) : error;
+
+    // A 401 despite an attached token means the token was rejected server-side
+    // (expired between getSession() and the request, or clock skew). Force one
+    // real refresh and retry before surfacing "unauthenticated" to the user.
+    if (context?.status === 401 && !refreshedOn401) {
+      refreshedOn401 = true;
+      await supabase.auth.refreshSession().catch(() => {});
+      continue;
+    }
 
     if (context?.status === 504) {
       if (attempt >= MAX_RETRIES_504) throw thrown;

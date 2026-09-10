@@ -58,12 +58,13 @@ import {
   Search,
   LayoutGrid,
   LayoutList,
-  MoreHorizontal,
   ChevronDown,
   FileText,
   Gavel,
   FilePlus,
   Trash2,
+  Ban,
+  RotateCcw,
 } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
@@ -1071,13 +1072,12 @@ function PropertyActionsMenu({
         aria-label={`Actions for ${p.address}`}
         className={
           compact
-            ? "btn-outline inline-flex items-center gap-1 px-2.5 py-1 text-xs"
-            : "btn-outline inline-flex items-center gap-1.5"
+            ? "btn-outline group inline-flex items-center gap-1.5 px-2.5 py-1 text-xs"
+            : "btn-outline group inline-flex items-center gap-1.5"
         }
       >
-        <MoreHorizontal className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
         Actions
-        <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        <ChevronDown className="h-3.5 w-3.5 opacity-50 transition-transform group-data-[state=open]:rotate-180" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
         {existingProtest && isPaid && (
@@ -1123,6 +1123,7 @@ function PropertyActionsMenu({
         )}
         {showSubMgmt && p.cancelAtPeriodEnd && (
           <DropdownMenuItem onClick={onResume} disabled={resumingId === p.id}>
+            <RotateCcw className="mr-2 h-4 w-4" />
             {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
           </DropdownMenuItem>
         )}
@@ -1132,6 +1133,7 @@ function PropertyActionsMenu({
             disabled={cancelingId === p.id}
             className="text-warning-foreground"
           >
+            <Ban className="mr-2 h-4 w-4" />
             {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
           </DropdownMenuItem>
         )}
@@ -1212,105 +1214,105 @@ function PropertyDocsModal({
   const kind = selected ? previewKind(selected.fileName) : "none";
 
   return (
-    <Modal onClose={onClose} wide>
-      <div className="p-6">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="font-serif text-xl font-bold">Documents</h2>
-            <p className="mt-0.5 truncate text-sm text-muted-foreground">{property.address}</p>
-          </div>
-          <Link to="/dashboard/documents" className="btn-outline shrink-0 text-xs">
-            Open Documents tab
-          </Link>
+    <Modal onClose={onClose} xl>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-serif text-xl font-bold">Documents</h2>
+          <p className="mt-0.5 truncate text-sm text-muted-foreground">{property.address}</p>
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Quick view only — edit, rename, or run an AI review from the Documents tab.
-        </p>
-
-        {loadError ? (
-          <p className="mt-6 text-sm text-destructive">Couldn't load documents.</p>
-        ) : docs === null ? (
-          <p className="mt-6 text-sm text-muted-foreground">Loading…</p>
-        ) : docs.length === 0 ? (
-          <div className="mt-6 rounded-lg border border-border p-8 text-center text-sm text-muted-foreground">
-            No documents for this property yet.
-          </div>
-        ) : (
-          <div className="mt-4 grid gap-4 sm:grid-cols-[15rem_1fr]">
-            <ul className="grid max-h-[60vh] gap-1 overflow-y-auto pr-1">
-              {docs.map((d) => {
-                const v = verdictMeta(d.aiVerdict);
-                const active = selected?.id === d.id;
-                return (
-                  <li key={d.id}>
-                    <button
-                      type="button"
-                      onClick={() => setSelected(d)}
-                      className={`w-full rounded-md border px-2.5 py-2 text-left text-xs ${
-                        active ? "border-accent bg-accent/5" : "border-border hover:bg-secondary"
-                      }`}
-                    >
-                      <div className="truncate font-medium">{d.fileName}</div>
-                      <div className="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
-                        <span className="truncate">
-                          {d.documentType ?? d.category ?? "Document"}
-                        </span>
-                        <span>·</span>
-                        <span className="shrink-0">
-                          {new Date(d.uploadedAt).toLocaleDateString()}
-                        </span>
-                      </div>
-                      {d.aiCheckedAt && (
-                        <div
-                          className={`mt-0.5 text-[10px] font-semibold ${
-                            v.tone === "success"
-                              ? "text-success"
-                              : v.tone === "warning"
-                                ? "text-warning-foreground"
-                                : "text-destructive"
-                          }`}
-                        >
-                          AI: {v.label}
-                        </div>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-
-            <div className="grid min-h-[45vh] place-items-center overflow-hidden rounded-lg bg-secondary/40">
-              {!selected ? (
-                <p className="p-6 text-sm text-muted-foreground">Select a document.</p>
-              ) : urlError ? (
-                <p className="p-6 text-sm text-destructive">Couldn't load this document.</p>
-              ) : !url ? (
-                <p className="p-6 text-sm text-muted-foreground">Loading…</p>
-              ) : kind === "pdf" ? (
-                <iframe title={selected.fileName} src={url} className="h-[60vh] w-full" />
-              ) : kind === "image" ? (
-                <img
-                  src={url}
-                  alt={selected.fileName}
-                  className="max-h-[60vh] w-auto object-contain"
-                />
-              ) : (
-                <div className="p-6 text-center text-sm text-muted-foreground">
-                  <p>No inline preview for this file type.</p>
-                  <a
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn-outline mt-3 inline-flex text-xs"
-                  >
-                    Open in new tab
-                  </a>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        <Link to="/dashboard/documents" className="btn-outline shrink-0 text-xs">
+          Open Documents tab
+        </Link>
       </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Quick view only — edit, rename, or run an AI review from the Documents tab.
+      </p>
+
+      {loadError ? (
+        <p className="mt-6 text-sm text-destructive">Couldn't load documents.</p>
+      ) : docs === null ? (
+        <p className="mt-6 text-sm text-muted-foreground">Loading…</p>
+      ) : docs.length === 0 ? (
+        <div className="mt-6 rounded-lg border border-border p-8 text-center text-sm text-muted-foreground">
+          No documents for this property yet.
+        </div>
+      ) : (
+        // minmax(0,1fr) on the preview track is what lets it shrink below the
+        // iframe's intrinsic width instead of pushing the whole modal wider.
+        <div className="mt-4 grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
+          <ul className="grid max-h-48 gap-1 overflow-y-auto pr-1 lg:max-h-[72vh]">
+            {docs.map((d) => {
+              const v = verdictMeta(d.aiVerdict);
+              const active = selected?.id === d.id;
+              return (
+                <li key={d.id} className="min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => setSelected(d)}
+                    className={`w-full min-w-0 rounded-md border px-2.5 py-2 text-left text-xs ${
+                      active ? "border-accent bg-accent/5" : "border-border hover:bg-secondary"
+                    }`}
+                  >
+                    <div className="truncate font-medium">{d.fileName}</div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
+                      <span className="min-w-0 truncate">
+                        {d.documentType ?? d.category ?? "Document"}
+                      </span>
+                      <span className="shrink-0">·</span>
+                      <span className="shrink-0">
+                        {new Date(d.uploadedAt).toLocaleDateString()}
+                      </span>
+                    </div>
+                    {d.aiCheckedAt && (
+                      <div
+                        className={`mt-0.5 text-[10px] font-semibold ${
+                          v.tone === "success"
+                            ? "text-success"
+                            : v.tone === "warning"
+                              ? "text-warning-foreground"
+                              : "text-destructive"
+                        }`}
+                      >
+                        AI: {v.label}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="grid min-h-[55vh] min-w-0 place-items-center overflow-hidden rounded-lg bg-secondary/40 lg:min-h-[72vh]">
+            {!selected ? (
+              <p className="p-6 text-sm text-muted-foreground">Select a document.</p>
+            ) : urlError ? (
+              <p className="p-6 text-sm text-destructive">Couldn't load this document.</p>
+            ) : !url ? (
+              <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+            ) : kind === "pdf" ? (
+              <iframe title={selected.fileName} src={url} className="h-[55vh] w-full lg:h-[72vh]" />
+            ) : kind === "image" ? (
+              <img
+                src={url}
+                alt={selected.fileName}
+                className="max-h-[55vh] w-auto object-contain lg:max-h-[72vh]"
+              />
+            ) : (
+              <div className="p-6 text-center text-sm text-muted-foreground">
+                <p>No inline preview for this file type.</p>
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-outline mt-3 inline-flex text-xs"
+                >
+                  Open in new tab
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }
