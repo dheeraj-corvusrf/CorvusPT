@@ -6,6 +6,8 @@ import type { PreFilingCheckItem } from "./pre-filing-check";
 function stats(overrides: Partial<ComparableStats> = {}): ComparableStats {
   return {
     indicated: { min: 4_800_000, median: 5_000_000, max: 5_200_000 },
+    adjustedIndicated: null,
+    perCompAdjustment: [],
     subjectValue: 5_900_000,
     valuationGapPct: 18,
     confidencePct: 80,

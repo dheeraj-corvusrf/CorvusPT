@@ -57,8 +57,15 @@ export type ModuleAnalysisInput = {
     excluded?: boolean;
     userAdded?: boolean;
     saleVerified?: boolean;
+    // Deterministic reliability flags (Stale / Distant / Size mismatch /
+    // Type mismatch / Unverified price / Not a market sale) — see
+    // compFlags in comps-analysis.ts.
+    flags?: string[];
   }[];
   compsSubjectValue?: number | null;
+  // The subject's own year-over-year assessed-value trend as a whole-number
+  // % — context for the comps module's recency / time-adjustment reasoning.
+  subjectTrendPctPerYear?: number | null;
   // Only for "zoning" (Module 6) — the real CAD classification / zoning
   // string / legal description this app actually has, plus the comps'
   // classifications and the file names of any zoning docs the user
@@ -214,7 +221,10 @@ export type ModuleResultMap = {
     // to use the comp set in the protest. Keys are clamped server-side to
     // the set actually sent — the model can't introduce a comp.
     recommendedKeys: string[];
-    perComp: { key: string; verdict: "use" | "exclude"; reason: string }[];
+    // flags: reliability concerns the deterministic check can't see
+    // (portfolio sale, related parties, atypical financing). Merged with the
+    // deterministic compFlags in the UI. Never invented.
+    perComp: { key: string; verdict: "use" | "exclude"; reason: string; flags?: string[] }[];
     protestRecommendation: string;
   };
   // Real 16-factor structured assessment — see MODULE_SPECS.site and

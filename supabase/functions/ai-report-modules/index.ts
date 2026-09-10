@@ -79,8 +79,10 @@ type ModulesInput = {
     excluded?: boolean;
     userAdded?: boolean;
     saleVerified?: boolean;
+    flags?: string[];
   }[];
   compsSubjectValue?: number | null;
+  subjectTrendPctPerYear?: number | null;
   // Only for moduleId "executive" — real outputs Modules 2/3/8/9 already
   // computed client-side (never regenerated here), so the executive module
   // can actually reconcile them. See loadModule()'s executive branch and its
@@ -855,15 +857,22 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "reliable source; never pick a comp already marked excluded. (2) For EACH comp key, give a " +
       "verdict of 'use' or 'exclude' and a one-line reason citing only real differences given " +
       "(e.g. 'far larger lot', 'value 40% above subject', 'half a mile away', 'different use " +
-      "code'). (3) protestRecommendation: 1-2 sentences on how to actually use this comp set in " +
-      "the protest hearing. Never invent a property, address, key, or number not given above.",
+      "code'). Each comp already carries deterministic 'flags' (Stale / Distant / Size mismatch " +
+      "/ Type mismatch / Unverified price / Not a market sale) — do NOT repeat those; instead, in " +
+      "each comp's optional 'flags' array, add ONLY reliability concerns those can't see and that " +
+      "the data given actually supports — e.g. 'Portfolio sale' (same owner as another comp), " +
+      "'Related parties', 'Atypical financing'. Leave flags out entirely when there's nothing " +
+      "real to add; never invent one. (3) protestRecommendation: 1-2 sentences on how to actually " +
+      "use this comp set in the protest hearing. Never invent a property, address, key, or number " +
+      "not given above.",
     schema:
       `{"guidance": "<ONE short sentence, max ~18 words — a headline, the checklist below carries ` +
       `the detail>", "checklist": ["<short item>", ...], "recommendedUse": "<ONE to two short ` +
       `sentences, max ~30 words total — omit/empty string entirely if no real top comps were given ` +
       `above>", "recommendedKeys": ["<key>", ...] (3-5, each MUST be one of the keys given above), ` +
       `"perComp": [{"key": "<key given above>", "verdict": "use | exclude", "reason": "<max ~16 ` +
-      `words, real differences only>"}, ...], "protestRecommendation": "<ONE to two short sentences, ` +
+      `words, real differences only>", "flags": ["<extra reliability concern>", ...] (optional, ` +
+      `omit when empty)}, ...], "protestRecommendation": "<ONE to two short sentences, ` +
       `max ~35 words — empty string if no real comps were given>"}`,
     parse: (p) => ({
       guidance: str(p.guidance, 160),
@@ -884,6 +893,12 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
               key: str(x.key, 64),
               verdict: x.verdict === "exclude" ? "exclude" : "use",
               reason: str(x.reason, 160),
+              flags: Array.isArray(x.flags)
+                ? x.flags
+                    .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+                    .map((f) => f.slice(0, 40))
+                    .slice(0, 4)
+                : [],
             }))
             .filter((x) => x.key.length > 0)
             .slice(0, 40)
@@ -1400,10 +1415,16 @@ function buildRecord(input: ModulesInput): string {
           .map(
             (c, i) =>
               `${i + 1}. ${c.address} — ${c.distanceMi.toFixed(1)} mi, ` +
-              `${c.marketValue != null ? `$${c.marketValue.toLocaleString()} assessed value` : "value not on file"}, ` +
-              `${c.similarity}/100 similarity`,
+              `${c.marketValue != null ? `$${c.marketValue.toLocaleString()}${c.userAdded && c.saleVerified ? " verified sale price" : " assessed value"}` : "value not on file"}, ` +
+              `${c.similarity}/100 similarity` +
+              (c.flags && c.flags.length > 0 ? ` [flags: ${c.flags.join(", ")}]` : ""),
           )
           .join("\n"),
+    );
+  }
+  if (input.subjectTrendPctPerYear != null) {
+    lines.push(
+      `Subject's own assessed-value trend: ${input.subjectTrendPctPerYear >= 0 ? "+" : ""}${input.subjectTrendPctPerYear}% per year (context for how much weight a stale comp deserves).`,
     );
   }
   if (input.topStrategies && input.topStrategies.length > 0) {
@@ -1815,7 +1836,7 @@ Deno.serve(async (req: Request) => {
     if (input.moduleId === "comps") {
       const r = result as {
         recommendedKeys: string[];
-        perComp: { key: string; verdict: "use" | "exclude"; reason: string }[];
+        perComp: { key: string; verdict: "use" | "exclude"; reason: string; flags?: string[] }[];
       };
       const sent = Array.isArray(input.topComps) ? input.topComps : [];
       const validKeys = new Set(sent.map((c) => c.key));

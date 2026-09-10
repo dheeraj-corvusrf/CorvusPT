@@ -58,6 +58,12 @@ export type ExtraComp = {
 export type RankedComp = CompProperty & {
   distanceMi: number;
   similarity: number;
+  // The 6 sub-scores + reliability adjustments behind `similarity` — shown
+  // in the modal so the ranking is explainable, and fed to the Ask-AI
+  // context.
+  breakdown: SimilarityBreakdown;
+  // Deterministic "unusual / less reliable" flags (see compFlags).
+  flags: string[];
   key: string;
   // Set when the user has excluded this comp — kept in `ranked` so the table
   // can still show it (struck through), but left out of the indicated value,
@@ -78,36 +84,157 @@ type ComputeOpts = {
   excludedKeys?: Set<string>;
   // Comps the user added — merged into the pool before ranking.
   extraComps?: ExtraComp[];
+  // The subject's own gross building area, when known — enables a $/SF
+  // (improved-property) unit basis instead of $/acre. Absent for CAD-only
+  // data, which carries no building SF.
+  subjectBuildingSqft?: number | null;
+  // The subject's own year-over-year assessed-value trend as a whole-number
+  // % (from buildValueTrend / value history) — the basis for the time
+  // adjustment. Absent → no time adjustment anywhere.
+  subjectTrendPctPerYear?: number | null;
 };
 
-// Blends 4 real signals into one 0-100 similarity score: value proximity
-// (the strongest signal for an equal-and-uniform argument), distance,
-// land-size proximity, and a same/different property-type-code bonus. Any
-// signal missing on either side (e.g. no legalAcreage) scores as a neutral
-// 50 rather than being treated as a mismatch or fabricated.
-export function similarityScore(subject: CompProperty, comp: CompProperty): number {
-  const distanceMi = haversineMiles(subject, comp);
-  const distanceScore = decayScore(distanceMi, 0.4);
+// How similar a comp is to the subject, 0-100. Four proximity signals form
+// the base (value, distance, size, use), each neutral-50 when a field is
+// missing on either side — never a fabricated value or a penalty for absent
+// data. Then two reliability signals adjust it: a mild recency multiplier
+// (a stale dated sale is worth less) and a small reliability bump/penalty
+// (a verified closing-statement sale ranks above an equity comp; an
+// unverified hand-typed price ranks below one). Absence of a date or a
+// verification flag never moves the score.
+export type SimilarityBreakdown = {
+  value: number;
+  distance: number;
+  size: number;
+  use: number;
+  base: number;
+  recencyMult: number;
+  reliabilityAdj: number;
+  score: number;
+};
 
-  const valueScore =
+type SimilarityMeta = {
+  verified?: boolean;
+  userAdded?: boolean;
+  // building SF on each side, when known — lets `size` compare floor area
+  // instead of lot acreage for improved property.
+  subjectBuildingSqft?: number | null;
+  compBuildingSqft?: number | null;
+};
+
+function yearsSince(dateStr: string | null | undefined): number | null {
+  if (!dateStr) return null;
+  const t = Date.parse(dateStr);
+  if (Number.isNaN(t)) return null;
+  const yrs = (Date.now() - t) / (365.25 * 24 * 60 * 60 * 1000);
+  return yrs >= 0 ? yrs : null;
+}
+
+export function similarityBreakdown(
+  subject: CompProperty,
+  comp: CompProperty,
+  meta: SimilarityMeta = {},
+): SimilarityBreakdown {
+  const distanceMi = haversineMiles(subject, comp);
+  const distance = decayScore(distanceMi, 0.4);
+
+  const value =
     subject.marketValue && comp.marketValue
       ? decayScore(Math.abs(comp.marketValue - subject.marketValue) / subject.marketValue, 0.15)
       : 50;
 
-  const landScore =
-    subject.legalAcreage && comp.legalAcreage
-      ? decayScore(Math.abs(comp.legalAcreage - subject.legalAcreage) / subject.legalAcreage, 0.4)
-      : 50;
+  // Prefer building SF when both sides have it (improved property), else lot
+  // acreage, else neutral.
+  const size =
+    meta.subjectBuildingSqft && meta.compBuildingSqft
+      ? decayScore(
+          Math.abs(meta.compBuildingSqft - meta.subjectBuildingSqft) / meta.subjectBuildingSqft,
+          0.4,
+        )
+      : subject.legalAcreage && comp.legalAcreage
+        ? decayScore(Math.abs(comp.legalAcreage - subject.legalAcreage) / subject.legalAcreage, 0.4)
+        : 50;
 
-  const typeScore =
-    subject.propType && comp.propType ? (subject.propType === comp.propType ? 100 : 30) : 50;
+  const use =
+    subject.propType && comp.propType ? (subject.propType === comp.propType ? 100 : 35) : 50;
 
-  const score = valueScore * 0.4 + distanceScore * 0.3 + landScore * 0.2 + typeScore * 0.1;
-  return Math.round(Math.max(0, Math.min(100, score)));
+  const base = value * 0.35 + distance * 0.3 + size * 0.2 + use * 0.15;
+
+  // Recency: only a dated sale can be stale. 0-1 yr → ~1.0, ~4 yr → ~0.87,
+  // ~10 yr → ~0.78. No date → no effect.
+  const yrs = yearsSince(comp.lastTransferDt);
+  const recencyMult = yrs == null ? 1 : Math.max(0.75, 0.75 + 0.25 * (decayScore(yrs, 4) / 100));
+
+  // Reliability: verified sale +4, unverified hand-typed price −8, CAD
+  // equity comp 0. Absence of the meta (existing callers) → 0.
+  const reliabilityAdj = meta.verified ? 4 : meta.userAdded && meta.verified === false ? -8 : 0;
+
+  const score = Math.round(Math.max(0, Math.min(100, base * recencyMult + reliabilityAdj)));
+  return { value, distance, size, use, base, recencyMult, reliabilityAdj, score };
 }
+
+export function similarityScore(
+  subject: CompProperty,
+  comp: CompProperty,
+  meta: SimilarityMeta = {},
+): number {
+  return similarityBreakdown(subject, comp, meta).score;
+}
+
+// Deterministic "this comp is unusual / less reliable" flags — plain reads
+// of the real fields, never a guess. The AI adds concerns these can't see
+// (portfolio sales, related parties, atypical financing) in its per-comp
+// reason.
+export function compFlags(
+  subject: CompProperty | null,
+  c: RankedComp,
+  medianDistanceMi: number,
+): string[] {
+  const flags: string[] = [];
+  const yrs = yearsSince(c.saleDate ?? c.lastTransferDt);
+  if (yrs != null && yrs > 3) flags.push("Stale");
+  const distCap = Math.max(3, medianDistanceMi * 2);
+  if (c.distanceMi > distCap) flags.push("Distant");
+  const sizeBase = c.userAdded ? c.buildingSqft : c.legalAcreage;
+  const subjSize = c.userAdded ? null : (subject?.legalAcreage ?? null);
+  if (sizeBase != null && subjSize != null && subjSize > 0) {
+    if (Math.abs(sizeBase - subjSize) / subjSize > 0.5) flags.push("Size mismatch");
+  }
+  if (subject?.propType && c.propType && subject.propType !== c.propType) {
+    flags.push("Type mismatch");
+  }
+  if (c.userAdded && !c.saleVerified) flags.push("Unverified price");
+  if (!c.userAdded) flags.push("Not a market sale");
+  return flags;
+}
+
+// One comp's normalization on the way to the reconciled indicated value.
+export type CompAdjustment = {
+  key: string;
+  // "$/acre" | "$/SF" | "raw" — which unit the comp was reduced to.
+  unitBasis: "acre" | "sqft" | "raw";
+  // The comp's own value expressed in that unit ($/acre or $/SF), or the
+  // raw value when there's no size on either side.
+  unitRate: number;
+  // unitRate × the subject's own size — the comp restated at the subject's
+  // scale.
+  sizeAdjValue: number;
+  // Market-trend time adjustment applied (whole-number %), only for a comp
+  // with a real dated sale; 0 for a CAD equity comp (deed date is not a
+  // verified sale).
+  timeAdjPct: number;
+  // sizeAdjValue × (1 + timeAdjPct/100) — the comp's final indicated value.
+  adjustedValue: number;
+};
 
 export type ComparableStats = {
   indicated: { min: number; median: number; max: number } | null;
+  // The similarity-weighted reconciliation of the per-comp adjusted values
+  // — the headline indicated value once size and time are normalized.
+  // Falls back to null (and the UI uses `indicated`) when there aren't
+  // enough size-bearing comps to adjust.
+  adjustedIndicated: { value: number; min: number; max: number } | null;
+  perCompAdjustment: CompAdjustment[];
   subjectValue: number | null;
   // (subjectValue - indicated.median) / indicated.median, as a whole-number
   // percent — positive means the subject's assessed value sits above what
@@ -161,24 +288,37 @@ export function computeComparableStats(
   const excludedKeys = opts.excludedKeys ?? new Set<string>();
   const extraComps = opts.extraComps ?? [];
 
-  const ranked: RankedComp[] = subject
+  const subjBuildingSqft = opts.subjectBuildingSqft ?? null;
+
+  let ranked: RankedComp[] = subject
     ? [
         ...comps.map((c) => {
           const key = compKeyOf(c);
+          const breakdown = similarityBreakdown(subject, c);
           return {
             ...c,
             distanceMi: haversineMiles(subject, c),
-            similarity: similarityScore(subject, c),
+            similarity: breakdown.score,
+            breakdown,
+            flags: [] as string[],
             key,
             excluded: excludedKeys.has(key) || undefined,
           };
         }),
         ...extraComps.map((e) => {
           const cp = extraToCompProperty(e);
+          const breakdown = similarityBreakdown(subject, cp, {
+            verified: e.saleVerified,
+            userAdded: true,
+            subjectBuildingSqft: subjBuildingSqft,
+            compBuildingSqft: e.buildingSqft,
+          });
           return {
             ...cp,
             distanceMi: haversineMiles(subject, cp),
-            similarity: similarityScore(subject, cp),
+            similarity: breakdown.score,
+            breakdown,
+            flags: [] as string[],
             key: e.key,
             excluded: excludedKeys.has(e.key) || undefined,
             salePrice: e.salePrice,
@@ -195,6 +335,14 @@ export function computeComparableStats(
       ].sort((a, b) => b.similarity - a.similarity)
     : [];
 
+  // Deterministic per-comp flags, using the median comp distance as the
+  // "distant" yardstick.
+  {
+    const dists = ranked.map((c) => c.distanceMi).sort((a, b) => a - b);
+    const medianDist = dists.length ? dists[Math.floor(dists.length / 2)] : 0;
+    ranked = ranked.map((c) => ({ ...c, flags: compFlags(subject, c, medianDist) }));
+  }
+
   const usable = ranked.filter((c) => c.marketValue != null && !c.excluded);
   const limitedData = usable.length < MIN_USABLE_COMPS;
   const subjectValue = subjectTotalValue ?? subject?.marketValue ?? null;
@@ -202,6 +350,8 @@ export function computeComparableStats(
   if (usable.length === 0) {
     return {
       indicated: null,
+      adjustedIndicated: null,
+      perCompAdjustment: [],
       subjectValue,
       valuationGapPct: null,
       confidencePct: null,
@@ -216,25 +366,87 @@ export function computeComparableStats(
   const max = values[values.length - 1];
   const median = values[Math.floor(values.length / 2)];
 
+  // ── Adjustment layer: normalize each `top` comp to the subject's scale on
+  // size, then time-adjust a real dated sale by the subject's own
+  // assessed-value trend (capped ±15%), then reconcile similarity-weighted.
+  const subjAcres = subject?.legalAcreage ?? null;
+  const trendPerYear = opts.subjectTrendPctPerYear ?? null;
+  const perCompAdjustment: CompAdjustment[] = top.map((c) => {
+    const raw = c.marketValue as number;
+    let unitBasis: CompAdjustment["unitBasis"] = "raw";
+    let unitRate = raw;
+    let sizeAdjValue = raw;
+    if (subjBuildingSqft && c.userAdded && c.buildingSqft && c.buildingSqft > 0) {
+      unitBasis = "sqft";
+      unitRate = raw / c.buildingSqft;
+      sizeAdjValue = unitRate * subjBuildingSqft;
+    } else if (subjAcres && subjAcres > 0 && c.legalAcreage && c.legalAcreage > 0) {
+      unitBasis = "acre";
+      unitRate = raw / c.legalAcreage;
+      sizeAdjValue = unitRate * subjAcres;
+    }
+    // Time: only a real dated sale (a user-added comp with a saleDate) gets
+    // adjusted — a CAD comp's deed date is not a verified market sale.
+    let timeAdjPct = 0;
+    if (trendPerYear != null && c.userAdded && c.saleDate) {
+      const yrs = yearsSince(c.saleDate);
+      if (yrs != null) timeAdjPct = Math.max(-15, Math.min(15, Math.round(trendPerYear * yrs)));
+    }
+    const adjustedValue = Math.round(sizeAdjValue * (1 + timeAdjPct / 100));
+    return {
+      key: c.key,
+      unitBasis,
+      unitRate: Math.round(unitRate),
+      sizeAdjValue: Math.round(sizeAdjValue),
+      timeAdjPct,
+      adjustedValue,
+    };
+  });
+
+  // Only reconcile when at least half the top comps actually got a size
+  // basis (otherwise "adjusted" would just echo the raw values).
+  const sizeAdjusted = perCompAdjustment.filter((a) => a.unitBasis !== "raw");
+  let adjustedIndicated: ComparableStats["adjustedIndicated"] = null;
+  if (sizeAdjusted.length >= Math.max(2, Math.ceil(top.length / 2))) {
+    const wSum = top.reduce((s, c) => s + Math.max(1, c.similarity), 0);
+    const weighted =
+      top.reduce(
+        (s, c, i) => s + perCompAdjustment[i].adjustedValue * Math.max(1, c.similarity),
+        0,
+      ) / wSum;
+    const adjValues = perCompAdjustment.map((a) => a.adjustedValue).sort((x, y) => x - y);
+    adjustedIndicated = {
+      value: Math.round(weighted),
+      min: adjValues[0],
+      max: adjValues[adjValues.length - 1],
+    };
+  }
+
+  const headlineMedian = adjustedIndicated?.value ?? median;
   const valuationGapPct =
-    subjectValue != null && median > 0
-      ? Math.round(((subjectValue - median) / median) * 100)
+    subjectValue != null && headlineMedian > 0
+      ? Math.round(((subjectValue - headlineMedian) / headlineMedian) * 100)
       : null;
 
-  // More comps + a tighter value spread -> higher confidence; both halves
-  // are real, derived signals, not an AI guess.
-  const spreadRatio = median > 0 ? (max - min) / median : 1;
+  // More comps + a tighter spread + more verified sales -> higher
+  // confidence; all three are real derived signals, not an AI guess.
+  const spreadRatio = headlineMedian > 0 ? (max - min) / headlineMedian : 1;
   const countScore = Math.min(1, usable.length / 8);
   const tightnessScore = Math.max(0, 1 - spreadRatio);
+  const verifiedShare =
+    top.length > 0 ? top.filter((c) => c.userAdded && c.saleVerified).length / top.length : 0;
   const confidencePct = limitedData
     ? null
     : Math.round(
         MIN_CONFIDENCE_PCT +
-          (MAX_CONFIDENCE_PCT - MIN_CONFIDENCE_PCT) * (countScore * 0.5 + tightnessScore * 0.5),
+          (MAX_CONFIDENCE_PCT - MIN_CONFIDENCE_PCT) *
+            (countScore * 0.4 + tightnessScore * 0.4 + verifiedShare * 0.2),
       );
 
   return {
     indicated: { min, median, max },
+    adjustedIndicated,
+    perCompAdjustment,
     subjectValue,
     valuationGapPct,
     confidencePct,
