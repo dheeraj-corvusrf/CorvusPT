@@ -11,7 +11,9 @@ export type Reminder = {
   remindOn: string; // YYYY-MM-DD
   note: string;
   done: boolean;
-  source: "manual" | "assistant";
+  // 'system' = created automatically (e.g. the weekly property-base-data
+  // refresh noticed the CAD data changed).
+  source: "manual" | "assistant" | "system";
   createdAt: string;
 };
 
@@ -31,7 +33,7 @@ const fromRow = (r: Row): Reminder => ({
   remindOn: r.remind_on,
   note: r.note,
   done: r.done,
-  source: r.source === "assistant" ? "assistant" : "manual",
+  source: r.source === "assistant" || r.source === "system" ? r.source : "manual",
   createdAt: r.created_at,
 });
 

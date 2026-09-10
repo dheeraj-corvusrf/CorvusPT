@@ -131,6 +131,12 @@ import {
   type PropertyRecord,
 } from "@/lib/properties";
 import { cadLookup, cadLookupByAccount, type CadRecord } from "@/lib/cad-lookup";
+import {
+  getPropertyBaseData,
+  savePropertyBaseData,
+  fetchPropertyBaseSnapshot,
+  type PropertyBaseData,
+} from "@/lib/property-base-data";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -357,6 +363,13 @@ function Report() {
   // checklist items against real records before asking the user.
   const [evidenceCadRecord, setEvidenceCadRecord] = useState<CadRecord | null>(null);
   const [autoSourcingEvidence, setAutoSourcingEvidence] = useState(false);
+  // The property's AI-fetched base data (structured CAD + FEMA/USGS + record
+  // link), stored as a document and tagged to every module — the single
+  // foundation modules read instead of the user re-entering facts. See
+  // src/lib/property-base-data.ts.
+  const [baseData, setBaseData] = useState<PropertyBaseData | null>(null);
+  const [baseDataBusy, setBaseDataBusy] = useState(false);
+  const baseDataFetchedFor = useRef<string | null>(null);
 
   // "Fetch details" (Module 6) — re-pull this property's CAD record from the
   // live county source and update the classification-relevant field
@@ -425,6 +438,11 @@ function Report() {
         loadSiteGis(siteCoords.lat, siteCoords.lng);
         pulled.push("site GIS (FEMA + USGS)");
       }
+      // Persist the pull as the property's base data so it survives the
+      // page and every module reads it — not just held in memory here.
+      if (user && resolvedProperty) {
+        void refreshBaseData({ silent: true });
+      }
       loadModule("evidence", { force: true });
       toast.success(
         pulled.length > 0
@@ -434,6 +452,80 @@ function Report() {
     } finally {
       setAutoSourcingEvidence(false);
     }
+  }
+
+  // Address → fetch the publicly-available property data, store it as the
+  // "AI Fetched — Property Base Data" document (tagged to every module), and
+  // upsert property_base_data. Runs automatically on report open when
+  // there's no base data or it's stale (see the effect below), and on the
+  // "Refresh" button. `silent` suppresses the toast (used by the auto path
+  // unless the data actually changed).
+  async function refreshBaseData(opts?: { silent?: boolean }) {
+    if (!user || !resolvedProperty || baseDataBusy) return;
+    setBaseDataBusy(true);
+    try {
+      const snapshot = await fetchPropertyBaseSnapshot(
+        {
+          address: resolvedProperty.address,
+          cad: resolvedProperty.cad,
+          accountNumber: resolvedProperty.accountNumber,
+        },
+        siteCoords ? { lat: siteCoords.lat, lng: siteCoords.lng } : null,
+      );
+      const { changed, changeNote } = await savePropertyBaseData(
+        user.id,
+        resolvedProperty,
+        snapshot,
+      );
+      const fresh = await getPropertyBaseData(resolvedProperty.id);
+      setBaseData(fresh);
+      // Bring the new document into the report's document set.
+      listDocuments(user.id)
+        .then((docs) => {
+          const forProperty = docs.filter(
+            (d) => d.propertyId === resolvedProperty.id && d.deletedAt == null,
+          );
+          setCaseDocuments(forProperty);
+          setEvidenceDocs(
+            forProperty.filter(
+              (d) =>
+                d.useAsEvidence !== false &&
+                (d.useAsEvidence === true ||
+                  (d.modules?.length ?? 0) > 0 ||
+                  d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+                  d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
+                  d.documentType?.startsWith("Strategy Evidence: ") ||
+                  d.documentType?.startsWith("Zoning: ") ||
+                  d.documentType?.startsWith("Improvement: ") ||
+                  d.documentType?.startsWith("Site: ") ||
+                  d.documentType?.startsWith("Income: ")),
+            ),
+          );
+        })
+        .catch(() => {});
+      if (changed && changeNote) {
+        toast.success(`Property base data updated — ${changeNote}.`);
+        loadModule("health", { force: true });
+        loadModule("strategy", { force: true });
+      } else if (!opts?.silent) {
+        toast.success("Property base data refreshed.");
+      }
+    } catch (err) {
+      if (!opts?.silent)
+        toast.error(err instanceof Error ? err.message : "Could not refresh property base data.");
+    } finally {
+      setBaseDataBusy(false);
+    }
+  }
+
+  // "Ask Corvus to Fetch Details" (Module 5) — pull the latest public
+  // property data (CAD record + FEMA/USGS), store it as the property's base
+  // data (tagged to every module), then re-run whichever module is open so
+  // it reflects the fresh facts.
+  async function handleFetchPublicData() {
+    await refreshBaseData();
+    const openId = openModel?.id;
+    if (openId) loadModule(openId, { force: true });
   }
   // Which tier's checkout is currently redirecting, for the unpaid-property
   // "Subscribe" buttons in the banner below (real, one-click checkout right
@@ -580,6 +672,37 @@ function Report() {
       })
       .catch((err) => console.error("Could not load uploaded evidence for this property:", err))
       .finally(() => setEvidenceDocsLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, resolvedProperty]);
+
+  // Address → AI-fetched property base data. Loads the stored copy so the
+  // "Property Base Data" strip renders immediately; auto-fetches once per
+  // property when there's none or it's older than 30 days. siteCoords may
+  // still be resolving — a manual Refresh or the weekly cron picks up site
+  // GIS if it isn't ready yet.
+  useEffect(() => {
+    if (!user || !resolvedProperty) return;
+    if (baseDataFetchedFor.current === resolvedProperty.id) return;
+    baseDataFetchedFor.current = resolvedProperty.id;
+    getPropertyBaseData(resolvedProperty.id)
+      .then((bd) => {
+        setBaseData(bd);
+        const stale =
+          !bd || Date.now() - new Date(bd.fetchedAt).getTime() > 30 * 24 * 60 * 60 * 1000;
+        // The weekly cron sets last_change_note when it detects a CAD change
+        // but leaves the doc for the client to rebuild — do that now, and
+        // refresh the two modules that lean hardest on the assessed value.
+        if (bd?.lastChangeNote) {
+          toast.message(`Property base data changed — ${bd.lastChangeNote}`);
+          void refreshBaseData({ silent: true }).then(() => {
+            loadModule("health", { force: true });
+            loadModule("strategy", { force: true });
+          });
+        } else if (stale) {
+          void refreshBaseData({ silent: true });
+        }
+      })
+      .catch((err) => console.error("Could not load property base data:", err));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, resolvedProperty]);
 
@@ -1332,6 +1455,33 @@ function Report() {
           ?.name ?? null;
 
       const facts: string[] = [];
+      // Prefer the live record pulled by "Auto-source evidence"; otherwise
+      // fall back to the property's stored AI-fetched base data so the
+      // checklist can still verify against real records with no extra call.
+      const bd = baseData?.snapshot;
+      if (!evidenceCadRecord && bd?.cad) {
+        const b = bd.cad;
+        if (b.totalValue != null)
+          facts.push(
+            `AI-fetched base data (CAD): total assessed value $${b.totalValue.toLocaleString()}${b.taxYear ? ` (tax year ${b.taxYear})` : ""}.`,
+          );
+        if (b.landValue != null)
+          facts.push(`AI-fetched base data (CAD): land value $${b.landValue.toLocaleString()}.`);
+        if (b.improvementValue != null)
+          facts.push(
+            `AI-fetched base data (CAD): improvement value $${b.improvementValue.toLocaleString()}.`,
+          );
+        if (b.legalDescription)
+          facts.push(`AI-fetched base data (CAD): legal description "${b.legalDescription}".`);
+        if (b.deeds.length > 0)
+          facts.push(
+            `AI-fetched base data (CAD): ${b.deeds.length} recorded deed/transfer${b.deeds.length === 1 ? "" : "s"} on file.`,
+          );
+        if (bd.siteGis?.floodZone)
+          facts.push(
+            `AI-fetched base data (FEMA): flood zone ${bd.siteGis.floodZone.zone} — ${bd.siteGis.floodZone.label}${bd.siteGis.floodZone.inSFHA ? " (Special Flood Hazard Area)" : ""}.`,
+          );
+      }
       const cr = evidenceCadRecord;
       if (cr) {
         if (cr.totalValue != null)
@@ -2497,6 +2647,45 @@ function Report() {
             ? "All modules unlocked with your AI Report subscription."
             : `Modules 1-${FREE_MODULE_COUNT} are free for everyone. Subscribe to unlock modules ${FREE_MODULE_COUNT + 1}-${MODULES.length}.`}
         </p>
+
+        {hasFullAccess && resolvedProperty && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-secondary/30 p-3 text-xs">
+            <div className="min-w-0">
+              <span className="font-semibold text-foreground">Property Base Data</span>
+              {baseData ? (
+                <span className="text-muted-foreground">
+                  {" — "}AI-fetched from{" "}
+                  {baseData.snapshot.sources.length > 0
+                    ? baseData.snapshot.sources.join(", ")
+                    : "the address (no live county source)"}{" "}
+                  · {new Date(baseData.fetchedAt).toLocaleDateString()}
+                  {baseData.lastChangeNote ? ` · last change: ${baseData.lastChangeNote}` : ""}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">
+                  {" — "}
+                  {baseDataBusy ? "fetching from county + federal sources…" : "not fetched yet"}
+                </span>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+              {baseData?.documentId && (
+                <Link to="/dashboard/documents" className="text-accent hover:underline">
+                  View in Documents
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={() => void refreshBaseData()}
+                disabled={baseDataBusy}
+                className="btn-outline text-xs py-1 disabled:opacity-60"
+              >
+                {baseDataBusy ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="mt-5 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((m) => (
             <ModuleCard
@@ -2576,6 +2765,8 @@ function Report() {
                 cadFetching={false}
                 onAutoSourceEvidence={() => {}}
                 autoSourcingEvidence={false}
+                onFetchPublicData={() => {}}
+                fetchingPublicData={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
                 onGenerateDataSheet={() => Promise.resolve(null)}
@@ -2659,6 +2850,8 @@ function Report() {
             cadFetching={cadFetching}
             onAutoSourceEvidence={handleAutoSourceEvidence}
             autoSourcingEvidence={autoSourcingEvidence}
+            onFetchPublicData={handleFetchPublicData}
+            fetchingPublicData={baseDataBusy}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
             onGenerateDataSheet={handleGenerateDataSheet}
@@ -8338,6 +8531,8 @@ function ModulePreviewContent({
   cadFetching,
   onAutoSourceEvidence,
   autoSourcingEvidence,
+  onFetchPublicData,
+  fetchingPublicData,
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
@@ -8389,6 +8584,10 @@ function ModulePreviewContent({
   // evidence module so it verifies against real records before asking.
   onAutoSourceEvidence: () => void;
   autoSourcingEvidence: boolean;
+  // Module 5's "Ask Corvus to Fetch Details" — refresh the property's
+  // AI-fetched base data from public sources, then re-run this module.
+  onFetchPublicData: () => void;
+  fetchingPublicData: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
   // "AI fills in the missing data" — drafts a starter data sheet for the
@@ -8461,6 +8660,9 @@ function ModulePreviewContent({
   // uploadingEvidence (the actual upload itself).
   const [expandedEvidenceItem, setExpandedEvidenceItem] = useState<string | null>(null);
   const [categorizingEvidence, setCategorizingEvidence] = useState(false);
+  // Module 5's optional "which component" tag on the single upload — "" means
+  // let AI decide (categorizeEvidenceUploads).
+  const [improvementUploadCat, setImprovementUploadCat] = useState("");
 
   if (m.requiresUserData) {
     if (isModuleNotApplicable(overrides, "income")) {
@@ -9444,6 +9646,19 @@ function ModulePreviewContent({
           setCategorizingEvidence(false);
         }
       }
+      // One upload button. If the user picked a component from the dropdown,
+      // tag straight to it; otherwise let AI read + tag each file.
+      async function handleImprovementUpload(files: File[]) {
+        if (!improvementUploadCat) {
+          await handleImprovementAutoUpload(files);
+          return;
+        }
+        const documentType =
+          improvementUploadCat === "Other"
+            ? EVIDENCE_DOCUMENT_TYPE
+            : `Improvement: ${improvementUploadCat}`;
+        await onUploadEvidence(files, undefined, documentType);
+      }
       const economicLife = getTypicalEconomicLife(state.propertyType);
       const depreciation = computeDepreciation(
         d.effectiveAgeYears,
@@ -9583,7 +9798,8 @@ function ModulePreviewContent({
               <div className="text-sm font-medium">Add Evidence</div>
               <p className="text-xs text-muted-foreground">
                 Property photos, repair estimates, or appraisals — AI will cite specific details
-                from what you upload instead of only general guidance.
+                from what you upload instead of only general guidance. Everything you add is filed
+                in your Documents and shared with every module.
               </p>
               {improvementDocs.length > 0 && (
                 <ul className="mt-2 grid gap-1 text-xs">
@@ -9599,6 +9815,21 @@ function ModulePreviewContent({
                 </ul>
               )}
               <div className="mt-3 flex flex-wrap items-center gap-2">
+                <select
+                  value={improvementUploadCat}
+                  onChange={(e) => setImprovementUploadCat(e.target.value)}
+                  disabled={uploadingEvidence || categorizingEvidence}
+                  className="rounded-md border border-input bg-background px-2 py-1.5 text-sm disabled:opacity-60"
+                  aria-label="Document category"
+                >
+                  <option value="">Category: let AI tag it</option>
+                  {improvementComponentKinds.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                  <option value="Other">Other improvement evidence</option>
+                </select>
                 <label
                   className={`btn-outline text-sm cursor-pointer ${uploadingEvidence || categorizingEvidence ? "pointer-events-none opacity-60" : ""}`}
                 >
@@ -9616,10 +9847,18 @@ function ModulePreviewContent({
                     onChange={(e) => {
                       const selected = e.target.files ? Array.from(e.target.files) : [];
                       e.target.value = "";
-                      if (selected.length > 0) handleImprovementAutoUpload(selected);
+                      if (selected.length > 0) handleImprovementUpload(selected);
                     }}
                   />
                 </label>
+                <button
+                  type="button"
+                  disabled={fetchingPublicData}
+                  onClick={onFetchPublicData}
+                  className="btn-outline text-sm disabled:opacity-60"
+                >
+                  {fetchingPublicData ? "Fetching…" : "Ask Corvus to Fetch Details"}
+                </button>
                 {improvementDocs.length > 0 && (
                   <button
                     disabled={loading}
@@ -9630,6 +9869,10 @@ function ModulePreviewContent({
                   </button>
                 )}
               </div>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                “Fetch Details” pulls the latest public county + federal data for this property and
+                files it in Documents for every module.
+              </p>
             </div>
           )}
         </div>
