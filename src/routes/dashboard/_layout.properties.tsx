@@ -58,7 +58,6 @@ import {
   Search,
   LayoutGrid,
   LayoutList,
-  MoreHorizontal,
   ChevronDown,
   FileText,
   Gavel,
@@ -1071,13 +1070,12 @@ function PropertyActionsMenu({
         aria-label={`Actions for ${p.address}`}
         className={
           compact
-            ? "btn-outline inline-flex items-center gap-1 px-2.5 py-1 text-xs"
-            : "btn-outline inline-flex items-center gap-1.5"
+            ? "btn-outline group inline-flex items-center gap-1.5 px-2.5 py-1 text-xs"
+            : "btn-outline group inline-flex items-center gap-1.5"
         }
       >
-        <MoreHorizontal className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
         Actions
-        <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        <ChevronDown className="h-3.5 w-3.5 opacity-50 transition-transform group-data-[state=open]:rotate-180" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
         {existingProtest && isPaid && (
