@@ -169,6 +169,16 @@ const CASE_TABS: { id: CaseTabId; label: string; lockedHint: string }[] = [
   },
 ];
 
+// One plain sentence per phase — "what this step is for" — shown under the tab
+// bar for whichever tab is open, so landing on a tab always explains itself.
+const CASE_TAB_INTRO: Record<CaseTabId, string> = {
+  overview: "Where your case stands right now, and the one thing to do next.",
+  file: "Fill, sign, and file your Notice of Protest with the county — and gather your evidence.",
+  informal: "Work the county's proposed value informally, before a formal hearing.",
+  hearing: "Log your hearing notice, then prepare your evidence and talking points.",
+  decision: "Record the ARB's decision and weigh binding arbitration or a district-court appeal.",
+};
+
 // The anchor ids the deterministic guidance (case-guidance.ts) links to, and
 // which tab each one lives in now — so a "Go to Documents" link can switch
 // tabs before scrolling.
@@ -394,9 +404,11 @@ export function CaseDetailView({
         <>
           <CaseTabBar
             activeTab={activeTab}
-            unlocked={(id) => caseTabUnlocked(id, current, needsGuidanceAck)}
+            protest={current}
+            needsGuidanceAck={needsGuidanceAck}
             onSelect={handleTabClick}
           />
+          <p className="mt-2 text-xs text-muted-foreground">{CASE_TAB_INTRO[activeTab]}</p>
 
           {/* --- Overview --- */}
           {activeTab === "overview" &&
@@ -411,9 +423,13 @@ export function CaseDetailView({
             ) : (
               <div className="grid gap-1">
                 <CaseRoadmap
+                  property={property}
                   protest={current}
+                  evidenceDocumentCount={evidenceDocuments.length}
+                  noticeSignedAt={noticeSignedAt}
                   needsGuidanceAck={needsGuidanceAck}
                   onSelect={handleTabClick}
+                  onNavigate={navigateTo}
                 />
                 <CorvusGuidancePanel
                   property={property}
@@ -453,19 +469,19 @@ export function CaseDetailView({
           {/* --- Prepare & File --- */}
           {activeTab === "file" && (
             <div>
-              <CasePlanSection
-                userId={userId}
-                property={property}
-                protestId={protest.id}
-                caseData={caseData}
-                onReload={load}
-              />
               <FilingWorkflowLauncher
                 property={property}
                 protest={current}
                 evidenceCount={evidenceDocuments.length}
                 noticeSignedAt={noticeSignedAt}
                 onOpen={() => setFilingOpen(true)}
+              />
+              <CasePlanSection
+                userId={userId}
+                property={property}
+                protestId={protest.id}
+                caseData={caseData}
+                onReload={load}
               />
             </div>
           )}
@@ -550,60 +566,19 @@ export function CaseDetailView({
   );
 }
 
-// The phase-tab bar. All 5 always show — a phase the case hasn't reached is a
-// disabled button with a lock glyph + a `title` hint (clicking it toasts the
-// hint, handled by onSelect).
+// The phase-tab bar, drawn as a numbered progress path: Overview is an
+// unnumbered "hub", the four real phases are steps 1–4. Each step shows one of
+// four states derived purely from where the case is now (defaultCaseTab) and
+// what's unlocked (caseTabUnlocked): done (✓), current (accent, "you are
+// here"), available (outlined number), or locked (🔒, dimmed — clicking still
+// toasts the hint via onSelect). Connector arrows make it read left-to-right.
 function CaseTabBar({
   activeTab,
-  unlocked,
-  onSelect,
-}: {
-  activeTab: CaseTabId;
-  unlocked: (id: CaseTabId) => boolean;
-  onSelect: (id: CaseTabId) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      aria-label="Case phases"
-      className="mt-4 flex gap-1 overflow-x-auto border-b border-border pb-px"
-    >
-      {CASE_TABS.map((t) => {
-        const isOpen = t.id === activeTab;
-        const locked = !unlocked(t.id);
-        return (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={isOpen}
-            title={locked ? t.lockedHint : undefined}
-            onClick={() => onSelect(t.id)}
-            className={`shrink-0 whitespace-nowrap rounded-t-md px-3 py-2 text-sm font-medium transition-colors ${
-              isOpen
-                ? "border-b-2 border-accent text-foreground"
-                : locked
-                  ? "text-muted-foreground/50"
-                  : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {locked && <span aria-hidden>🔒 </span>}
-            {t.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// Compact "where are we in the journey" strip shown at the top of the Overview
-// tab once the case is underway — the same 5 phases as the tabs, marking the
-// current one and letting the user jump to any unlocked phase.
-function CaseRoadmap({
   protest,
   needsGuidanceAck,
   onSelect,
 }: {
+  activeTab: CaseTabId;
   protest: ProtestRecord;
   needsGuidanceAck: boolean;
   onSelect: (id: CaseTabId) => void;
@@ -611,23 +586,121 @@ function CaseRoadmap({
   const currentPhase = defaultCaseTab(protest, needsGuidanceAck);
   const currentIdx = CASE_TABS.findIndex((t) => t.id === currentPhase);
   return (
+    <div
+      role="tablist"
+      aria-label="Case phases"
+      className="mt-4 flex items-center gap-1 overflow-x-auto border-b border-border pb-2"
+    >
+      {CASE_TABS.map((t, i) => {
+        const isOpen = t.id === activeTab;
+        const isHub = t.id === "overview";
+        const locked = !caseTabUnlocked(t.id, protest, needsGuidanceAck);
+        const done = !isHub && !locked && i < currentIdx;
+        const isCurrent = !isHub && i === currentIdx;
+        const marker = isHub ? "⌂" : locked ? "🔒" : done ? "✓" : String(i);
+        return (
+          <div key={t.id} className="flex shrink-0 items-center gap-1">
+            {i > 0 && (
+              <span aria-hidden className="px-0.5 text-muted-foreground/30">
+                →
+              </span>
+            )}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isOpen}
+              aria-current={isCurrent ? "step" : undefined}
+              title={locked ? t.lockedHint : undefined}
+              onClick={() => onSelect(t.id)}
+              className={`flex items-center gap-2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm transition-colors ${
+                isOpen
+                  ? "bg-accent/10 font-semibold text-foreground"
+                  : locked
+                    ? "font-medium text-muted-foreground/50"
+                    : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <span
+                aria-hidden
+                className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-semibold leading-none ${
+                  done
+                    ? "bg-success/15 text-success"
+                    : isCurrent && !locked
+                      ? "bg-accent text-accent-foreground"
+                      : locked
+                        ? "bg-muted text-muted-foreground/60"
+                        : "border border-border text-muted-foreground"
+                }`}
+              >
+                {marker}
+              </span>
+              {t.label}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// The Overview tab's centerpiece: the same 5 phases as the tab bar drawn as a
+// numbered path, with the current stage's plain-language summary and the single
+// most important next action called out right below it. This is the one
+// authoritative "you are here + do this next" panel — CorvusGuidancePanel's list
+// and NextStepFooter below it are deliberately lighter, secondary echoes of the
+// same getCaseGuidance() data, never a competing instruction.
+function CaseRoadmap({
+  property,
+  protest,
+  evidenceDocumentCount,
+  noticeSignedAt,
+  needsGuidanceAck,
+  onSelect,
+  onNavigate,
+}: {
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceDocumentCount: number;
+  noticeSignedAt: string | null;
+  needsGuidanceAck: boolean;
+  onSelect: (id: CaseTabId) => void;
+  onNavigate: (anchor: string) => void;
+}) {
+  const currentPhase = defaultCaseTab(protest, needsGuidanceAck);
+  const currentIdx = CASE_TABS.findIndex((t) => t.id === currentPhase);
+  const countyInfo = getCountyProtestInfo(property.cad);
+  const guidance = getCaseGuidance(
+    property,
+    protest,
+    evidenceDocumentCount,
+    countyInfo,
+    noticeSignedAt,
+  );
+  const next = guidance.nextSteps[0];
+  return (
     <div className="mt-4 card-elev p-4">
       <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Your protest, step by step
       </span>
-      <ol className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-xs">
+      <ol className="mt-3 flex flex-wrap items-center gap-x-1 gap-y-2 text-xs">
         {CASE_TABS.map((t, i) => {
-          const done = i < currentIdx;
-          const here = i === currentIdx;
+          const isHub = t.id === "overview";
           const unlocked = caseTabUnlocked(t.id, protest, needsGuidanceAck);
+          const done = !isHub && unlocked && i < currentIdx;
+          const here = i === currentIdx;
+          const marker = isHub ? "⌂" : !unlocked ? "🔒" : done ? "✓" : String(i);
           return (
-            <li key={t.id} className="flex items-center gap-2">
-              {i > 0 && <span className="text-muted-foreground/40">→</span>}
+            <li key={t.id} className="flex items-center gap-1">
+              {i > 0 && (
+                <span aria-hidden className="text-muted-foreground/30">
+                  →
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => onSelect(t.id)}
                 disabled={!unlocked}
-                className={`rounded-full px-2 py-0.5 font-medium ${
+                className={`flex items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2 font-medium ${
                   here
                     ? "bg-accent/15 text-accent"
                     : done
@@ -637,13 +710,47 @@ function CaseRoadmap({
                         : "text-muted-foreground/40"
                 }`}
               >
-                {done ? "✓ " : ""}
+                <span
+                  aria-hidden
+                  className={`grid h-4 w-4 place-items-center rounded-full text-[10px] font-semibold leading-none ${
+                    here
+                      ? "bg-accent text-accent-foreground"
+                      : done
+                        ? "bg-success/20 text-success"
+                        : unlocked
+                          ? "border border-border"
+                          : "bg-muted text-muted-foreground/50"
+                  }`}
+                >
+                  {marker}
+                </span>
                 {t.label}
               </button>
             </li>
           );
         })}
       </ol>
+
+      <div className="mt-3 rounded-md border border-accent/30 bg-accent/5 p-3">
+        <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+          You are here — {guidance.stageLabel}
+        </p>
+        <p className="mt-1 text-sm">{guidance.summary}</p>
+        {next && (
+          <div className="mt-2 text-sm">
+            <span className="font-semibold">Do this next: {next.label}.</span>
+            {next.detail && <span className="text-muted-foreground"> {next.detail}</span>}
+            {next.action && (
+              <button
+                onClick={() => onNavigate(next.action!.anchor)}
+                className="btn-accent mt-2 block w-fit py-1.5 text-xs"
+              >
+                {next.action.label} →
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -872,6 +979,11 @@ function CorvusGuidancePanel({
     noticeSignedAt,
   );
 
+  // The #1 next step is already the headline call-to-action in CaseRoadmap
+  // above — this panel only lists whatever comes after it, so the two never
+  // repeat the same instruction.
+  const otherSteps = guidance.nextSteps.slice(1);
+
   return (
     <div className="mt-4 card-elev p-4">
       <div className="flex items-center justify-between gap-2">
@@ -880,18 +992,21 @@ function CorvusGuidancePanel({
         </span>
         <span className="badge-soft">{guidance.stageLabel}</span>
       </div>
-      <p className="mt-2 text-sm">{guidance.summary}</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        County-specific reference for this stage. The action to take now is in the step-by-step
+        panel above.
+      </p>
 
-      {guidance.nextSteps.length > 0 && (
-        <div className="mt-3 grid gap-2">
+      {otherSteps.length > 0 && (
+        <div className="mt-3 grid gap-2 border-t border-border pt-3">
           <h5 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            What to do next
+            Also on your list
           </h5>
           <ul className="grid gap-1.5">
-            {guidance.nextSteps.map((step, i) => (
-              <li key={i} className="text-sm">
-                <span className="font-medium">{step.label}</span>
-                {step.detail && <span className="text-muted-foreground"> — {step.detail}</span>}
+            {otherSteps.map((step, i) => (
+              <li key={i} className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{step.label}</span>
+                {step.detail && <span> — {step.detail}</span>}
                 {step.action && (
                   <button
                     onClick={() => onNavigate(step.action!.anchor)}
@@ -988,12 +1103,17 @@ function NextStepFooter({
 
   return (
     <div className="mt-5 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-      <span className="font-semibold">Next: {next.label}.</span>
-      {next.detail && <span className="text-muted-foreground"> {next.detail}</span>}
+      <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+        Reminder — your next step
+      </p>
+      <p className="mt-1">
+        <span className="font-semibold">{next.label}.</span>
+        {next.detail && <span className="text-muted-foreground"> {next.detail}</span>}
+      </p>
       {next.action && (
         <button
           onClick={() => onNavigate(next.action!.anchor)}
-          className="ml-2 text-xs text-accent hover:underline"
+          className="btn-accent mt-2 block w-fit py-1.5 text-xs"
         >
           {next.action.label} →
         </button>
@@ -1480,8 +1600,8 @@ function FilingWorkflowLauncher({
   const blocked = isPreFilingBlocked(getPreFilingCheck(property, protest, evidenceCount));
   const started = !!noticeSignedAt || protest.status !== "requested";
   return (
-    <div className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Prepare &amp; File</h4>
+    <div className="mt-4 card-elev p-4">
+      <h4 className="font-serif text-base font-semibold">Prepare &amp; File</h4>
       <p className="mt-1 text-xs text-muted-foreground">
         Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
         forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
@@ -4430,13 +4550,16 @@ function CaseRecordSection({
   }
 
   return (
-    <div id="case-record" className="mt-5 border-t border-border pt-5">
+    <div id="case-record" className="mt-4 card-elev p-4">
       <div className="flex items-baseline justify-between gap-2">
-        <h4 className="text-sm font-semibold">Case Record</h4>
+        <h4 className="font-serif text-base font-semibold">Case Record</h4>
         <span className="text-xs text-muted-foreground">
           {onFile}/{applicable} on file
         </span>
       </div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        The supporting documents and proof this case keeps on file, stage by stage.
+      </p>
 
       {prompts.length > 0 && (
         <div className="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3">
@@ -4660,8 +4783,11 @@ function CaseAuditTrailSection({ protestId }: { protestId: string }) {
   }
 
   return (
-    <div id="case-audit-trail" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Audit Trail</h4>
+    <div id="case-audit-trail" className="mt-4 card-elev p-4">
+      <h4 className="font-serif text-base font-semibold">Audit Trail</h4>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Every change and county contact on this case, timestamped.
+      </p>
 
       <form onSubmit={logCommunication} className="mt-2 flex gap-1">
         <input
@@ -5160,8 +5286,11 @@ export function CaseProgress({
   const results = getCaseResults(protest, property);
 
   return (
-    <div id="case-progress" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Case Progress</h4>
+    <div id="case-progress" className="mt-4 card-elev p-4">
+      <h4 className="font-serif text-base font-semibold">Case Progress</h4>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Record what has happened — settlement offers, the hearing date, the ARB&apos;s decision.
+      </p>
 
       {protest.status === "resolved" ? (
         results ? (
