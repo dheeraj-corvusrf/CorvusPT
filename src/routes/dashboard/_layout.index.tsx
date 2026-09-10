@@ -13,6 +13,7 @@ import {
   Scale,
   TrendingDown,
   Loader2,
+  Mic,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -46,6 +47,7 @@ import { getDeadlineNudge } from "@/lib/deadline-nudge";
 import { getHearingNudge } from "@/lib/hearing-nudge";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useFileDrop } from "@/hooks/use-file-drop";
+import { useSpeechInput } from "@/hooks/use-speech-input";
 import { ICON_COLORS } from "@/lib/icon-colors";
 
 export const Route = createFileRoute("/dashboard/_layout/")({
@@ -76,6 +78,9 @@ function Overview() {
   const [uploading, setUploading] = useState(false);
   const [askQuery, setAskQuery] = useState("");
   const [asking, setAsking] = useState(false);
+  // Voice input for the "Ask AI" quick action — fills the box as you speak;
+  // you still hit Enter. Same on-device Web Speech hook as the Ask AI widget.
+  const askSpeech = useSpeechInput(setAskQuery);
   const [nudge, setNudge] = useState<string | null>(null);
   const nudgedPropertyId = useRef<string | null>(null);
   const [hearingNudge, setHearingNudge] = useState<string | null>(null);
@@ -392,10 +397,26 @@ function Overview() {
             <input
               value={askQuery}
               onChange={(e) => setAskQuery(e.target.value)}
-              placeholder="Ask AI…"
+              placeholder={askSpeech.listening ? "Listening…" : "Ask AI…"}
               disabled={asking}
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            {askSpeech.supported && (
+              <button
+                type="button"
+                onClick={askSpeech.toggle}
+                disabled={asking}
+                aria-label={askSpeech.listening ? "Stop listening" : "Speak your question"}
+                title={askSpeech.listening ? "Stop listening" : "Speak your question"}
+                className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border transition-colors disabled:opacity-60 ${
+                  askSpeech.listening
+                    ? "bg-destructive/10 text-destructive"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Mic className="h-4 w-4" />
+              </button>
+            )}
           </form>
         </div>
       </div>
