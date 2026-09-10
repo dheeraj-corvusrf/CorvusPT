@@ -13,19 +13,37 @@ import { getCountyProtestInfo } from "./county-protest-info";
 export type PreFilingCheckItem = {
   label: string;
   value: string | null;
-  status: "confirmed" | "missing";
+  // "missing"      — no value on file.
+  // "needs_review" — there IS a value, but a deterministic check found it
+  //                  inconsistent (a passed deadline, a tax-year mismatch, …);
+  //                  `issue` says what to confirm or correct.
+  // "confirmed"    — present and nothing looks wrong.
+  status: "confirmed" | "missing" | "needs_review";
+  // Set only for "needs_review" — the one-line explanation shown under the row.
+  issue?: string;
   // Blocking rows are this case's own real identity/deadline data — if any
-  // are missing, filing stops until they're fixed (isPreFilingBlocked /
-  // PreFilingCheckSection enforce this). Non-blocking rows are informational
-  // — procedural facts that are either always-true app copy or a real,
-  // possibly-unconfirmed per-county answer — never treated as a reason to
-  // stop filing, since the app's own generic form/instructions remain a
-  // valid fallback even when a specific county detail isn't confirmed.
+  // are missing OR flagged needs_review, filing stops until they're fixed
+  // (isPreFilingBlocked / PreFilingCheckSection enforce this). Non-blocking
+  // rows are informational — procedural facts that are either always-true app
+  // copy or a real, possibly-unconfirmed per-county answer — never treated as
+  // a reason to stop filing, since the app's own generic form/instructions
+  // remain a valid fallback even when a specific county detail isn't
+  // confirmed.
   blocking: boolean;
 };
 
 function row(label: string, value: string | null, blocking: boolean): PreFilingCheckItem {
   return { label, value, status: value ? "confirmed" : "missing", blocking };
+}
+
+// Flip an already-built row to needs_review with an explanation. No-op if the
+// label isn't in the list (defensive — the labels are fixed above).
+function flag(items: PreFilingCheckItem[], label: string, issue: string): void {
+  const it = items.find((i) => i.label === label);
+  if (it) {
+    it.status = "needs_review";
+    it.issue = issue;
+  }
 }
 
 function yesNo(value: boolean | null, whenTrue: string, whenFalse: string): string {
@@ -96,6 +114,13 @@ export function getPreFilingCheck(
     row("Required Supporting Documents", evidenceStatus ?? "Not on file", false),
     row("Applicable County Instructions", countyInfo?.sourceUrl ?? "Not on file", false),
     row(
+      "County Requirements Verified",
+      countyInfo
+        ? `As of ${countyInfo.verifiedAt} · ${countyInfo.sourceUrl}`
+        : "No verified county record on file — using the standard Texas Comptroller process",
+      false,
+    ),
+    row(
       "Online Filing Available",
       yesNo(filingMethod ? filingMethod.online != null : null, "Yes", "No"),
       false,
@@ -113,9 +138,59 @@ export function getPreFilingCheck(
     row("County Contact Information", contactValue ?? "Not confirmed", false),
   ];
 
+  // --- Inconsistency checks: a value can be present but still wrong -------
+  // Same local-noon parse as `deadline` above, to avoid the UTC-midnight
+  // timezone roll-back.
+  const deadlineDate = property.protestDeadline
+    ? new Date(`${property.protestDeadline}T12:00:00`)
+    : null;
+  if (deadlineDate && !Number.isNaN(deadlineDate.getTime())) {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    if (deadlineDate < startOfToday) {
+      flag(
+        items,
+        "Protest Deadline",
+        "This deadline has already passed — confirm the correct date, or whether a late-protest reason (e.g. a corrected notice) applies.",
+      );
+    } else if (taxYear != null) {
+      const dYear = deadlineDate.getFullYear();
+      if (dYear !== taxYear && dYear !== taxYear + 1) {
+        flag(
+          items,
+          "Protest Deadline",
+          `This deadline (${dYear}) doesn't line up with tax year ${taxYear} — confirm it's the ${taxYear} protest deadline.`,
+        );
+      }
+    }
+  }
+
+  if (protest.taxYear != null && property.taxYear != null && protest.taxYear !== property.taxYear) {
+    flag(
+      items,
+      "Tax Year",
+      `The protest is for tax year ${protest.taxYear}, but the property record shows ${property.taxYear} — confirm which year you're protesting.`,
+    );
+  }
+
+  if (!property.propertyType) {
+    flag(
+      items,
+      "Property Type",
+      "No CAD classification on file — confirm the property class (commercial, land, etc.) before filing.",
+    );
+  }
+
   return items;
 }
 
+// A single blocking row that still needs the user's attention — missing OR
+// flagged inconsistent. The one predicate isPreFilingBlocked and the case
+// report / executive summary all read from.
+export function isBlockingUnresolved(item: PreFilingCheckItem): boolean {
+  return item.blocking && (item.status === "missing" || item.status === "needs_review");
+}
+
 export function isPreFilingBlocked(items: PreFilingCheckItem[]): boolean {
-  return items.some((i) => i.blocking && i.status === "missing");
+  return items.some(isBlockingUnresolved);
 }

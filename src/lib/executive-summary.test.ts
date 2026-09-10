@@ -108,6 +108,22 @@ describe("getExecutiveSummary", () => {
     expect(s.protestReadiness).toBe("Additional Preparation Needed");
   });
 
+  it("treats a blocking needs_review row as blocked, same as missing", () => {
+    const items: PreFilingCheckItem[] = [
+      { label: "County", value: "Denton", status: "confirmed", blocking: true },
+      {
+        label: "Protest Deadline",
+        value: "May 15, 2020",
+        status: "needs_review",
+        issue: "This deadline has already passed.",
+        blocking: true,
+      },
+    ];
+    expect(getExecutiveSummary(stats(), 0, [], items).protestReadiness).toBe(
+      "Additional Preparation Needed",
+    );
+  });
+
   it("rates protest readiness Ready only when evidence is Strong and pre-filing isn't blocked", () => {
     // A real, non-empty checklist with no critical gaps — an empty [] means
     // "no checklist generated yet" (Limited, not Strong), so this needs at

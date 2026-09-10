@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -67,6 +67,7 @@ import {
   isPreFilingBlocked,
   type PreFilingCheckItem,
 } from "@/lib/pre-filing-check";
+import { verifyCaseReadiness, type CaseReadinessConcern } from "@/lib/case-readiness";
 import {
   uploadDocument,
   getProtestEvidenceDocuments,
@@ -137,10 +138,100 @@ import {
 } from "@/lib/protest-form-submissions";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
+import { requiredFilingSteps, FILING_STEP_META, type FilingStepId } from "@/lib/filing-workflow";
+import { verdictMeta } from "@/lib/documents";
 import { PdfFormEditor } from "@/components/PdfFormEditor";
 import { FilingMethodsList } from "@/components/FilingMethodsList";
+import { Modal } from "@/components/Modal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SignaturePad, type SignatureValue } from "@/components/SignaturePad";
+
+// --- Tabbed filing workflow -------------------------------------------------
+// The case work is grouped into 5 phase tabs, all shown as a roadmap; a phase
+// the case hasn't reached yet is visible but locked. The tab set and lock
+// rules are derived purely from the protest's real status/fields — no schema,
+// no new state beyond which tab is open.
+type CaseTabId = "overview" | "file" | "informal" | "hearing" | "decision";
+
+const CASE_TABS: { id: CaseTabId; label: string; lockedHint: string }[] = [
+  { id: "overview", label: "Overview", lockedHint: "" },
+  {
+    id: "file",
+    label: "Prepare & File",
+    lockedHint: "Read and accept the filing notice on Overview first.",
+  },
+  { id: "informal", label: "Informal Review", lockedHint: "Unlocks once your protest is filed." },
+  { id: "hearing", label: "Hearing", lockedHint: "Unlocks once your protest is filed." },
+  {
+    id: "decision",
+    label: "Decision & Appeal",
+    lockedHint: "Unlocks after your hearing or a decision is recorded.",
+  },
+];
+
+// The anchor ids the deterministic guidance (case-guidance.ts) links to, and
+// which tab each one lives in now — so a "Go to Documents" link can switch
+// tabs before scrolling.
+const ANCHOR_TAB: Record<string, CaseTabId> = {
+  "case-progress": "overview",
+  "case-record": "overview",
+  "case-audit-trail": "overview",
+  "case-documents": "file",
+  "case-upload-evidence": "file",
+  "case-informal-review": "informal",
+  "case-settlement-signature": "informal",
+  "case-hearing-notice": "hearing",
+  "case-hearing-prep": "hearing",
+  "case-decision-notice": "decision",
+  "case-escalation": "decision",
+};
+
+function caseTabUnlocked(
+  id: CaseTabId,
+  protest: ProtestRecord,
+  needsGuidanceAck: boolean,
+): boolean {
+  const s = protest.status;
+  const filed = s !== "requested";
+  switch (id) {
+    case "overview":
+      return true;
+    case "file":
+      return filed || !needsGuidanceAck;
+    case "informal":
+    case "hearing":
+      return filed;
+    case "decision":
+      return (
+        ["decision_received", "appealing", "arbitrating", "resolved"].includes(s) ||
+        protest.hearingDate != null ||
+        protest.arbDecision != null
+      );
+  }
+}
+
+// The tab the case should open on given where it is now — used for the
+// initial render and to auto-advance when the status moves to a new phase.
+function defaultCaseTab(protest: ProtestRecord, needsGuidanceAck: boolean): CaseTabId {
+  switch (protest.status) {
+    case "requested":
+      return needsGuidanceAck ? "overview" : "file";
+    case "filed":
+    case "under_review":
+    case "offer_received":
+      return "informal";
+    case "hearing_scheduled":
+      return "hearing";
+    case "decision_received":
+    case "appealing":
+    case "arbitrating":
+      return "decision";
+    case "resolved":
+      return "overview";
+    default:
+      return "overview";
+  }
+}
 
 // Renders as a full page (see routes/dashboard/_layout.case.tsx), not an
 // overlay — previously this was a <Modal>; per product direction, View Case
@@ -167,6 +258,8 @@ export function CaseDetailView({
   // where Corvus flags it as blocking, without leaving this modal.
   const [property, setProperty] = useState<PropertyRecord>(propertyProp);
   const [acknowledging, setAcknowledging] = useState(false);
+  // The step-by-step filing workflow opens in its own focused popup.
+  const [filingOpen, setFilingOpen] = useState(false);
   // Real signed_at off the Notice of Protest submission (see
   // protest-form-submissions.ts) — the one honest signal this app has for
   // "has the customer actually signed this," distinct from and never
@@ -236,6 +329,52 @@ export function CaseDetailView({
   // this case — reopening View Case, switching tabs, or a new session.
   const needsGuidanceAck = current.status === "requested" && !current.corvusGuidanceAckAt;
 
+  // Which phase tab is open. Starts on the case's current phase; auto-advances
+  // when the status moves to a new phase (recording a hearing jumps to the
+  // Hearing tab), but manual navigation between unlocked tabs is otherwise free.
+  const phaseDefault = defaultCaseTab(current, needsGuidanceAck);
+  const [activeTab, setActiveTab] = useState<CaseTabId>(phaseDefault);
+  // Re-runs only when the derived phase-tab string actually changes, so
+  // recording a hearing (etc.) advances the open tab; unrelated re-renders
+  // don't disturb manual navigation.
+  useEffect(() => {
+    setActiveTab(phaseDefault);
+  }, [phaseDefault]);
+
+  // A guidance "Go to X" link: switch to the tab that holds the anchor, then
+  // scroll to it once the panel has mounted.
+  function navigateTo(anchor: string) {
+    if (anchor.startsWith("http") || anchor.startsWith("tel:") || anchor.startsWith("mailto:")) {
+      goToGuidanceAnchor(anchor);
+      return;
+    }
+    const targetTab = ANCHOR_TAB[anchor];
+    if (targetTab && targetTab !== activeTab) setActiveTab(targetTab);
+    // The filing steps live inside the popup — open it so the anchor exists.
+    if (targetTab === "file") setFilingOpen(true);
+    // Give the newly-mounted panel a couple of frames to appear.
+    let tries = 0;
+    const tryScroll = () => {
+      const el = document.getElementById(anchor);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      if (tries++ < 6) requestAnimationFrame(tryScroll);
+    };
+    requestAnimationFrame(tryScroll);
+  }
+
+  function handleTabClick(id: CaseTabId) {
+    if (caseTabUnlocked(id, current, needsGuidanceAck)) {
+      setActiveTab(id);
+    } else {
+      toast.info(
+        CASE_TABS.find((t) => t.id === id)?.lockedHint ?? "This phase isn't available yet.",
+      );
+    }
+  }
+
   return (
     <div>
       <button onClick={onBack} className="btn-outline text-sm mb-4">
@@ -251,132 +390,260 @@ export function CaseDetailView({
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : needsGuidanceAck ? (
-        <CorvusGuidanceGate
-          onAcknowledge={handleAcknowledgeGuidance}
-          acknowledging={acknowledging}
-        />
       ) : (
         <>
-          <CorvusGuidancePanel
-            property={property}
-            protest={current}
-            evidenceDocumentCount={evidenceDocuments.length}
-            noticeSignedAt={noticeSignedAt}
+          <CaseTabBar
+            activeTab={activeTab}
+            unlocked={(id) => caseTabUnlocked(id, current, needsGuidanceAck)}
+            onSelect={handleTabClick}
           />
 
-          <InformalOutcomeBanner protest={current} agreement={settlementAgreement} />
+          {/* --- Overview --- */}
+          {activeTab === "overview" &&
+            (needsGuidanceAck ? (
+              <CorvusGuidanceGate
+                property={property}
+                protest={current}
+                evidenceCount={evidenceDocuments.length}
+                onAcknowledge={handleAcknowledgeGuidance}
+                acknowledging={acknowledging}
+              />
+            ) : (
+              <div className="grid gap-1">
+                <CaseRoadmap
+                  protest={current}
+                  needsGuidanceAck={needsGuidanceAck}
+                  onSelect={handleTabClick}
+                />
+                <CorvusGuidancePanel
+                  property={property}
+                  protest={current}
+                  evidenceDocumentCount={evidenceDocuments.length}
+                  noticeSignedAt={noticeSignedAt}
+                  onNavigate={navigateTo}
+                />
+                <InformalOutcomeBanner
+                  protest={current}
+                  agreement={settlementAgreement}
+                  onNavigate={navigateTo}
+                />
+                <CaseProgress
+                  protest={current}
+                  property={property}
+                  caseData={caseData}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                />
+                <CaseRecordSection
+                  userId={userId}
+                  protest={current}
+                  property={property}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                />
+                <CaseAuditTrailSection protestId={protest.id} />
+                <NextStepFooter
+                  property={property}
+                  protest={current}
+                  evidenceDocumentCount={evidenceDocuments.length}
+                  noticeSignedAt={noticeSignedAt}
+                  onNavigate={navigateTo}
+                />
+              </div>
+            ))}
 
-          <CasePlanSection
-            userId={userId}
-            property={property}
-            protestId={protest.id}
-            caseData={caseData}
-            onReload={load}
-          />
-
-          {current.status === "requested" ? (
-            <PreFilingGate
-              userId={userId}
-              property={property}
-              protest={current}
-              caseData={caseData}
-              evidenceDocuments={evidenceDocuments}
-              noticeSignedAt={noticeSignedAt}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-              onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
-              onNoticeSigned={setNoticeSignedAt}
-            />
-          ) : (
-            <DocumentsSection
-              userId={userId}
-              protest={current}
-              property={property}
-              strategyRecommendation={caseData?.strategyRecommendation ?? null}
-              noticeSignedAt={noticeSignedAt}
-              evidenceDocuments={evidenceDocuments}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-              onNoticeSigned={setNoticeSignedAt}
-            />
+          {/* --- Prepare & File --- */}
+          {activeTab === "file" && (
+            <div>
+              <CasePlanSection
+                userId={userId}
+                property={property}
+                protestId={protest.id}
+                caseData={caseData}
+                onReload={load}
+              />
+              <FilingWorkflowLauncher
+                property={property}
+                protest={current}
+                evidenceCount={evidenceDocuments.length}
+                noticeSignedAt={noticeSignedAt}
+                onOpen={() => setFilingOpen(true)}
+              />
+            </div>
           )}
 
-          {current.status !== "requested" && (
-            <InformalReviewSection
-              protest={current}
-              property={property}
-              strategyRecommendation={caseData?.strategyRecommendation ?? null}
-              evidenceDocuments={evidenceDocuments}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {filingOpen && (
+            <Modal onClose={() => setFilingOpen(false)} xl>
+              <DocumentsSection
+                userId={userId}
+                protest={current}
+                property={property}
+                strategyRecommendation={caseData?.strategyRecommendation ?? null}
+                noticeSignedAt={noticeSignedAt}
+                evidenceDocuments={evidenceDocuments}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
+                onNoticeSigned={setNoticeSignedAt}
+              />
+            </Modal>
           )}
 
-          {current.status !== "requested" && (
-            <HearingNoticeSection
-              userId={userId}
-              protest={current}
-              property={property}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {/* --- Informal Review --- */}
+          {activeTab === "informal" && current.status !== "requested" && (
+            <div>
+              <InformalReviewSection
+                protest={current}
+                property={property}
+                strategyRecommendation={caseData?.strategyRecommendation ?? null}
+                evidenceDocuments={evidenceDocuments}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <SettlementSignatureSection
+                userId={userId}
+                protest={current}
+                property={property}
+                agreement={settlementAgreement}
+                onAgreementChange={setSettlementAgreement}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
           )}
 
-          <HearingPrepSection
-            protest={current}
-            property={property}
-            caseData={caseData}
-            evidenceDocuments={evidenceDocuments}
-            settlementAgreement={settlementAgreement}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          {current.status !== "requested" && (
-            <SettlementSignatureSection
-              userId={userId}
-              protest={current}
-              property={property}
-              agreement={settlementAgreement}
-              onAgreementChange={setSettlementAgreement}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {/* --- Hearing --- */}
+          {activeTab === "hearing" && current.status !== "requested" && (
+            <div>
+              <HearingNoticeSection
+                userId={userId}
+                protest={current}
+                property={property}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <HearingPrepSection
+                protest={current}
+                property={property}
+                caseData={caseData}
+                evidenceDocuments={evidenceDocuments}
+                settlementAgreement={settlementAgreement}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
           )}
 
-          <DecisionNoticeSection
-            userId={userId}
-            protest={current}
-            property={property}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <EscalationEvaluationSection
-            protest={current}
-            property={property}
-            evidenceDocumentCount={evidenceDocuments.length}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseProgress
-            protest={current}
-            property={property}
-            caseData={caseData}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseRecordSection
-            userId={userId}
-            protest={current}
-            property={property}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseAuditTrailSection protestId={protest.id} />
-
-          <NextStepFooter
-            property={property}
-            protest={current}
-            evidenceDocumentCount={evidenceDocuments.length}
-            noticeSignedAt={noticeSignedAt}
-          />
+          {/* --- Decision & Appeal --- */}
+          {activeTab === "decision" && (
+            <div>
+              <DecisionNoticeSection
+                userId={userId}
+                protest={current}
+                property={property}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <EscalationEvaluationSection
+                protest={current}
+                property={property}
+                evidenceDocumentCount={evidenceDocuments.length}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
+          )}
         </>
       )}
+    </div>
+  );
+}
+
+// The phase-tab bar. All 5 always show — a phase the case hasn't reached is a
+// disabled button with a lock glyph + a `title` hint (clicking it toasts the
+// hint, handled by onSelect).
+function CaseTabBar({
+  activeTab,
+  unlocked,
+  onSelect,
+}: {
+  activeTab: CaseTabId;
+  unlocked: (id: CaseTabId) => boolean;
+  onSelect: (id: CaseTabId) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Case phases"
+      className="mt-4 flex gap-1 overflow-x-auto border-b border-border pb-px"
+    >
+      {CASE_TABS.map((t) => {
+        const isOpen = t.id === activeTab;
+        const locked = !unlocked(t.id);
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={isOpen}
+            title={locked ? t.lockedHint : undefined}
+            onClick={() => onSelect(t.id)}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-3 py-2 text-sm font-medium transition-colors ${
+              isOpen
+                ? "border-b-2 border-accent text-foreground"
+                : locked
+                  ? "text-muted-foreground/50"
+                  : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {locked && <span aria-hidden>🔒 </span>}
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Compact "where are we in the journey" strip shown at the top of the Overview
+// tab once the case is underway — the same 5 phases as the tabs, marking the
+// current one and letting the user jump to any unlocked phase.
+function CaseRoadmap({
+  protest,
+  needsGuidanceAck,
+  onSelect,
+}: {
+  protest: ProtestRecord;
+  needsGuidanceAck: boolean;
+  onSelect: (id: CaseTabId) => void;
+}) {
+  const currentPhase = defaultCaseTab(protest, needsGuidanceAck);
+  const currentIdx = CASE_TABS.findIndex((t) => t.id === currentPhase);
+  return (
+    <div className="mt-4 card-elev p-4">
+      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Your protest, step by step
+      </span>
+      <ol className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-xs">
+        {CASE_TABS.map((t, i) => {
+          const done = i < currentIdx;
+          const here = i === currentIdx;
+          const unlocked = caseTabUnlocked(t.id, protest, needsGuidanceAck);
+          return (
+            <li key={t.id} className="flex items-center gap-2">
+              {i > 0 && <span className="text-muted-foreground/40">→</span>}
+              <button
+                type="button"
+                onClick={() => onSelect(t.id)}
+                disabled={!unlocked}
+                className={`rounded-full px-2 py-0.5 font-medium ${
+                  here
+                    ? "bg-accent/15 text-accent"
+                    : done
+                      ? "text-success"
+                      : unlocked
+                        ? "text-muted-foreground hover:text-foreground"
+                        : "text-muted-foreground/40"
+                }`}
+              >
+                {done ? "✓ " : ""}
+                {t.label}
+              </button>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -387,13 +654,50 @@ export function CaseDetailView({
 // checkbox + button is enough (no signature capture, unlike the real Service
 // Agreement in ProtestAuthorizationFlow.tsx).
 function CorvusGuidanceGate({
+  property,
+  protest,
+  evidenceCount,
   onAcknowledge,
   acknowledging,
 }: {
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceCount: number;
   onAcknowledge: () => void;
   acknowledging: boolean;
 }) {
   const [checked, setChecked] = useState(false);
+  const [concernsReviewed, setConcernsReviewed] = useState(false);
+  const [concerns, setConcerns] = useState<CaseReadinessConcern[] | null>(null);
+  const [verifyState, setVerifyState] = useState<"loading" | "done" | "error">("loading");
+
+  const countyInfo = getCountyProtestInfo(property.cad);
+
+  useEffect(() => {
+    let live = true;
+    setVerifyState("loading");
+    verifyCaseReadiness(property, protest, evidenceCount)
+      .then((c) => {
+        if (!live) return;
+        setConcerns(c);
+        setVerifyState("done");
+      })
+      .catch(() => {
+        if (live) setVerifyState("error");
+      });
+    return () => {
+      live = false;
+    };
+    // Keyed on the case's identity, not the property/protest object refs —
+    // this gate re-renders on unrelated state and `verifyCaseReadiness` is a
+    // real AI call. While this gate is shown, none of the fields it checks
+    // can change (the Pre-Filing fix rows only render after acknowledgment).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [property.id, protest.id, evidenceCount]);
+
+  const hasHigh = (concerns ?? []).some((c) => c.severity === "high");
+  const canContinue = checked && (!hasHigh || concernsReviewed) && !acknowledging;
+
   return (
     <div className="mt-4 grid gap-4">
       <div className="card-elev p-4">
@@ -416,7 +720,79 @@ function CorvusGuidanceGate({
             or comply with county requirements.
           </p>
         </div>
+        <p className="mt-3 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          {countyInfo ? (
+            <>
+              County procedures for {property.cad} were verified {countyInfo.verifiedAt}.{" "}
+              <a
+                href={countyInfo.sourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline underline-offset-2"
+              >
+                Source
+              </a>
+              . Confirm current county requirements before you file.
+            </>
+          ) : (
+            <>
+              No county-specific procedures are on file for {property.cad || "this county"} — the
+              standard Texas Comptroller Form 50-132 process applies. Confirm current county
+              requirements before you file.
+            </>
+          )}
+        </p>
       </div>
+
+      <div className="card-elev p-4">
+        <h4 className="text-sm font-semibold">County Requirements Check</h4>
+        {verifyState === "loading" ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Corvus is verifying this case against {property.cad || "the county"}'s requirements…
+          </p>
+        ) : verifyState === "error" ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Couldn't run the automated check — review the Pre-Filing Check below carefully before
+            filing.
+          </p>
+        ) : (concerns ?? []).length === 0 ? (
+          <p className="mt-2 text-xs text-success">
+            Nothing looks inconsistent with the county's requirements. Still review the Pre-Filing
+            Check below before filing.
+          </p>
+        ) : (
+          <ul className="mt-2 grid gap-2">
+            {(concerns ?? []).map((c, i) => (
+              <li
+                key={i}
+                className={`rounded-md border p-2.5 text-xs ${
+                  c.severity === "high"
+                    ? "border-destructive/30 bg-destructive/5"
+                    : "border-warning/40 bg-warning/10"
+                }`}
+              >
+                <span className="font-semibold">
+                  {c.field}
+                  {c.severity === "high" ? " — needs attention" : ""}:
+                </span>{" "}
+                <span className="text-muted-foreground">{c.concern}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {hasHigh && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={concernsReviewed}
+            onChange={(e) => setConcernsReviewed(e.target.checked)}
+            className="mt-0.5"
+          />
+          I have reviewed the concern(s) above and will confirm or correct them.
+        </label>
+      )}
       <label className="flex items-start gap-2 text-sm">
         <input
           type="checkbox"
@@ -428,7 +804,7 @@ function CorvusGuidanceGate({
       </label>
       <button
         onClick={onAcknowledge}
-        disabled={!checked || acknowledging}
+        disabled={!canContinue}
         className="btn-accent w-fit text-sm disabled:opacity-60"
       >
         {acknowledging ? "Continuing…" : "Continue to Case"}
@@ -477,11 +853,14 @@ function CorvusGuidancePanel({
   protest,
   evidenceDocumentCount,
   noticeSignedAt,
+  onNavigate,
 }: {
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceDocumentCount: number;
   noticeSignedAt: string | null;
+  // Switch to the tab holding this anchor, then scroll to it.
+  onNavigate: (anchor: string) => void;
 }) {
   const [countyOpen, setCountyOpen] = useState(false);
   const countyInfo = getCountyProtestInfo(property.cad);
@@ -515,7 +894,7 @@ function CorvusGuidancePanel({
                 {step.detail && <span className="text-muted-foreground"> — {step.detail}</span>}
                 {step.action && (
                   <button
-                    onClick={() => goToGuidanceAnchor(step.action!.anchor)}
+                    onClick={() => onNavigate(step.action!.anchor)}
                     className="ml-2 text-xs text-accent hover:underline"
                   >
                     {step.action.label} →
@@ -588,11 +967,13 @@ function NextStepFooter({
   protest,
   evidenceDocumentCount,
   noticeSignedAt,
+  onNavigate,
 }: {
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceDocumentCount: number;
   noticeSignedAt: string | null;
+  onNavigate: (anchor: string) => void;
 }) {
   const countyInfo = getCountyProtestInfo(property.cad);
   const guidance = getCaseGuidance(
@@ -611,84 +992,13 @@ function NextStepFooter({
       {next.detail && <span className="text-muted-foreground"> {next.detail}</span>}
       {next.action && (
         <button
-          onClick={() => goToGuidanceAnchor(next.action!.anchor)}
+          onClick={() => onNavigate(next.action!.anchor)}
           className="ml-2 text-xs text-accent hover:underline"
         >
           {next.action.label} →
         </button>
       )}
     </div>
-  );
-}
-
-// Runs before the user can reach Documents/filing at all. Every fact comes
-// from getPreFilingCheck() — real case/property/evidence fields, plus real
-// per-county data from county-protest-info.ts, never AI-invented. If a
-// blocking field (case identity/deadline) is missing, filing stops here and
-// DocumentsSection is not rendered until it's corrected — the non-blocking
-// procedural rows (filing method, county contact, etc.) are informational
-// and never stop filing on their own, since the app's own generic form is
-// always a valid fallback even where a specific county detail isn't
-// confirmed.
-function PreFilingGate({
-  userId,
-  property,
-  protest,
-  caseData,
-  evidenceDocuments,
-  noticeSignedAt,
-  onUpdate,
-  onPropertyUpdate,
-  onNoticeSigned,
-}: {
-  userId: string;
-  property: PropertyRecord;
-  protest: ProtestRecord;
-  caseData: ProtestCase | null;
-  evidenceDocuments: DocumentRecord[];
-  noticeSignedAt: string | null;
-  onUpdate: (patch: Partial<ProtestRecord>) => void;
-  onPropertyUpdate: (patch: Partial<PropertyRecord>) => void;
-  onNoticeSigned: (signedAt: string | null) => void;
-}) {
-  const items = getPreFilingCheck(property, protest, evidenceDocuments.length);
-  const blocked = isPreFilingBlocked(items);
-
-  return (
-    <>
-      {/* While the readiness check is blocked the Documents section (and its
-          own id="case-documents") isn't rendered — so Corvus Guidance's
-          "Review Notice of Protest" link would scroll to nothing. Carry the
-          id here in that case so the link lands the user on exactly what's
-          blocking them. Exactly one element ever has the id. */}
-      <div id={blocked ? "case-documents" : undefined} className="mt-5 border-t border-border pt-5">
-        <PreFilingCheckList
-          items={items}
-          blocked={blocked}
-          propertyId={property.id}
-          onFixed={onPropertyUpdate}
-        />
-        {blocked && (
-          <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-            Corvus AI can't confirm this case is ready to file — please correct or confirm the
-            field(s) marked "Missing" above before filing. Use "Confirm/edit" next to each one.
-            Documents are hidden until this is resolved.
-          </div>
-        )}
-      </div>
-      {!blocked && (
-        <DocumentsSection
-          userId={userId}
-          protest={protest}
-          property={property}
-          strategyRecommendation={caseData?.strategyRecommendation ?? null}
-          noticeSignedAt={noticeSignedAt}
-          evidenceDocuments={evidenceDocuments}
-          onUpdate={onUpdate}
-          onNoticeSigned={onNoticeSigned}
-        />
-      )}
-    </>
   );
 }
 
@@ -738,18 +1048,26 @@ function PreFilingCheckList({
       <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
         {items.map((item) => {
           const missing = item.status === "missing";
-          const field = missing ? BLOCKING_FIELD_MAP[item.label] : undefined;
+          const needsReview = item.status === "needs_review";
+          const field = missing || needsReview ? BLOCKING_FIELD_MAP[item.label] : undefined;
           return (
             <div key={item.label} className="grid gap-1 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-muted-foreground">{item.label}</span>
                 <span
-                  className={`truncate ${missing ? "text-destructive" : "text-success"}`}
+                  className={`truncate ${
+                    missing
+                      ? "text-destructive"
+                      : needsReview
+                        ? "text-warning-foreground"
+                        : "text-success"
+                  }`}
                   title={item.value ?? undefined}
                 >
-                  {missing ? "Missing" : (item.value ?? "Confirmed")}
+                  {missing ? "Missing" : needsReview ? "Needs review" : (item.value ?? "Confirmed")}
                 </span>
               </div>
+              {needsReview && item.issue && <p className="text-warning-foreground">{item.issue}</p>}
               {field && (
                 <PreFilingFixRow
                   label={item.label}
@@ -1143,6 +1461,44 @@ function FilingConfirmationFlow({
   );
 }
 
+// The entry point to the step-by-step filing workflow (which opens in its own
+// popup). Shows where the case is at a glance so the button reads "Start" vs.
+// "Continue", and flags a blocked Pre-Filing Check up front.
+function FilingWorkflowLauncher({
+  property,
+  protest,
+  evidenceCount,
+  noticeSignedAt,
+  onOpen,
+}: {
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceCount: number;
+  noticeSignedAt: string | null;
+  onOpen: () => void;
+}) {
+  const blocked = isPreFilingBlocked(getPreFilingCheck(property, protest, evidenceCount));
+  const started = !!noticeSignedAt || protest.status !== "requested";
+  return (
+    <div className="mt-5 border-t border-border pt-5">
+      <h4 className="text-sm font-semibold">Prepare &amp; File</h4>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
+        forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
+        signing, filing, and your evidence package. Everything you sign is saved to your Documents.
+      </p>
+      {blocked && (
+        <p className="mt-2 text-xs text-warning-foreground">
+          Action needed in the Pre-Filing Check — open the workflow to resolve it.
+        </p>
+      )}
+      <button onClick={onOpen} className="btn-accent mt-3 text-xs py-1.5">
+        {started ? "Continue Filing" : blocked ? "Review Pre-Filing Check" : "Start Filing"}
+      </button>
+    </div>
+  );
+}
+
 export function DocumentsSection({
   userId,
   protest,
@@ -1152,6 +1508,9 @@ export function DocumentsSection({
   evidenceDocuments,
   onUpdate,
   onNoticeSigned,
+  // Correct a blocking Pre-Filing Check field (County / Deadline / …) right in
+  // the workflow's first step. Optional — omitted by the admin copy.
+  onPropertyUpdate,
   // Staff must never sign a legal filing on a customer's behalf — the admin
   // panel's copy of this section (AdminCaseProgressModal) passes false to
   // hide signing entirely, keeping Save Progress/Download available for
@@ -1166,6 +1525,7 @@ export function DocumentsSection({
   evidenceDocuments: DocumentRecord[];
   onUpdate: (patch: Partial<ProtestRecord>) => void;
   onNoticeSigned: (signedAt: string | null) => void;
+  onPropertyUpdate?: (patch: Partial<PropertyRecord>) => void;
   allowSigning?: boolean;
 }) {
   const [markingFiled, setMarkingFiled] = useState(false);
@@ -1203,6 +1563,11 @@ export function DocumentsSection({
   const [proofCheck, setProofCheck] = useState<FilingProofVerification | null>(null);
   const [checkingProof, setCheckingProof] = useState(false);
   const [proofCheckError, setProofCheckError] = useState<string | null>(null);
+  // The saved Notice of Protest "how will you appear at the ARB hearing"
+  // answer, loaded eagerly (not just when the editor opens) — it decides
+  // whether the Evidence Affidavit step is part of this filing.
+  const [noticeHearingAppearance, setNoticeHearingAppearance] = useState<string | null>(null);
+  const [markingEvidenceSubmitted, setMarkingEvidenceSubmitted] = useState(false);
 
   useEffect(() => {
     getAuthorization(protest.id)
@@ -1216,6 +1581,98 @@ export function DocumentsSection({
       .then(setFilingProofDocs)
       .catch((err) => console.error("Could not load proof-of-filing documents:", err));
   }, [userId, property.id]);
+
+  // Eager load of the two secondary forms' signed-at + the notice's hearing
+  // answer, so the step bar can show completion / decide the step set without
+  // opening each editor first. openAgentEditor / openEvidenceDeclarationEditor
+  // still refresh these when they run.
+  useEffect(() => {
+    getSubmission(protest.id, "notice_of_protest")
+      .then((s) => {
+        const v = s?.fieldValues?.["ARB hearing"];
+        setNoticeHearingAppearance(typeof v === "string" && v ? v : null);
+      })
+      .catch(() => {});
+    getSubmission(protest.id, "appointment_of_agent")
+      .then((s) => setAgentFormSignedAt(s?.signedAt ?? null))
+      .catch(() => {});
+    getSubmission(protest.id, "evidence_declaration")
+      .then((s) => setEvidenceDeclarationSignedAt(s?.signedAt ?? null))
+      .catch(() => {});
+  }, [protest.id]);
+
+  const filingSteps = useMemo(
+    () =>
+      requiredFilingSteps({
+        attendanceType: protest.attendanceType,
+        hasAgentAuthorization: false,
+        hearingAppearance: noticeHearingAppearance,
+      }),
+    [protest.attendanceType, noticeHearingAppearance],
+  );
+  const preFilingItems = getPreFilingCheck(property, protest, evidenceDocuments.length);
+  const preFilingBlocked = isPreFilingBlocked(preFilingItems);
+
+  function stepDone(id: FilingStepId): boolean {
+    switch (id) {
+      case "prefiling":
+        return !preFilingBlocked;
+      case "file":
+        return !!noticeSignedAt;
+      case "agent":
+        return !!agentFormSignedAt;
+      case "affidavit":
+        return !!evidenceDeclarationSignedAt;
+      case "evidence":
+        return !!protest.evidenceSubmittedConfirmedAt;
+    }
+  }
+
+  const firstIncomplete = filingSteps.find((s) => !stepDone(s)) ?? filingSteps[0];
+  const [activeStep, setActiveStep] = useState<FilingStepId>(
+    preFilingBlocked ? "prefiling" : firstIncomplete,
+  );
+  // Auto-advance: when the step the user is currently on gets completed, move
+  // them to the next step that still needs work — so they never have to figure
+  // out "what's next". Manual back-navigation to review a completed step is
+  // preserved (only advances if they were sitting on the step that just
+  // finished).
+  const prevFirstIncomplete = useRef(firstIncomplete);
+  useEffect(() => {
+    const prev = prevFirstIncomplete.current;
+    prevFirstIncomplete.current = firstIncomplete;
+    if (!filingSteps.includes(activeStep)) {
+      setActiveStep(firstIncomplete);
+    } else if (preFilingBlocked && activeStep !== "prefiling") {
+      setActiveStep("prefiling");
+    } else if (prev !== firstIncomplete && activeStep === prev) {
+      setActiveStep(firstIncomplete);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filingSteps.join(","), preFilingBlocked, firstIncomplete]);
+
+  function selectStep(id: FilingStepId) {
+    // While the Pre-Filing Check is blocked, nothing after it is actionable.
+    if (preFilingBlocked && id !== "prefiling") {
+      toast.info("Finish the Pre-Filing Check first — resolve the flagged field(s).");
+      return;
+    }
+    setActiveStep(id);
+  }
+
+  async function handleMarkEvidenceSubmitted() {
+    setMarkingEvidenceSubmitted(true);
+    try {
+      const at = new Date().toISOString();
+      await saveCaseRecordFields(protest.id, { evidenceSubmittedConfirmedAt: at });
+      onUpdate({ evidenceSubmittedConfirmedAt: at });
+      toast.success("Evidence package marked as submitted.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save this.");
+    } finally {
+      setMarkingEvidenceSubmitted(false);
+    }
+  }
 
   const formType: FormType | null =
     editingForm === "protest"
@@ -1242,14 +1699,35 @@ export function DocumentsSection({
   // swaps in a saved draft/signed submission if one exists — a prior Save
   // Progress or Sign & Submit always wins over freshly-computed defaults.
   function openProtestEditor() {
-    setValues(
-      getNoticeOfProtestDefaults(property, property.taxYear, strategyRecommendation, authorization),
+    const defaults = getNoticeOfProtestDefaults(
+      property,
+      property.taxYear,
+      strategyRecommendation,
+      authorization,
     );
+    setValues(defaults);
     setEditingForm("protest");
     setSigningOpen(false);
     setSignature(null);
     getSubmission(protest.id, "notice_of_protest")
-      .then((existing) => existing && setValues(existing.fieldValues))
+      .then((existing) => {
+        if (existing) {
+          setValues(existing.fieldValues);
+          return;
+        }
+        // No saved draft — auto-draft the "facts to resolve protest" text from
+        // the case's evidence so the form opens as complete as Corvus can make
+        // it. Always editable; the user still reviews before signing.
+        if (evidenceDocuments.length > 0 && !defaults["Facts to resolve protest"]) {
+          draftProtestReason(property, strategyRecommendation, evidenceDocuments)
+            .then((text) =>
+              setValues((v) =>
+                v["Facts to resolve protest"] ? v : { ...v, "Facts to resolve protest": text },
+              ),
+            )
+            .catch((err) => console.error("Auto-draft of protest reason failed:", err));
+        }
+      })
       .catch((err) => console.error("Could not load saved Notice of Protest draft:", err));
   }
 
@@ -1550,123 +2028,208 @@ export function DocumentsSection({
   const hasEvidence = evidenceDocuments.length > 0;
 
   return (
-    <div id="case-documents" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Documents</h4>
+    <div id="case-documents">
+      <h4 className="font-serif text-lg font-semibold">File Your Protest</h4>
       <p className="text-xs text-muted-foreground">
-        Official Texas Comptroller forms, pre-filled from this case. Review or edit every field
-        in-app, then download.
-      </p>
-      {!hasEvidence && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-          <p className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Tip (optional):</span> Upload whatever
-            evidence you already have first — AI can then suggest a stronger strategy and draft the
-            "facts to resolve protest" text for you. Not required — you can also fill out and file
-            the protest form directly below.
-          </p>
-          <button
-            onClick={goToModule8}
-            className="btn-outline shrink-0 whitespace-nowrap text-xs py-1.5"
-          >
-            Upload Evidence First →
-          </button>
-        </div>
-      )}
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button onClick={openProtestEditor} className="btn-accent text-xs py-1.5">
-          File Protest
-        </button>
-        <button
-          onClick={openAgentEditor}
-          disabled={authLoading || !authorization}
-          className="btn-outline text-xs py-1.5 disabled:opacity-60"
-          title={
-            !authLoading && !authorization
-              ? "No signed authorization on file for this case yet"
-              : undefined
-          }
-        >
-          Complete Agent Representation Form (Optional)
-        </button>
-        <button onClick={openEvidenceDeclarationEditor} className="btn-outline text-xs py-1.5">
-          Complete Evidence Declaration
-        </button>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        <span className="font-medium text-foreground">Optional.</span> Complete the Agent
-        Representation Form only if a tax agent or other authorized representative will represent
-        you. Complete the Evidence Declaration (Form 50-283, a sworn affidavit) only if you won't
-        appear in person at your ARB hearing — see Section 6 of your Notice of Protest.
+        Corvus takes you through only the steps this case needs — one at a time. Official Texas
+        Comptroller forms, pre-filled; review every field, then sign. Completed forms save to your
+        Documents.
       </p>
 
-      {/* Filing itself always happens on the county's own site or mailbox —
-          CorvusRF has no e-filing integration with any appraisal district
-          (none publish a public submission API), so this can only ever
-          prepare the real forms and point you at every real way this county
-          actually accepts one, never submit on your behalf. Shown plainly
-          here, every type at once, not buried in a collapsed panel or
-          collapsed down to a single "the" method. */}
-      <div className="mt-3 rounded-md border border-border p-3 text-sm">
-        <p className="font-medium">
-          How to actually file this — every way {property.cad ?? "your county"} accepts it
-        </p>
-        {countyInfo ? (
-          <>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {countyInfo.cad} is a separate system — CorvusRF prepares your real forms above, but
-              doesn't submit to any of these on your behalf.
-            </p>
-            <div className="mt-2 text-xs text-muted-foreground">
-              <FilingMethodsList countyInfo={countyInfo} />
+      <FilingStepBar
+        steps={filingSteps}
+        active={activeStep}
+        isDone={stepDone}
+        lockedAfterPrefiling={preFilingBlocked}
+        onSelect={selectStep}
+      />
+      <p className="mt-2 text-xs text-muted-foreground">{FILING_STEP_META[activeStep].blurb}</p>
+
+      {/* --- Step: Pre-Filing Check --- */}
+      {activeStep === "prefiling" && (
+        <div className="mt-3">
+          <PreFilingCheckList
+            items={preFilingItems}
+            blocked={preFilingBlocked}
+            propertyId={property.id}
+            onFixed={onPropertyUpdate ?? (() => {})}
+          />
+          {preFilingBlocked ? (
+            <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+              Corvus can't confirm this case is ready to file — resolve the field(s) marked
+              "Missing" or "Needs review" above (use the editor beside each). The filing steps
+              unlock once this is clear.
             </div>
-            {countyInfo.filingMethod.online && (
-              <a
-                href={countyInfo.filingMethod.online.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn-accent mt-2 inline-flex text-xs py-1.5"
-              >
-                File Online at {countyInfo.cad} →
-              </a>
-            )}
-          </>
-        ) : (
-          <p className="mt-1 text-xs text-muted-foreground">
-            We don't have this county's confirmed filing methods on file yet — download your signed
-            Notice of Protest above and check {property.cad ?? "your appraisal district"}'s website
-            directly for the current address or any online option.
-          </p>
-        )}
-      </div>
-
-      {noticeSignedAt && protest.status === "requested" && filingStep === "closed" && (
-        <div className="mt-3 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-          <p>
-            You've signed your Notice of Protest — that only prepares the document. It isn't filed
-            with {property.cad ?? "your county"} until you actually deliver it (online, by mail, or
-            in person). Once you have, confirm it below.
-          </p>
-          <button onClick={handleMarkFiled} className="btn-accent mt-2 text-xs py-1.5">
-            Have you filed?
-          </button>
+          ) : (
+            <div className="mt-3 rounded-md border border-success/30 bg-success/5 p-3 text-sm text-success">
+              Everything checks out — continue to File Protest.
+            </div>
+          )}
         </div>
       )}
 
-      {noticeSignedAt && protest.status === "requested" && filingStep !== "closed" && (
-        <FilingConfirmationFlow
-          step={filingStep}
-          countyInfo={countyInfo}
-          proofDocs={filingProofDocs}
-          uploadingProof={uploadingProof}
-          onUploadProof={handleUploadProof}
-          proofCheck={proofCheck}
-          checkingProof={checkingProof}
-          proofCheckError={proofCheckError}
-          onRecheck={() => handleCheckProof()}
-          markingFiled={markingFiled}
-          onNotYet={handleNotYetFiled}
-          onConfirmIntent={handleConfirmIntentToFile}
-          onConfirmFiled={handleConfirmFiled}
+      {/* --- Step: File Protest --- */}
+      {activeStep === "file" && (
+        <div className="mt-3 grid gap-3">
+          {!hasEvidence && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Tip (optional):</span> Upload whatever
+                evidence you already have first — AI can then suggest a stronger strategy and draft
+                the "facts to resolve protest" text for you.
+              </p>
+              <button
+                onClick={goToModule8}
+                className="btn-outline shrink-0 whitespace-nowrap text-xs py-1.5"
+              >
+                Upload Evidence First →
+              </button>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={openProtestEditor} className="btn-accent text-xs py-1.5">
+              File Protest
+            </button>
+            {noticeSignedAt && (
+              <>
+                <span className="text-xs text-success">✓ Signed</span>
+                <Link to="/dashboard/documents" className="text-xs text-accent hover:underline">
+                  View in Documents tab →
+                </Link>
+              </>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Opens the Notice of Protest (Form 50-132) pre-filled from your case — Corvus drafts the
+            "reasons" from your evidence; review every field, then Save, Sign &amp; download. The
+            signed form is saved to your Documents.
+          </p>
+
+          {/* Filing itself always happens on the county's own site or mailbox —
+              CorvusRF has no e-filing integration with any appraisal district
+              (none publish a public submission API), so this can only ever
+              prepare the real forms and point you at every real way this
+              county actually accepts one, never submit on your behalf. */}
+          <div className="rounded-md border border-border p-3 text-sm">
+            <p className="font-medium">
+              How to actually file this — every way {property.cad ?? "your county"} accepts it
+            </p>
+            {countyInfo ? (
+              <>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {countyInfo.cad} is a separate system — CorvusRF prepares your real forms above,
+                  but doesn't submit to any of these on your behalf.
+                </p>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  <FilingMethodsList countyInfo={countyInfo} />
+                </div>
+                {countyInfo.filingMethod.online && (
+                  <a
+                    href={countyInfo.filingMethod.online.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-accent mt-2 inline-flex text-xs py-1.5"
+                  >
+                    File Online at {countyInfo.cad} →
+                  </a>
+                )}
+              </>
+            ) : (
+              <p className="mt-1 text-xs text-muted-foreground">
+                We don't have this county's confirmed filing methods on file yet — download your
+                signed Notice of Protest above and check {property.cad ?? "your appraisal district"}
+                's website directly for the current address or any online option.
+              </p>
+            )}
+          </div>
+
+          {noticeSignedAt && protest.status === "requested" && filingStep === "closed" && (
+            <div className="rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
+              <p>
+                You've signed your Notice of Protest — that only prepares the document. It isn't
+                filed with {property.cad ?? "your county"} until you actually deliver it (online, by
+                mail, or in person). Once you have, confirm it below.
+              </p>
+              <button onClick={handleMarkFiled} className="btn-accent mt-2 text-xs py-1.5">
+                Have you filed?
+              </button>
+            </div>
+          )}
+
+          {noticeSignedAt && protest.status === "requested" && filingStep !== "closed" && (
+            <FilingConfirmationFlow
+              step={filingStep}
+              countyInfo={countyInfo}
+              proofDocs={filingProofDocs}
+              uploadingProof={uploadingProof}
+              onUploadProof={handleUploadProof}
+              proofCheck={proofCheck}
+              checkingProof={checkingProof}
+              proofCheckError={proofCheckError}
+              onRecheck={() => handleCheckProof()}
+              markingFiled={markingFiled}
+              onNotYet={handleNotYetFiled}
+              onConfirmIntent={handleConfirmIntentToFile}
+              onConfirmFiled={handleConfirmFiled}
+            />
+          )}
+        </div>
+      )}
+
+      {/* --- Step: Agent / Representative --- */}
+      {activeStep === "agent" && (
+        <div className="mt-3 grid gap-2">
+          <div>
+            <button
+              onClick={openAgentEditor}
+              disabled={authLoading || !authorization}
+              className="btn-accent text-xs py-1.5 disabled:opacity-60"
+              title={
+                !authLoading && !authorization
+                  ? "Autofill needs a signed authorization on file for this case"
+                  : undefined
+              }
+            >
+              {agentFormSignedAt
+                ? "Review Appointment of Agent"
+                : "Open Appointment of Agent (Form 50-162)"}
+            </button>
+          </div>
+          {!authLoading && !authorization && (
+            <p className="text-xs text-muted-foreground">
+              A signed authorization must be on file before this form can be pre-filled.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* --- Step: Evidence Affidavit / Declaration --- */}
+      {activeStep === "affidavit" && (
+        <div className="mt-3 grid gap-2">
+          <div>
+            <button onClick={openEvidenceDeclarationEditor} className="btn-accent text-xs py-1.5">
+              {evidenceDeclarationSignedAt
+                ? "Review Affidavit of Evidence"
+                : "Open Affidavit of Evidence (Form 50-283)"}
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Form 50-283 is a sworn affidavit — after you sign it in-app, it must be notarized before
+            it's delivered to the ARB.
+          </p>
+        </div>
+      )}
+
+      {/* --- Step: Evidence --- */}
+      {activeStep === "evidence" && (
+        <FilingEvidenceStep
+          evidenceDocuments={evidenceDocuments}
+          strategyRecommendation={strategyRecommendation}
+          submittedAt={protest.evidenceSubmittedConfirmedAt ?? null}
+          allowSubmit={allowSigning}
+          marking={markingEvidenceSubmitted}
+          onGoToModule8={goToModule8}
+          onMarkSubmitted={handleMarkEvidenceSubmitted}
         />
       )}
 
@@ -1734,6 +2297,161 @@ export function DocumentsSection({
           onGenerateReason={handleGenerateReason}
         />
       )}
+    </div>
+  );
+}
+
+// The filing workflow's step indicator — the 2–4 active steps as
+// "1 File Protest → 2 Agent → …", each marked done / current / upcoming. The
+// user always sees where they are; a step is clickable once it's in the set
+// (upcoming steps are shown but reading-only until the prior work is done —
+// enforced by the panels themselves, not disabled here, so the user can look
+// ahead).
+function FilingStepBar({
+  steps,
+  active,
+  isDone,
+  lockedAfterPrefiling,
+  onSelect,
+}: {
+  steps: FilingStepId[];
+  active: FilingStepId;
+  isDone: (id: FilingStepId) => boolean;
+  // While the Pre-Filing Check is blocked, every step after it is inert.
+  lockedAfterPrefiling: boolean;
+  onSelect: (id: FilingStepId) => void;
+}) {
+  return (
+    <ol className="mt-3 flex flex-wrap items-center gap-x-1 gap-y-1 text-xs">
+      {steps.map((id, i) => {
+        const done = isDone(id);
+        const here = id === active;
+        const locked = lockedAfterPrefiling && id !== "prefiling";
+        return (
+          <li key={id} className="flex items-center gap-1">
+            {i > 0 && <span className="text-muted-foreground/40">→</span>}
+            <button
+              type="button"
+              onClick={() => onSelect(id)}
+              aria-current={here ? "step" : undefined}
+              className={`rounded-full px-2.5 py-1 font-medium ${
+                here
+                  ? "bg-accent/15 text-accent"
+                  : locked
+                    ? "text-muted-foreground/40"
+                    : done
+                      ? "text-success hover:bg-secondary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+              }`}
+            >
+              <span className="tabular-nums">{locked ? "🔒" : done ? "✓" : i + 1}</span>{" "}
+              {FILING_STEP_META[id].label}
+            </button>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+// The workflow's Evidence step: the case's real evidence at a glance, what's
+// still critically missing, a way to go add more (Module 8), and a record that
+// the package was submitted to the county. Uses the "Protest Evidence"-tagged
+// documents already loaded for this case — never a separate list.
+function FilingEvidenceStep({
+  evidenceDocuments,
+  strategyRecommendation,
+  submittedAt,
+  allowSubmit,
+  marking,
+  onGoToModule8,
+  onMarkSubmitted,
+}: {
+  evidenceDocuments: DocumentRecord[];
+  strategyRecommendation: string | null;
+  submittedAt: string | null;
+  allowSubmit: boolean;
+  marking: boolean;
+  onGoToModule8: () => void;
+  onMarkSubmitted: () => void;
+}) {
+  const withIssues = evidenceDocuments.filter(
+    (d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid",
+  );
+  return (
+    <div className="mt-3 grid gap-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">
+          {evidenceDocuments.length} evidence document{evidenceDocuments.length === 1 ? "" : "s"} on
+          this case
+          {withIssues.length > 0 && ` · ${withIssues.length} flagged by AI review`}
+        </span>
+        <button onClick={onGoToModule8} className="btn-outline shrink-0 text-xs py-1.5">
+          Add / organize evidence in Module 8 →
+        </button>
+      </div>
+
+      {evidenceDocuments.length === 0 ? (
+        <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
+          No evidence has been uploaded for this case yet. Module 8 finds and verifies what it can
+          from public records, then flags only the critical evidence you need to provide.
+        </div>
+      ) : (
+        <ul className="grid gap-1">
+          {evidenceDocuments.slice(0, 12).map((d) => {
+            const v = verdictMeta(d.aiVerdict);
+            return (
+              <li
+                key={d.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-1.5 text-xs"
+              >
+                <span className="truncate">{d.fileName}</span>
+                <span
+                  className={`shrink-0 font-semibold ${
+                    v.tone === "success"
+                      ? "text-success"
+                      : v.tone === "warning"
+                        ? "text-warning-foreground"
+                        : "text-destructive"
+                  }`}
+                >
+                  {d.aiCheckedAt ? v.label : "Not checked"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {strategyRecommendation && (
+        <p className="text-xs text-muted-foreground">
+          Organize the package around your protest strategy: {strategyRecommendation}
+        </p>
+      )}
+
+      <div className="rounded-md border border-border p-3">
+        {submittedAt ? (
+          <p className="text-xs text-success">
+            ✓ Evidence package marked as submitted on {new Date(submittedAt).toLocaleDateString()}.
+          </p>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Once you've delivered your evidence package to the county (with your affidavit, if you
+              won't appear in person), record it here.
+            </p>
+            {allowSubmit && (
+              <button
+                onClick={onMarkSubmitted}
+                disabled={marking}
+                className="btn-accent mt-2 text-xs py-1.5 disabled:opacity-60"
+              >
+                {marking ? "Saving…" : "Mark evidence package submitted"}
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -3005,10 +3723,15 @@ function InformalOutcomeBanner({
   protest,
   agreement,
   inline = false,
+  onNavigate,
 }: {
   protest: ProtestRecord;
   agreement: SettlementAgreementRecord | null;
   inline?: boolean;
+  // Optional — jump to the Informal Review tab + settlement section. When
+  // absent (the inline copy inside HearingPrepSection), falls back to a plain
+  // same-page scroll.
+  onNavigate?: (anchor: string) => void;
 }) {
   const unresolved =
     protest.status !== "resolved" &&
@@ -3028,9 +3751,11 @@ function InformalOutcomeBanner({
       <button
         type="button"
         onClick={() =>
-          document
-            .getElementById("case-settlement-signature")
-            ?.scrollIntoView({ behavior: "smooth", block: "start" })
+          onNavigate
+            ? onNavigate("case-settlement-signature")
+            : document
+                .getElementById("case-settlement-signature")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
         }
         className="btn-outline mt-2 text-xs py-1"
       >

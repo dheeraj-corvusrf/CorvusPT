@@ -3,6 +3,12 @@ import { getPreFilingCheck, isPreFilingBlocked } from "./pre-filing-check";
 import type { PropertyRecord } from "./properties";
 import type { ProtestRecord } from "./protests";
 
+// Derived from "now" so the fixture is always internally consistent against
+// the deadline-passed / deadline-wrong-year inconsistency checks, whatever
+// date the suite runs on.
+const NOW_YEAR = new Date().getFullYear();
+const FUTURE_DEADLINE = new Date(Date.now() + 45 * 86_400_000).toISOString().slice(0, 10);
+
 const property: PropertyRecord = {
   id: "prop-1",
   address: "123 Main St, Plano, TX 75023",
@@ -13,8 +19,8 @@ const property: PropertyRecord = {
   landValue: 100000,
   improvementValue: 400000,
   totalValue: 500000,
-  taxYear: 2026,
-  protestDeadline: "2099-05-15",
+  taxYear: NOW_YEAR,
+  protestDeadline: FUTURE_DEADLINE,
   paymentDueDate: null,
   taxAmountDue: null,
   paidAt: null,
@@ -47,17 +53,58 @@ const protest: ProtestRecord = {
   finalValue: null,
   escalationPath: null,
   closedAt: null,
-  taxYear: 2026,
+  taxYear: NOW_YEAR,
   corvusGuidanceAckAt: "2026-01-01T00:00:00Z",
 };
 
 describe("getPreFilingCheck", () => {
-  it("returns all 16 items the product spec requires, each with a label", () => {
+  it("returns all 17 items the product spec requires, each with a label", () => {
     const items = getPreFilingCheck(property, protest);
-    expect(items).toHaveLength(16);
+    expect(items).toHaveLength(17);
     for (const item of items) {
       expect(item.label.length).toBeGreaterThan(0);
     }
+  });
+
+  it("surfaces the county-data freshness (verified date + source)", () => {
+    const row = getPreFilingCheck(property, protest).find(
+      (i) => i.label === "County Requirements Verified",
+    );
+    expect(row?.value).toMatch(/^As of \d{4}-\d{2}-\d{2} · https?:\/\//);
+    expect(row?.blocking).toBe(false);
+  });
+
+  it("flags a passed protest deadline as needs_review and blocks filing", () => {
+    const past = { ...property, protestDeadline: "2020-05-15" };
+    const items = getPreFilingCheck(past, protest);
+    const row = items.find((i) => i.label === "Protest Deadline");
+    expect(row?.status).toBe("needs_review");
+    expect(row?.issue).toMatch(/already passed/i);
+    expect(isPreFilingBlocked(items)).toBe(true);
+  });
+
+  it("flags a deadline whose year doesn't line up with the tax year", () => {
+    const off = { ...property, protestDeadline: `${NOW_YEAR + 5}-05-15` };
+    const items = getPreFilingCheck(off, protest);
+    const row = items.find((i) => i.label === "Protest Deadline");
+    expect(row?.status).toBe("needs_review");
+    expect(isPreFilingBlocked(items)).toBe(true);
+  });
+
+  it("flags a tax-year mismatch between the protest and the property record", () => {
+    const items = getPreFilingCheck(property, { ...protest, taxYear: NOW_YEAR - 1 });
+    const row = items.find((i) => i.label === "Tax Year");
+    expect(row?.status).toBe("needs_review");
+    expect(row?.issue).toContain(String(NOW_YEAR - 1));
+    expect(isPreFilingBlocked(items)).toBe(true);
+  });
+
+  it("flags a blank CAD classification but does NOT block on it", () => {
+    const noClass = { ...property, propertyType: null };
+    const items = getPreFilingCheck(noClass, protest);
+    const row = items.find((i) => i.label === "Property Type");
+    expect(row?.status).toBe("needs_review");
+    expect(isPreFilingBlocked(items)).toBe(false);
   });
 
   it("is not blocked when every blocking field is real", () => {
@@ -143,7 +190,7 @@ describe("getPreFilingCheck", () => {
 });
 
 describe("isPreFilingBlocked", () => {
-  it("is true only when at least one blocking item is missing", () => {
+  it("is true when a blocking item is missing OR needs_review", () => {
     expect(
       isPreFilingBlocked([{ label: "x", value: "y", status: "confirmed", blocking: true }]),
     ).toBe(false);
@@ -153,5 +200,15 @@ describe("isPreFilingBlocked", () => {
     expect(
       isPreFilingBlocked([{ label: "x", value: null, status: "missing", blocking: true }]),
     ).toBe(true);
+    expect(
+      isPreFilingBlocked([
+        { label: "x", value: "y", status: "needs_review", issue: "z", blocking: true },
+      ]),
+    ).toBe(true);
+    expect(
+      isPreFilingBlocked([
+        { label: "x", value: "y", status: "needs_review", issue: "z", blocking: false },
+      ]),
+    ).toBe(false);
   });
 });

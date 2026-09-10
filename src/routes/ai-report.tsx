@@ -3026,6 +3026,7 @@ function cardDataGap(
   moduleId: string,
   data: unknown,
   compsMap: { data: CompsResult | null },
+  overrides: ModuleOverride[] = [],
 ): { label: string; docType: string } | null {
   if (!data) return null;
   const GENERIC = PROTEST_EVIDENCE_DOCUMENT_TYPE;
@@ -3033,6 +3034,16 @@ function cardDataGap(
     case "health":
       return (data as HealthScoreResult).dataSufficient === false
         ? { label: "Add property records or photos to firm up this score", docType: GENERIC }
+        : null;
+    case "strategy":
+      // One upload for the whole card (same as modules 1/3/…): the AI re-runs
+      // and sorts each file to whichever strategy it strengthens — no need to
+      // match a file to a row.
+      return (data as ModuleResultMap["strategy"]).strategies.some((s) => !s.dataSufficient)
+        ? {
+            label: "Upload photos or documents to strengthen the strategy analysis",
+            docType: GENERIC,
+          }
         : null;
     case "comps":
       return (compsMap.data?.comps?.length ?? 0) < 5
@@ -3047,6 +3058,28 @@ function cardDataGap(
             docType: GENERIC,
           }
         : null;
+    case "zoning": {
+      const z = data as ModuleResultMap["zoning"];
+      return z.matches === "uncertain" ||
+        z.aspects.some((a) => a.status === "Additional Data Needed")
+        ? {
+            label:
+              "Upload a zoning letter, plat, or the legal description to confirm classification",
+            docType: "Zoning: General",
+          }
+        : null;
+    }
+    case "improvement": {
+      const missing = (data as ModuleResultMap["improvement"]).buildingComponents.filter(
+        (c) => !c.hasPhoto && !isItemNotApplicable(overrides, "improvement", c.component),
+      ).length;
+      return missing > 0
+        ? {
+            label: `Upload photos of ${missing} building component${missing === 1 ? "" : "s"} to assess condition & depreciation`,
+            docType: GENERIC,
+          }
+        : null;
+    }
     case "evidence":
       return (data as ModuleResultMap["evidence"]).items.some((i) => i.availability === "Low")
         ? { label: "Upload the documents this checklist is still missing", docType: GENERIC }
@@ -3163,7 +3196,7 @@ function ModuleCard({
   // effects in Report()).
   const dataGap =
     unlocked && hasFullAccess && status === "Completed"
-      ? cardDataGap(m.id, moduleState?.data, compsMap)
+      ? cardDataGap(m.id, moduleState?.data, compsMap, overrides)
       : null;
   return (
     <div className="card-elev overflow-hidden flex flex-col">
@@ -3572,15 +3605,10 @@ function ModuleVisual({
     case "strategy": {
       const d = moduleState.data as ModuleResultMap["strategy"];
       if (d.strategies.length === 0) return null;
-      return (
-        <StrategyRankList
-          strategies={d.strategies}
-          color={m.color}
-          max={5}
-          uploading={uploadingEvidence}
-          onUploadFor={(s, files) => onUploadEvidence(files, strategySlug(s.name))}
-        />
-      );
+      // No per-row upload chips — the card shows one "Upload data" control at
+      // the bottom (see cardDataGap's "strategy" case). Rows that still need
+      // evidence show a plain "Data Needed" pill instead.
+      return <StrategyRankList strategies={d.strategies} color={m.color} max={5} />;
     }
     case "comps": {
       const d = moduleState.data as ModuleResultMap["comps"];
@@ -3647,31 +3675,23 @@ function ModuleVisual({
         improvementValue ?? null,
       );
       return (
+        // No mid-card "Upload photos" button — the card shows one "Upload data"
+        // control at the bottom (see cardDataGap's "improvement" case), same as
+        // modules 4 and 6.
         <ImprovementCardVisual
           d={d}
           depreciation={depreciation}
           address={address}
           overrides={overrides}
-          uploading={uploadingEvidence}
-          onUpload={hasFullAccess ? (files) => onUploadEvidence(files) : undefined}
           onOpen={onOpen}
         />
       );
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      return (
-        <ZoningAspectTiles
-          aspects={d.aspects}
-          matches={d.matches}
-          uploading={uploadingEvidence}
-          onUpload={
-            hasFullAccess
-              ? (files) => onUploadEvidence(files, undefined, "Zoning: General")
-              : undefined
-          }
-        />
-      );
+      // No mid-card upload — the card shows one "Upload data" control at the
+      // bottom (see cardDataGap's "zoning" case), same as Module 4.
+      return <ZoningAspectTiles aspects={d.aspects} matches={d.matches} />;
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
@@ -5471,7 +5491,7 @@ function ImprovementCardVisual({
       ) : (
         <p className="text-center text-[10px] text-muted-foreground">
           {missing > 0
-            ? `Upload photos of ${missing} component${missing === 1 ? "" : "s"} to assess condition & depreciation.`
+            ? `Condition photos needed for ${missing} component${missing === 1 ? "" : "s"} to compute depreciation.`
             : "Additional data needed to compute depreciation."}
         </p>
       )}

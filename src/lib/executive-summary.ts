@@ -5,7 +5,7 @@
 // wrong. Same convention as comps-analysis.ts/pre-filing-check.ts: pure
 // functions, real math, documented formula, no AI call.
 import type { ComparableStats } from "./comps-analysis";
-import type { PreFilingCheckItem } from "./pre-filing-check";
+import { isBlockingUnresolved, type PreFilingCheckItem } from "./pre-filing-check";
 
 export type ProtestOpportunity =
   "Potentially Overvalued" | "Limited Opportunity" | "Insufficient Data";
@@ -88,9 +88,7 @@ export function getExecutiveSummary(
           ? "Moderate"
           : "Limited";
 
-  const preFilingBlocked = preFilingItems
-    ? preFilingItems.some((i) => i.blocking && i.status === "missing")
-    : null;
+  const preFilingBlocked = preFilingItems ? preFilingItems.some(isBlockingUnresolved) : null;
   const protestReadiness: ProtestReadiness =
     preFilingBlocked === true
       ? "Additional Preparation Needed"
