@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -138,6 +138,8 @@ import {
 } from "@/lib/protest-form-submissions";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
+import { requiredFilingSteps, FILING_STEP_META, type FilingStepId } from "@/lib/filing-workflow";
+import { verdictMeta } from "@/lib/documents";
 import { PdfFormEditor } from "@/components/PdfFormEditor";
 import { FilingMethodsList } from "@/components/FilingMethodsList";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -1586,6 +1588,11 @@ export function DocumentsSection({
   const [proofCheck, setProofCheck] = useState<FilingProofVerification | null>(null);
   const [checkingProof, setCheckingProof] = useState(false);
   const [proofCheckError, setProofCheckError] = useState<string | null>(null);
+  // The saved Notice of Protest "how will you appear at the ARB hearing"
+  // answer, loaded eagerly (not just when the editor opens) — it decides
+  // whether the Evidence Affidavit step is part of this filing.
+  const [noticeHearingAppearance, setNoticeHearingAppearance] = useState<string | null>(null);
+  const [markingEvidenceSubmitted, setMarkingEvidenceSubmitted] = useState(false);
 
   useEffect(() => {
     getAuthorization(protest.id)
@@ -1599,6 +1606,68 @@ export function DocumentsSection({
       .then(setFilingProofDocs)
       .catch((err) => console.error("Could not load proof-of-filing documents:", err));
   }, [userId, property.id]);
+
+  // Eager load of the two secondary forms' signed-at + the notice's hearing
+  // answer, so the step bar can show completion / decide the step set without
+  // opening each editor first. openAgentEditor / openEvidenceDeclarationEditor
+  // still refresh these when they run.
+  useEffect(() => {
+    getSubmission(protest.id, "notice_of_protest")
+      .then((s) => {
+        const v = s?.fieldValues?.["ARB hearing"];
+        setNoticeHearingAppearance(typeof v === "string" && v ? v : null);
+      })
+      .catch(() => {});
+    getSubmission(protest.id, "appointment_of_agent")
+      .then((s) => setAgentFormSignedAt(s?.signedAt ?? null))
+      .catch(() => {});
+    getSubmission(protest.id, "evidence_declaration")
+      .then((s) => setEvidenceDeclarationSignedAt(s?.signedAt ?? null))
+      .catch(() => {});
+  }, [protest.id]);
+
+  const filingSteps = useMemo(
+    () =>
+      requiredFilingSteps({
+        attendanceType: protest.attendanceType,
+        hasAgentAuthorization: false,
+        hearingAppearance: noticeHearingAppearance,
+      }),
+    [protest.attendanceType, noticeHearingAppearance],
+  );
+  const [activeStep, setActiveStep] = useState<FilingStepId>(filingSteps[0]);
+  // Keep the open step valid if the step set changes (e.g. the affidavit step
+  // drops out after the user picks "In person").
+  useEffect(() => {
+    if (!filingSteps.includes(activeStep)) setActiveStep(filingSteps[0]);
+  }, [filingSteps, activeStep]);
+
+  function stepDone(id: FilingStepId): boolean {
+    switch (id) {
+      case "file":
+        return !!noticeSignedAt;
+      case "agent":
+        return !!agentFormSignedAt;
+      case "affidavit":
+        return !!evidenceDeclarationSignedAt;
+      case "evidence":
+        return !!protest.evidenceSubmittedConfirmedAt;
+    }
+  }
+
+  async function handleMarkEvidenceSubmitted() {
+    setMarkingEvidenceSubmitted(true);
+    try {
+      const at = new Date().toISOString();
+      await saveCaseRecordFields(protest.id, { evidenceSubmittedConfirmedAt: at });
+      onUpdate({ evidenceSubmittedConfirmedAt: at });
+      toast.success("Evidence package marked as submitted.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save this.");
+    } finally {
+      setMarkingEvidenceSubmitted(false);
+    }
+  }
 
   const formType: FormType | null =
     editingForm === "protest"
@@ -1934,122 +2003,169 @@ export function DocumentsSection({
 
   return (
     <div id="case-documents" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Documents</h4>
+      <h4 className="text-sm font-semibold">Prepare &amp; File</h4>
       <p className="text-xs text-muted-foreground">
-        Official Texas Comptroller forms, pre-filled from this case. Review or edit every field
-        in-app, then download.
-      </p>
-      {!hasEvidence && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-          <p className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Tip (optional):</span> Upload whatever
-            evidence you already have first — AI can then suggest a stronger strategy and draft the
-            "facts to resolve protest" text for you. Not required — you can also fill out and file
-            the protest form directly below.
-          </p>
-          <button
-            onClick={goToModule8}
-            className="btn-outline shrink-0 whitespace-nowrap text-xs py-1.5"
-          >
-            Upload Evidence First →
-          </button>
-        </div>
-      )}
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button onClick={openProtestEditor} className="btn-accent text-xs py-1.5">
-          File Protest
-        </button>
-        <button
-          onClick={openAgentEditor}
-          disabled={authLoading || !authorization}
-          className="btn-outline text-xs py-1.5 disabled:opacity-60"
-          title={
-            !authLoading && !authorization
-              ? "No signed authorization on file for this case yet"
-              : undefined
-          }
-        >
-          Complete Agent Representation Form (Optional)
-        </button>
-        <button onClick={openEvidenceDeclarationEditor} className="btn-outline text-xs py-1.5">
-          Complete Evidence Declaration
-        </button>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        <span className="font-medium text-foreground">Optional.</span> Complete the Agent
-        Representation Form only if a tax agent or other authorized representative will represent
-        you. Complete the Evidence Declaration (Form 50-283, a sworn affidavit) only if you won't
-        appear in person at your ARB hearing — see Section 6 of your Notice of Protest.
+        A guided, step-by-step filing. Official Texas Comptroller forms, pre-filled from this case —
+        review or edit every field in-app, then sign and file.
       </p>
 
-      {/* Filing itself always happens on the county's own site or mailbox —
-          CorvusRF has no e-filing integration with any appraisal district
-          (none publish a public submission API), so this can only ever
-          prepare the real forms and point you at every real way this county
-          actually accepts one, never submit on your behalf. Shown plainly
-          here, every type at once, not buried in a collapsed panel or
-          collapsed down to a single "the" method. */}
-      <div className="mt-3 rounded-md border border-border p-3 text-sm">
-        <p className="font-medium">
-          How to actually file this — every way {property.cad ?? "your county"} accepts it
-        </p>
-        {countyInfo ? (
-          <>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {countyInfo.cad} is a separate system — CorvusRF prepares your real forms above, but
-              doesn't submit to any of these on your behalf.
-            </p>
-            <div className="mt-2 text-xs text-muted-foreground">
-              <FilingMethodsList countyInfo={countyInfo} />
-            </div>
-            {countyInfo.filingMethod.online && (
-              <a
-                href={countyInfo.filingMethod.online.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn-accent mt-2 inline-flex text-xs py-1.5"
+      <FilingStepBar
+        steps={filingSteps}
+        active={activeStep}
+        isDone={stepDone}
+        onSelect={setActiveStep}
+      />
+      <p className="mt-2 text-xs text-muted-foreground">{FILING_STEP_META[activeStep].blurb}</p>
+
+      {/* --- Step: File Protest --- */}
+      {activeStep === "file" && (
+        <div className="mt-3 grid gap-3">
+          {!hasEvidence && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Tip (optional):</span> Upload whatever
+                evidence you already have first — AI can then suggest a stronger strategy and draft
+                the "facts to resolve protest" text for you.
+              </p>
+              <button
+                onClick={goToModule8}
+                className="btn-outline shrink-0 whitespace-nowrap text-xs py-1.5"
               >
-                File Online at {countyInfo.cad} →
-              </a>
-            )}
-          </>
-        ) : (
-          <p className="mt-1 text-xs text-muted-foreground">
-            We don't have this county's confirmed filing methods on file yet — download your signed
-            Notice of Protest above and check {property.cad ?? "your appraisal district"}'s website
-            directly for the current address or any online option.
-          </p>
-        )}
-      </div>
+                Upload Evidence First →
+              </button>
+            </div>
+          )}
+          <div>
+            <button onClick={openProtestEditor} className="btn-accent text-xs py-1.5">
+              {noticeSignedAt ? "Review Notice of Protest" : "Open Notice of Protest (Form 50-132)"}
+            </button>
+          </div>
 
-      {noticeSignedAt && protest.status === "requested" && filingStep === "closed" && (
-        <div className="mt-3 rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-          <p>
-            You've signed your Notice of Protest — that only prepares the document. It isn't filed
-            with {property.cad ?? "your county"} until you actually deliver it (online, by mail, or
-            in person). Once you have, confirm it below.
-          </p>
-          <button onClick={handleMarkFiled} className="btn-accent mt-2 text-xs py-1.5">
-            Have you filed?
-          </button>
+          {/* Filing itself always happens on the county's own site or mailbox —
+              CorvusRF has no e-filing integration with any appraisal district
+              (none publish a public submission API), so this can only ever
+              prepare the real forms and point you at every real way this
+              county actually accepts one, never submit on your behalf. */}
+          <div className="rounded-md border border-border p-3 text-sm">
+            <p className="font-medium">
+              How to actually file this — every way {property.cad ?? "your county"} accepts it
+            </p>
+            {countyInfo ? (
+              <>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {countyInfo.cad} is a separate system — CorvusRF prepares your real forms above,
+                  but doesn't submit to any of these on your behalf.
+                </p>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  <FilingMethodsList countyInfo={countyInfo} />
+                </div>
+                {countyInfo.filingMethod.online && (
+                  <a
+                    href={countyInfo.filingMethod.online.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-accent mt-2 inline-flex text-xs py-1.5"
+                  >
+                    File Online at {countyInfo.cad} →
+                  </a>
+                )}
+              </>
+            ) : (
+              <p className="mt-1 text-xs text-muted-foreground">
+                We don't have this county's confirmed filing methods on file yet — download your
+                signed Notice of Protest above and check {property.cad ?? "your appraisal district"}
+                's website directly for the current address or any online option.
+              </p>
+            )}
+          </div>
+
+          {noticeSignedAt && protest.status === "requested" && filingStep === "closed" && (
+            <div className="rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
+              <p>
+                You've signed your Notice of Protest — that only prepares the document. It isn't
+                filed with {property.cad ?? "your county"} until you actually deliver it (online, by
+                mail, or in person). Once you have, confirm it below.
+              </p>
+              <button onClick={handleMarkFiled} className="btn-accent mt-2 text-xs py-1.5">
+                Have you filed?
+              </button>
+            </div>
+          )}
+
+          {noticeSignedAt && protest.status === "requested" && filingStep !== "closed" && (
+            <FilingConfirmationFlow
+              step={filingStep}
+              countyInfo={countyInfo}
+              proofDocs={filingProofDocs}
+              uploadingProof={uploadingProof}
+              onUploadProof={handleUploadProof}
+              proofCheck={proofCheck}
+              checkingProof={checkingProof}
+              proofCheckError={proofCheckError}
+              onRecheck={() => handleCheckProof()}
+              markingFiled={markingFiled}
+              onNotYet={handleNotYetFiled}
+              onConfirmIntent={handleConfirmIntentToFile}
+              onConfirmFiled={handleConfirmFiled}
+            />
+          )}
         </div>
       )}
 
-      {noticeSignedAt && protest.status === "requested" && filingStep !== "closed" && (
-        <FilingConfirmationFlow
-          step={filingStep}
-          countyInfo={countyInfo}
-          proofDocs={filingProofDocs}
-          uploadingProof={uploadingProof}
-          onUploadProof={handleUploadProof}
-          proofCheck={proofCheck}
-          checkingProof={checkingProof}
-          proofCheckError={proofCheckError}
-          onRecheck={() => handleCheckProof()}
-          markingFiled={markingFiled}
-          onNotYet={handleNotYetFiled}
-          onConfirmIntent={handleConfirmIntentToFile}
-          onConfirmFiled={handleConfirmFiled}
+      {/* --- Step: Agent / Representative --- */}
+      {activeStep === "agent" && (
+        <div className="mt-3 grid gap-2">
+          <div>
+            <button
+              onClick={openAgentEditor}
+              disabled={authLoading || !authorization}
+              className="btn-accent text-xs py-1.5 disabled:opacity-60"
+              title={
+                !authLoading && !authorization
+                  ? "Autofill needs a signed authorization on file for this case"
+                  : undefined
+              }
+            >
+              {agentFormSignedAt
+                ? "Review Appointment of Agent"
+                : "Open Appointment of Agent (Form 50-162)"}
+            </button>
+          </div>
+          {!authLoading && !authorization && (
+            <p className="text-xs text-muted-foreground">
+              A signed authorization must be on file before this form can be pre-filled.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* --- Step: Evidence Affidavit / Declaration --- */}
+      {activeStep === "affidavit" && (
+        <div className="mt-3 grid gap-2">
+          <div>
+            <button onClick={openEvidenceDeclarationEditor} className="btn-accent text-xs py-1.5">
+              {evidenceDeclarationSignedAt
+                ? "Review Affidavit of Evidence"
+                : "Open Affidavit of Evidence (Form 50-283)"}
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Form 50-283 is a sworn affidavit — after you sign it in-app, it must be notarized before
+            it's delivered to the ARB.
+          </p>
+        </div>
+      )}
+
+      {/* --- Step: Evidence --- */}
+      {activeStep === "evidence" && (
+        <FilingEvidenceStep
+          evidenceDocuments={evidenceDocuments}
+          strategyRecommendation={strategyRecommendation}
+          submittedAt={protest.evidenceSubmittedConfirmedAt ?? null}
+          allowSubmit={allowSigning}
+          marking={markingEvidenceSubmitted}
+          onGoToModule8={goToModule8}
+          onMarkSubmitted={handleMarkEvidenceSubmitted}
         />
       )}
 
@@ -2117,6 +2233,155 @@ export function DocumentsSection({
           onGenerateReason={handleGenerateReason}
         />
       )}
+    </div>
+  );
+}
+
+// The filing workflow's step indicator — the 2–4 active steps as
+// "1 File Protest → 2 Agent → …", each marked done / current / upcoming. The
+// user always sees where they are; a step is clickable once it's in the set
+// (upcoming steps are shown but reading-only until the prior work is done —
+// enforced by the panels themselves, not disabled here, so the user can look
+// ahead).
+function FilingStepBar({
+  steps,
+  active,
+  isDone,
+  onSelect,
+}: {
+  steps: FilingStepId[];
+  active: FilingStepId;
+  isDone: (id: FilingStepId) => boolean;
+  onSelect: (id: FilingStepId) => void;
+}) {
+  return (
+    <ol className="mt-3 flex flex-wrap items-center gap-x-1 gap-y-1 text-xs">
+      {steps.map((id, i) => {
+        const done = isDone(id);
+        const here = id === active;
+        return (
+          <li key={id} className="flex items-center gap-1">
+            {i > 0 && <span className="text-muted-foreground/40">→</span>}
+            <button
+              type="button"
+              onClick={() => onSelect(id)}
+              aria-current={here ? "step" : undefined}
+              className={`rounded-full px-2.5 py-1 font-medium ${
+                here
+                  ? "bg-accent/15 text-accent"
+                  : done
+                    ? "text-success hover:bg-secondary"
+                    : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+              }`}
+            >
+              <span className="tabular-nums">{done ? "✓" : i + 1}</span>{" "}
+              {FILING_STEP_META[id].label}
+            </button>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+// The workflow's Evidence step: the case's real evidence at a glance, what's
+// still critically missing, a way to go add more (Module 8), and a record that
+// the package was submitted to the county. Uses the "Protest Evidence"-tagged
+// documents already loaded for this case — never a separate list.
+function FilingEvidenceStep({
+  evidenceDocuments,
+  strategyRecommendation,
+  submittedAt,
+  allowSubmit,
+  marking,
+  onGoToModule8,
+  onMarkSubmitted,
+}: {
+  evidenceDocuments: DocumentRecord[];
+  strategyRecommendation: string | null;
+  submittedAt: string | null;
+  allowSubmit: boolean;
+  marking: boolean;
+  onGoToModule8: () => void;
+  onMarkSubmitted: () => void;
+}) {
+  const withIssues = evidenceDocuments.filter(
+    (d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid",
+  );
+  return (
+    <div className="mt-3 grid gap-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">
+          {evidenceDocuments.length} evidence document{evidenceDocuments.length === 1 ? "" : "s"} on
+          this case
+          {withIssues.length > 0 && ` · ${withIssues.length} flagged by AI review`}
+        </span>
+        <button onClick={onGoToModule8} className="btn-outline shrink-0 text-xs py-1.5">
+          Add / organize evidence in Module 8 →
+        </button>
+      </div>
+
+      {evidenceDocuments.length === 0 ? (
+        <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
+          No evidence has been uploaded for this case yet. Module 8 finds and verifies what it can
+          from public records, then flags only the critical evidence you need to provide.
+        </div>
+      ) : (
+        <ul className="grid gap-1">
+          {evidenceDocuments.slice(0, 12).map((d) => {
+            const v = verdictMeta(d.aiVerdict);
+            return (
+              <li
+                key={d.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-1.5 text-xs"
+              >
+                <span className="truncate">{d.fileName}</span>
+                <span
+                  className={`shrink-0 font-semibold ${
+                    v.tone === "success"
+                      ? "text-success"
+                      : v.tone === "warning"
+                        ? "text-warning-foreground"
+                        : "text-destructive"
+                  }`}
+                >
+                  {d.aiCheckedAt ? v.label : "Not checked"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {strategyRecommendation && (
+        <p className="text-xs text-muted-foreground">
+          Organize the package around your protest strategy: {strategyRecommendation}
+        </p>
+      )}
+
+      <div className="rounded-md border border-border p-3">
+        {submittedAt ? (
+          <p className="text-xs text-success">
+            ✓ Evidence package marked as submitted on {new Date(submittedAt).toLocaleDateString()}.
+          </p>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Once you've delivered your evidence package to the county (with your affidavit, if you
+              won't appear in person), record it here.
+            </p>
+            {allowSubmit && (
+              <button
+                onClick={onMarkSubmitted}
+                disabled={marking}
+                className="btn-accent mt-2 text-xs py-1.5 disabled:opacity-60"
+              >
+                {marking ? "Saving…" : "Mark evidence package submitted"}
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
