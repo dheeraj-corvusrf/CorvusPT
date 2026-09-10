@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { haversineMiles, similarityScore, computeComparableStats } from "./comps-analysis";
+import {
+  haversineMiles,
+  similarityScore,
+  similarityBreakdown,
+  computeComparableStats,
+} from "./comps-analysis";
 import type { CompProperty } from "./cad-comps";
 
 function comp(overrides: Partial<CompProperty>): CompProperty {
@@ -53,6 +58,32 @@ describe("similarityScore", () => {
     // Value/distance/type all match; only land size is missing (neutral 50) —
     // should still score reasonably high, not collapse toward 0.
     expect(score).toBeGreaterThan(70);
+  });
+
+  it("down-weights a stale dated sale via the recency multiplier", () => {
+    const fresh = comp({ pid: 5, marketValue: 400000, legalAcreage: 0.25, propType: "C" });
+    const stale = comp({
+      pid: 6,
+      marketValue: 400000,
+      legalAcreage: 0.25,
+      propType: "C",
+      lastTransferDt: "2016-01-01",
+    });
+    expect(similarityScore(subject, stale)).toBeLessThan(similarityScore(subject, fresh));
+    expect(similarityBreakdown(subject, stale).recencyMult).toBeLessThan(0.9);
+    expect(similarityBreakdown(subject, fresh).recencyMult).toBe(1);
+  });
+
+  it("bumps a verified sale and penalizes an unverified typed price", () => {
+    // A near — but not perfect — comp, so the base score isn't already
+    // capped at 100 and the ±reliability adjustment is visible.
+    const near = comp({ pid: 7, marketValue: 430000, legalAcreage: 0.3, propType: "C" });
+    const neutral = similarityScore(subject, near);
+    const verified = similarityScore(subject, near, { verified: true });
+    const unverified = similarityScore(subject, near, { userAdded: true, verified: false });
+    expect(neutral).toBeLessThan(100);
+    expect(verified).toBeGreaterThan(neutral);
+    expect(unverified).toBeLessThan(neutral);
   });
 });
 
@@ -117,6 +148,53 @@ describe("computeComparableStats", () => {
     // still present in ranked, marked excluded, and out of `usable`-driven math
     const excludedRow = withoutOutlier.ranked.find((r) => r.key === "5");
     expect(excludedRow?.excluded).toBe(true);
+  });
+
+  it("flags a CAD comp as 'Not a market sale', a type mismatch, and a stale transfer", () => {
+    const s = comp({ pid: 1, marketValue: 500000, legalAcreage: 0.3, propType: "C" });
+    const stats = computeComparableStats(
+      s,
+      [
+        comp({ pid: 2, marketValue: 490000, legalAcreage: 0.3, propType: "C" }),
+        comp({
+          pid: 3,
+          marketValue: 480000,
+          legalAcreage: 0.3,
+          propType: "R",
+          lastTransferDt: "2015-06-01",
+        }),
+        comp({ pid: 4, marketValue: 470000, legalAcreage: 0.3, propType: "C" }),
+      ],
+      500000,
+    );
+    const c3 = stats.ranked.find((r) => r.key === "3")!;
+    expect(c3.flags).toContain("Not a market sale");
+    expect(c3.flags).toContain("Type mismatch");
+    expect(c3.flags).toContain("Stale");
+    const c2 = stats.ranked.find((r) => r.key === "2")!;
+    expect(c2.flags).toContain("Not a market sale");
+    expect(c2.flags).not.toContain("Type mismatch");
+  });
+
+  it("normalizes comps to $/acre and reconciles a similarity-weighted adjusted value", () => {
+    const s = comp({ pid: 1, marketValue: 500000, legalAcreage: 0.3 });
+    const stats = computeComparableStats(
+      s,
+      [
+        comp({ pid: 2, marketValue: 480000, legalAcreage: 0.24 }), // $2.0M/acre
+        comp({ pid: 3, marketValue: 470000, legalAcreage: 0.235 }),
+        comp({ pid: 4, marketValue: 460000, legalAcreage: 0.23 }),
+      ],
+      500000,
+    );
+    expect(stats.perCompAdjustment.every((a) => a.unitBasis === "acre")).toBe(true);
+    // ~$2.0M/acre × 0.3 acre ≈ $600k per comp
+    expect(stats.perCompAdjustment[0].sizeAdjValue).toBeGreaterThan(580000);
+    expect(stats.perCompAdjustment[0].timeAdjPct).toBe(0); // CAD comps get no time adjustment
+    expect(stats.adjustedIndicated).not.toBeNull();
+    expect(stats.adjustedIndicated!.value).toBeGreaterThan(560000);
+    // subject 500k is now BELOW the size-adjusted indicated ≈ 600k → negative gap
+    expect(stats.valuationGapPct).toBeLessThan(0);
   });
 
   it("merges a user-added comp into the pool and ranks it", () => {

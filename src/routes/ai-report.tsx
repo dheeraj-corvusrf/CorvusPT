@@ -278,6 +278,23 @@ function buildValueTrend(valueHistory: IntakeState["valueHistory"]) {
   return { jumpTriggered: trend.jumpTriggered, jumpPct: trend.jumpPct };
 }
 
+// The subject's own year-over-year assessed-value CAGR as a whole-number
+// percent, from its CAD value history — the basis for Module 3's time
+// adjustment. null when there isn't a ≥2-year span of real values.
+function subjectValueTrendPctPerYear(valueHistory: IntakeState["valueHistory"]): number | null {
+  const h = (valueHistory ?? [])
+    .map((x) => ({ year: x.year, value: x.appraisedValue ?? x.marketValue ?? null }))
+    .filter((x): x is { year: number; value: number } => x.value != null && x.value > 0)
+    .sort((a, b) => a.year - b.year);
+  if (h.length < 2) return null;
+  const first = h[0];
+  const last = h[h.length - 1];
+  const years = last.year - first.year;
+  if (years <= 0) return null;
+  const cagr = Math.pow(last.value / first.value, 1 / years) - 1;
+  return Math.max(-15, Math.min(15, Math.round(cagr * 100)));
+}
+
 function Report() {
   const nav = useNavigate();
   const { user } = useAuth();
@@ -1574,6 +1591,7 @@ function Report() {
       // the strongest 3-5 and judge each one against the real numbers.
       if (id === "comps") {
         input.compsSummary = buildCompsSummary(compsMap.data);
+        input.subjectTrendPctPerYear = subjectValueTrendPctPerYear(state.valueHistory);
         const stats = computeComparableStats(
           compsMap.data?.subject ?? null,
           compsMap.data?.comps ?? [],
@@ -1581,6 +1599,7 @@ function Report() {
           {
             excludedKeys: excludedCompKeys(compSelections),
             extraComps: compSelectionsToExtraComps(compSelections),
+            subjectTrendPctPerYear: input.subjectTrendPctPerYear,
           },
         );
         if (stats.ranked.length > 0) {
@@ -1593,6 +1612,7 @@ function Report() {
             excluded: c.excluded,
             userAdded: c.userAdded,
             saleVerified: c.saleVerified ?? undefined,
+            flags: c.flags.length > 0 ? c.flags : undefined,
           }));
         }
         input.compsSubjectValue = stats.subjectValue;
@@ -2753,6 +2773,7 @@ function Report() {
                 compsMap={compsMap}
                 siteGisMap={siteGisMap}
                 siteCoords={siteCoords}
+                siteCoordsSettled={siteCoordsSettled}
                 onRetry={() => {}}
                 allowEvidenceUpload={false}
                 evidenceDocs={evidenceDocs}
@@ -2838,6 +2859,7 @@ function Report() {
             compsMap={compsMap}
             siteGisMap={siteGisMap}
             siteCoords={siteCoords}
+            siteCoordsSettled={siteCoordsSettled}
             onRetry={() => loadModule(openModel.id)}
             allowEvidenceUpload
             evidenceDocs={evidenceDocs}
@@ -4215,6 +4237,76 @@ function ComparableValueChart({
   );
 }
 
+// The appraisal-style normalization behind the size-adjusted indicated
+// value — each top comp reduced to $/acre (or $/SF), restated at the
+// subject's own size, then time-adjusted only if it has a real dated sale
+// (see computeComparableStats). All deterministic, never AI-written.
+function CompsAdjustmentGrid({
+  perCompAdjustment,
+  ranked,
+  adjustedIndicated,
+}: {
+  perCompAdjustment: ComparableStats["perCompAdjustment"];
+  ranked: RankedComp[];
+  adjustedIndicated: ComparableStats["adjustedIndicated"];
+}) {
+  if (!adjustedIndicated || perCompAdjustment.length === 0) return null;
+  const addrOf = (key: string) => {
+    const c = ranked.find((r) => r.key === key);
+    return c?.address || `Property #${c?.pid ?? "?"}`;
+  };
+  const unitLabel = (b: "acre" | "sqft" | "raw") =>
+    b === "acre" ? "$/acre" : b === "sqft" ? "$/SF" : "raw";
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Size &amp; Time Adjustments → Indicated Value
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full min-w-[560px] text-left text-xs">
+          <thead className="bg-secondary/60 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 font-semibold">Comp</th>
+              <th className="px-3 py-2 font-semibold">Basis</th>
+              <th className="px-3 py-2 font-semibold">$ / Unit</th>
+              <th className="px-3 py-2 font-semibold">Size-Adjusted</th>
+              <th className="px-3 py-2 font-semibold">Time Adj.</th>
+              <th className="px-3 py-2 font-semibold">Adjusted Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perCompAdjustment.map((a) => (
+              <tr key={a.key} className="border-t border-border/60">
+                <td className="px-3 py-2 text-muted-foreground">{addrOf(a.key)}</td>
+                <td className="px-3 py-2 text-muted-foreground">{unitLabel(a.unitBasis)}</td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {a.unitBasis === "raw" ? "—" : compactCurrency(a.unitRate)}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {compactCurrency(a.sizeAdjValue)}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {a.timeAdjPct === 0 ? "—" : `${a.timeAdjPct > 0 ? "+" : ""}${a.timeAdjPct}%`}
+                </td>
+                <td className="px-3 py-2 font-semibold">{compactCurrency(a.adjustedValue)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Similarity-weighted reconciliation:{" "}
+        <span className="font-semibold text-foreground">
+          {compactCurrency(adjustedIndicated.value)}
+        </span>{" "}
+        ({compactCurrency(adjustedIndicated.min)}–{compactCurrency(adjustedIndicated.max)}). Time
+        adjustments apply only to comps with a real dated sale — a CAD deed date isn&apos;t a
+        verified sale.
+      </p>
+    </div>
+  );
+}
+
 // Real, deterministic explanation of the confidence score — the same two
 // inputs computeComparableStats() itself blends (usable comp count, value
 // spread), phrased in a sentence — never AI-written, matching the
@@ -4268,7 +4360,22 @@ function valuePerAcre(marketValue?: number | null, acreage?: number | null): num
 // printable report) each row gets a Keep checkbox and the AI's per-comp
 // verdict; excluded comps render struck through and are already out of the
 // value math (computeComparableStats drops them).
-type PerCompVerdict = { key: string; verdict: "use" | "exclude"; reason: string };
+type PerCompVerdict = {
+  key: string;
+  verdict: "use" | "exclude";
+  reason: string;
+  flags?: string[];
+};
+
+// Deterministic flags read as "less reliable"; the informational ones
+// ("Not a market sale" is true of every CAD comp) get a quieter style.
+const COMP_FLAG_TONE: Record<string, string> = {
+  Stale: "bg-warning/20 text-warning-foreground",
+  Distant: "bg-warning/20 text-warning-foreground",
+  "Size mismatch": "bg-warning/20 text-warning-foreground",
+  "Type mismatch": "bg-warning/20 text-warning-foreground",
+  "Unverified price": "bg-destructive/15 text-destructive",
+};
 function ComparableTable({
   ranked,
   cad,
@@ -4336,6 +4443,24 @@ function ComparableTable({
                         Added by you
                       </span>
                     )}
+                    {(() => {
+                      const all = [...new Set([...(c.flags ?? []), ...(pc?.flags ?? [])])];
+                      if (all.length === 0) return null;
+                      return (
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          {all.map((f) => (
+                            <span
+                              key={f}
+                              className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[8px] font-semibold no-underline ${
+                                COMP_FLAG_TONE[f] ?? "bg-secondary text-muted-foreground"
+                              }`}
+                            >
+                              {f}
+                            </span>
+                          ))}
+                        </span>
+                      );
+                    })()}
                   </td>
                   {showAi && (
                     <td className="px-3 py-2">
@@ -8519,6 +8644,7 @@ function ModulePreviewContent({
   compsMap,
   siteGisMap,
   siteCoords,
+  siteCoordsSettled,
   onRetry,
   allowEvidenceUpload,
   evidenceDocs,
@@ -8569,6 +8695,9 @@ function ModulePreviewContent({
   compsMap: { data: CompsResult | null; loading: boolean };
   siteGisMap: { data: SiteGisResult | null; loading: boolean };
   siteCoords: GeocodedPoint | null;
+  // True once the CAD-subject / geocode resolution has finished — lets the
+  // comps map tell "still locating" apart from "couldn't locate".
+  siteCoordsSettled: boolean;
   onRetry: () => void;
   allowEvidenceUpload: boolean;
   evidenceDocs: DocumentRecord[];
@@ -8842,6 +8971,11 @@ function ModulePreviewContent({
       if (exclude) onSaveCompSelection({ compKey: comp.key, action: "exclude" });
       else onRemoveCompSelection(comp.key);
     }
+    const verifiedSaleCount = mapComps.filter((c) => c.kind === "sale-verified").length;
+    // No located subject yet, but there's an address and the CAD-subject /
+    // geocode resolution hasn't finished — show "locating", not "couldn't".
+    const locating = !mapSubject && !!(state.address || "").trim() && !siteCoordsSettled;
+
     return (
       <div className="mt-4 grid gap-4">
         <CompsWorkflowRibbon
@@ -8851,27 +8985,51 @@ function ModulePreviewContent({
           hasRecommendation={!!d?.protestRecommendation}
         />
 
+        {/* Map first — the visual centerpiece of Module 3: every located
+            comp plotted against the subject, sale data distinguished from
+            assessed-value comps by colour. Shown for every county; when the
+            county publishes no comp feed it's still the subject on the map
+            with an invitation to add a real sale. */}
+        <div>
+          <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-3">
+            <div className="text-sm font-medium">Comparable Sales — Located vs. Your Property</div>
+            <div className="text-[11px] text-muted-foreground">
+              {hasAnyComp
+                ? `${mapComps.length} located` +
+                  (verifiedSaleCount > 0
+                    ? ` · ${verifiedSaleCount} verified sale${verifiedSaleCount === 1 ? "" : "s"}`
+                    : "")
+                : "subject only"}
+            </div>
+          </div>
+          {compsMap.loading || locating ? (
+            <div className="grid h-[280px] place-items-center rounded-lg border border-border bg-secondary/40 text-xs text-muted-foreground">
+              Locating this property…
+            </div>
+          ) : mapSubject ? (
+            <>
+              <CompsMap subject={mapSubject} comps={mapComps} />
+              {!hasAnyComp && (
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  No comparable sales are published in {state.cad ?? "this county"}&apos;s public
+                  data. Texas doesn&apos;t disclose sale prices — add a real sale from a closing
+                  statement below and it&apos;ll appear on the map, distinguished from
+                  assessed-value comps.
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="grid h-[200px] place-items-center rounded-lg border border-border bg-secondary/40 text-xs text-muted-foreground">
+              Couldn&apos;t locate this property on the map — check the address.
+            </div>
+          )}
+        </div>
+
         {stats.limitedData && (
           <div className="rounded-lg bg-warning/15 p-3 text-sm text-warning-foreground">
             <span className="font-semibold">Limited Comparable Sales Data.</span> Fewer than 3
             reliable recent commercial sales were found. The system may use alternative market
             evidence, but will clearly distinguish it from actual sale data.
-          </div>
-        )}
-        {compsMap.loading && (
-          <div className="h-[280px] animate-pulse rounded-lg border border-border bg-secondary/40" />
-        )}
-
-        {/* Map — every county, not just the 4 with a comps feed. Shows the
-            subject's own point even when no comps have been located yet. */}
-        {mapSubject && (
-          <div>
-            <div className="mb-1.5 text-sm font-medium">
-              {hasAnyComp
-                ? `${mapComps.length} comparable${mapComps.length === 1 ? "" : "s"} located near this property`
-                : "No comparable sales located yet"}
-            </div>
-            <CompsMap subject={mapSubject} comps={mapComps} />
           </div>
         )}
 
@@ -8905,7 +9063,7 @@ function ModulePreviewContent({
               </p>
             )}
 
-            {/* 4. Adjustments — real per-signal deltas for the top comps
+            {/* 4a. Adjustments — real per-signal deltas for the top comps
                 (CAD-record signals, so gated on a real CAD subject). */}
             {map?.subject && topRanked.length > 0 && (
               <div>
@@ -8915,6 +9073,13 @@ function ModulePreviewContent({
                 <ComparableAdjustments subject={map.subject} comps={topRanked} />
               </div>
             )}
+
+            {/* 4b. Size + time normalization → reconciled indicated value. */}
+            <CompsAdjustmentGrid
+              perCompAdjustment={stats.perCompAdjustment}
+              ranked={topRanked}
+              adjustedIndicated={stats.adjustedIndicated}
+            />
 
             {/* 5. Value comparison chart. */}
             {(stats.subjectValue != null || topRanked.length > 0) && (
@@ -8930,15 +9095,21 @@ function ModulePreviewContent({
               </div>
             )}
 
-            {/* 6. Indicated Value / CAD Value / Gap. */}
+            {/* 6. Indicated Value / CAD Value / Gap. Prefers the size-
+                adjusted reconciliation when there were enough size-bearing
+                comps to adjust; otherwise the raw top-5 range. */}
             {stats.indicated && (
               <div className="grid grid-cols-3 gap-2">
                 <div className="rounded-lg bg-success/10 p-3">
                   <div className="text-[10px] font-semibold uppercase tracking-wide text-success">
-                    Indicated Value Range
+                    {stats.adjustedIndicated
+                      ? "Indicated Value (adjusted)"
+                      : "Indicated Value Range"}
                   </div>
                   <div className="mt-0.5 text-lg font-bold text-success">
-                    {compactCurrency(stats.indicated.min)}–{compactCurrency(stats.indicated.max)}
+                    {stats.adjustedIndicated
+                      ? `${compactCurrency(stats.adjustedIndicated.min)}–${compactCurrency(stats.adjustedIndicated.max)}`
+                      : `${compactCurrency(stats.indicated.min)}–${compactCurrency(stats.indicated.max)}`}
                   </div>
                 </div>
                 {stats.subjectValue != null && (
@@ -8985,17 +9156,21 @@ function ModulePreviewContent({
                 <div className="text-xs font-semibold text-foreground">Methodology</div>
                 <FactBullet icon={Building2}>Same CAD subdivision as this property</FactBullet>
                 <FactBullet icon={Percent}>
-                  0–100 similarity: value, distance, land size, type
+                  0–100 similarity: value, distance, size, use, recency, source reliability
                 </FactBullet>
-                <FactBullet icon={Target}>Indicated range uses the top 5 by similarity</FactBullet>
+                <FactBullet icon={Target}>
+                  Top 5 normalized to $/acre (or $/SF), size + time adjusted, then reconciled
+                </FactBullet>
               </div>
               <div className="grid gap-1.5">
                 <div className="text-xs font-semibold text-foreground">Sources</div>
                 <FactBullet icon={FileText}>
-                  {state.cad ?? "County appraisal district"} public records
+                  {state.cad ?? "County appraisal district"} assessed-value records + any closing
+                  documents you upload
                 </FactBullet>
                 <FactBullet icon={ShieldCheck}>
-                  No sale prices — Texas law; deed dates only
+                  Texas doesn&apos;t disclose sale prices — a verified price shows only for a comp
+                  backed by a document. ATTOM / LightBox / MLS are not connected.
                 </FactBullet>
               </div>
             </div>

@@ -14,6 +14,8 @@ import {
   TrendingDown,
   Loader2,
   Mic,
+  Volume2,
+  VolumeX,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -43,11 +45,15 @@ import { listDocuments, type DocumentRecord } from "@/lib/documents";
 import { listProtests, type ProtestRecord, type ProtestStatus } from "@/lib/protests";
 import { getPropertyProtestStatus } from "@/lib/portfolio-status";
 import { askRouter } from "@/lib/ask-router";
+import { askAboutDocument } from "@/lib/document-ai";
+import { buildUserContext } from "@/lib/ai-context";
 import { getDeadlineNudge } from "@/lib/deadline-nudge";
 import { getHearingNudge } from "@/lib/hearing-nudge";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { useSpeechInput } from "@/hooks/use-speech-input";
+import { useSpeechOutput } from "@/hooks/use-speech-output";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import { ICON_COLORS } from "@/lib/icon-colors";
 
 export const Route = createFileRoute("/dashboard/_layout/")({
@@ -78,9 +84,25 @@ function Overview() {
   const [uploading, setUploading] = useState(false);
   const [askQuery, setAskQuery] = useState("");
   const [asking, setAsking] = useState(false);
-  // Voice input for the "Ask AI" quick action — fills the box as you speak;
-  // you still hit Enter. Same on-device Web Speech hook as the Ask AI widget.
-  const askSpeech = useSpeechInput(setAskQuery);
+  // The last question + its answer, shown as a small conversation panel
+  // under Quick Actions (markdown-rendered — not a raw-text toast).
+  const [askAnswer, setAskAnswer] = useState<{ q: string; a: string; dest: string | null } | null>(
+    null,
+  );
+  // Read the AI's reply aloud — when the toggle is on, or when the question
+  // was just asked by voice (a spoken question gets a spoken answer).
+  const askTts = useSpeechOutput();
+  const askedByVoice = useRef(false);
+  // Voice input for the "Ask AI" quick action. Fills the box as you speak,
+  // then auto-submits when you stop talking so a spoken question is fully
+  // hands-free.
+  const askSpeech = useSpeechInput(setAskQuery, {
+    onFinal: (text) => {
+      askedByVoice.current = true;
+      setAskQuery(text);
+      void runAsk(text);
+    },
+  });
   const [nudge, setNudge] = useState<string | null>(null);
   const nudgedPropertyId = useRef<string | null>(null);
   const [hearingNudge, setHearingNudge] = useState<string | null>(null);
@@ -249,18 +271,44 @@ function Overview() {
     uploading,
   );
 
-  async function submitAsk(e: React.FormEvent) {
-    e.preventDefault();
-    if (!askQuery.trim()) return;
+  async function runAsk(text: string) {
+    const q = text.trim();
+    if (!q || asking) return;
     setAsking(true);
     try {
-      const result = await askRouter(askQuery.trim());
-      nav({ to: result.destination });
+      // Actually answer the question with the user's own data (same engine
+      // as the Ask AI widget) — not the guest route-classifier, which would
+      // send a signed-in dashboard user to /sign-in. route-intent still runs
+      // in parallel, but only as a "continue to…" hint when it lands on a
+      // real in-app page.
+      const context = user ? await buildUserContext(user.id).catch(() => "") : "";
+      const [ansRes, routeRes] = await Promise.allSettled([
+        askAboutDocument({ question: q, context: context || undefined, conversational: true }),
+        askRouter(q),
+      ]);
+      const answer =
+        ansRes.status === "fulfilled"
+          ? ansRes.value.answer
+          : "Sorry — I couldn't answer that. Please try again.";
+      const dest =
+        routeRes.status === "fulfilled" &&
+        /^\/(dashboard|ai-report)(\/|$)/.test(routeRes.value.destination)
+          ? routeRes.value.destination
+          : null;
+      setAskAnswer({ q, a: answer, dest });
+      if (askTts.enabled || askedByVoice.current) askTts.speak(answer);
+      setAskQuery("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not process that. Please try again.");
     } finally {
       setAsking(false);
+      askedByVoice.current = false;
     }
+  }
+
+  function submitAsk(e: React.FormEvent) {
+    e.preventDefault();
+    void runAsk(askQuery);
   }
 
   const firstName = user?.user_metadata?.first_name as string | undefined;
@@ -396,15 +444,36 @@ function Overview() {
             </span>
             <input
               value={askQuery}
-              onChange={(e) => setAskQuery(e.target.value)}
+              onChange={(e) => {
+                setAskQuery(e.target.value);
+                askedByVoice.current = false;
+              }}
               placeholder={askSpeech.listening ? "Listening…" : "Ask AI…"}
               disabled={asking}
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            {askTts.supported && (
+              <button
+                type="button"
+                onClick={() => askTts.setEnabled(!(askTts.enabled || askTts.speaking))}
+                aria-label={askTts.enabled ? "Turn off read-aloud" : "Read answers aloud"}
+                title={askTts.enabled ? "Read-aloud on" : "Read answers aloud"}
+                className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border transition-colors ${
+                  askTts.enabled
+                    ? "bg-accent/10 text-accent"
+                    : "text-muted-foreground hover:text-foreground"
+                } ${askTts.speaking ? "animate-pulse" : ""}`}
+              >
+                {askTts.enabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+              </button>
+            )}
             {askSpeech.supported && (
               <button
                 type="button"
-                onClick={askSpeech.toggle}
+                onClick={() => {
+                  if (!askSpeech.listening) askedByVoice.current = true;
+                  askSpeech.toggle();
+                }}
                 disabled={asking}
                 aria-label={askSpeech.listening ? "Stop listening" : "Speak your question"}
                 title={askSpeech.listening ? "Stop listening" : "Speak your question"}
@@ -419,6 +488,43 @@ function Overview() {
             )}
           </form>
         </div>
+
+        {(asking || askAnswer) && (
+          <div className="card-elev mt-3 p-4">
+            {askAnswer && (
+              <div className="ml-auto mb-2 w-fit max-w-[85%] rounded-2xl rounded-br-sm bg-accent px-3 py-1.5 text-sm text-accent-foreground">
+                {askAnswer.q}
+              </div>
+            )}
+            <div className="mr-auto max-w-[92%] rounded-2xl rounded-bl-sm bg-secondary/50 px-3 py-2 text-sm">
+              {asking ? (
+                <span className="text-muted-foreground">Thinking…</span>
+              ) : askAnswer ? (
+                <>
+                  <MarkdownLite text={askAnswer.a} />
+                  {askAnswer.dest && (
+                    <button
+                      type="button"
+                      onClick={() => nav({ to: askAnswer.dest as string })}
+                      className="btn-primary btn-primary-hover mt-2 inline-flex text-xs py-1.5"
+                    >
+                      Open
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
+            {askAnswer && !asking && (
+              <button
+                type="button"
+                onClick={() => setAskAnswer(null)}
+                className="mt-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stats */}

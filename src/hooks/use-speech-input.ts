@@ -35,14 +35,27 @@ function getRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-export function useSpeechInput(onTranscript: (text: string) => void) {
+// onFinal (optional) fires once, when the user stops speaking and
+// recognition ends, with the full recognized text — for a hands-free
+// "speak the question, get the answer" flow where the caller submits
+// automatically instead of waiting for Enter. Not fired when the user
+// cancelled the mic themselves (toggle/stop) or nothing was heard.
+export function useSpeechInput(
+  onTranscript: (text: string) => void,
+  opts?: { onFinal?: (text: string) => void },
+) {
   const [supported] = useState(() => !!getRecognitionCtor());
   const [listening, setListening] = useState(false);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const cbRef = useRef(onTranscript);
   cbRef.current = onTranscript;
+  const finalCbRef = useRef(opts?.onFinal);
+  finalCbRef.current = opts?.onFinal;
+  const lastTextRef = useRef("");
+  const cancelledRef = useRef(false);
 
   const stop = useCallback(() => {
+    cancelledRef.current = true;
     recRef.current?.stop();
   }, []);
 
@@ -55,13 +68,20 @@ export function useSpeechInput(onTranscript: (text: string) => void) {
     rec.lang = "en-US";
     rec.interimResults = true;
     rec.continuous = false;
+    lastTextRef.current = "";
+    cancelledRef.current = false;
     rec.onresult = (e) => {
       let text = "";
       for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+      lastTextRef.current = text;
       cbRef.current(text);
     };
     rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
+    rec.onend = () => {
+      setListening(false);
+      const text = lastTextRef.current.trim();
+      if (!cancelledRef.current && text) finalCbRef.current?.(text);
+    };
     recRef.current = rec;
     setListening(true);
     try {

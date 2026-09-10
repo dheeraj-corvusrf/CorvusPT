@@ -15,7 +15,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { question, context } = await req.json();
+    const { question, context, conversational } = await req.json();
     if (!question) {
       return new Response(JSON.stringify({ error: "question is required" }), {
         status: 400,
@@ -26,11 +26,17 @@ Deno.serve(async (req: Request) => {
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
+    // conversational: the answer is going to be spoken aloud and shown in a
+    // chat bubble — reply the way a person talks, not as a bulleted report.
+    const styleRule = conversational
+      ? `FORMAT — your answer is read aloud and shown in a chat bubble:\n- Reply in 1-4 short, natural sentences, the way you'd say it out loud to the person. Lead with the direct answer.\n- NO bullet points, NO tables, NO markdown symbols (*, #, |, backticks), NO headings, NO numbered lists.\n- When you'd otherwise list several items, say them in a flowing sentence ("You have four properties: the one on Warren Pkwy, ..."). Round long figures for speech ("about 4.2 million dollars").\n- Warm and plain, like a knowledgeable friend — never robotic, never a data dump.`
+      : BULLET_STYLE;
+
     const body = {
       systemInstruction: {
         parts: [
           {
-            text: `You are CorvusPT's Texas property tax assistant. Answer accurately and concisely. If unsure, say so. Do not invent numbers.\n\n${PROSE_STYLE}\n\n${BULLET_STYLE}`,
+            text: `You are CorvusPT's Texas property tax assistant. Answer accurately and concisely. If unsure, say so. Do not invent numbers.\n\n${PROSE_STYLE}\n\n${styleRule}`,
           },
         ],
       },

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Sparkles, X, Send, Mic } from "lucide-react";
+import { Sparkles, X, Send, Mic, Volume2, VolumeX } from "lucide-react";
 import { askRouter } from "@/lib/ask-router";
 import { askAboutDocument } from "@/lib/document-ai";
 import { buildUserContext } from "@/lib/ai-context";
 import { useAuth } from "@/lib/auth";
 import { useSpeechInput } from "@/hooks/use-speech-input";
+import { useSpeechOutput } from "@/hooks/use-speech-output";
 import { listProperties } from "@/lib/properties";
 import { looksLikeReminderRequest, parseReminderRequest, addReminder } from "@/lib/reminders";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -31,8 +32,22 @@ export function AskAiWidget() {
   const [asking, setAsking] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Voice input — fills the box as you speak; you still press Send.
-  const speech = useSpeechInput(setQuery);
+  // Read the answer aloud. On when the toggle is on, or (either way) when
+  // the question was just asked by voice — so a spoken question gets a
+  // spoken answer without a separate opt-in.
+  const tts = useSpeechOutput();
+  const askedByVoice = useRef(false);
+  function maybeSpeak(text: string) {
+    if (tts.enabled || askedByVoice.current) tts.speak(text);
+  }
+  // Voice input — fills the box as you speak, then auto-sends when you stop
+  // talking so a spoken question is fully hands-free.
+  const speech = useSpeechInput(setQuery, {
+    onFinal: (text) => {
+      askedByVoice.current = true;
+      void runSubmit(text);
+    },
+  });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -47,11 +62,16 @@ export function AskAiWidget() {
   function close() {
     setOpen(false);
     reset();
+    tts.cancel();
   }
 
-  async function submit(e: React.FormEvent) {
+  function submit(e: React.FormEvent) {
     e.preventDefault();
-    const q = query.trim();
+    void runSubmit(query);
+  }
+
+  async function runSubmit(raw: string) {
+    const q = raw.trim();
     if (!q || asking) return;
     setQuery("");
     setMessages((prev) => [...prev, { role: "user", text: q }]);
@@ -80,24 +100,20 @@ export function AskAiWidget() {
               day: "numeric",
               year: "numeric",
             });
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                text: `Saved a reminder for ${when}: ${parsed.note || q}. It's on your Calendar.`,
-                destination: "/dashboard/calendar",
-              },
-            ]);
+            {
+              const line = `Saved a reminder for ${when}: ${parsed.note || q}. It's on your Calendar.`;
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", text: line, destination: "/dashboard/calendar" },
+              ]);
+              maybeSpeak(line);
+            }
             return;
           }
           if (parsed.isReminder && !parsed.remindOn) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                text: "I can save that reminder — what date should it be for?",
-              },
-            ]);
+            const line = "I can save that reminder — what date should it be for?";
+            setMessages((prev) => [...prev, { role: "assistant", text: line }]);
+            maybeSpeak(line);
             return;
           }
         } catch {
@@ -111,8 +127,12 @@ export function AskAiWidget() {
         .join("\n");
       const context = [accountContext, transcript].filter(Boolean).join("\n\n") || undefined;
 
+      // When the answer is going to be read aloud (voice question, or
+      // read-aloud toggled on), ask for a natural spoken reply instead of
+      // the scannable bullets a typed chat wants.
+      const wantSpoken = askedByVoice.current || tts.enabled;
       const [answerRes, routeRes] = await Promise.allSettled([
-        askAboutDocument({ question: q, context }),
+        askAboutDocument({ question: q, context, conversational: wantSpoken }),
         askRouter(q),
       ]);
       const answer =
@@ -121,8 +141,10 @@ export function AskAiWidget() {
           : "Sorry, I couldn't process that. Please try again.";
       const destination = routeRes.status === "fulfilled" ? routeRes.value.destination : null;
       setMessages((prev) => [...prev, { role: "assistant", text: answer, destination }]);
+      maybeSpeak(answer);
     } finally {
       setAsking(false);
+      askedByVoice.current = false;
     }
   }
 
@@ -190,7 +212,10 @@ export function AskAiWidget() {
           <form onSubmit={submit} className="mt-3 flex items-center gap-2">
             <input
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                askedByVoice.current = false;
+              }}
               placeholder={
                 speech.listening
                   ? "Listening…"
@@ -199,13 +224,38 @@ export function AskAiWidget() {
                     : "Ask a follow-up…"
               }
               disabled={asking}
+              // eslint-disable-next-line jsx-a11y/no-autofocus -- the input only mounts when the user opens this on-demand chat panel, so focusing it is expected, not a surprise focus jump.
               autoFocus
               className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            {tts.supported && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (tts.enabled || tts.speaking) {
+                    tts.setEnabled(false);
+                  } else {
+                    tts.setEnabled(true);
+                  }
+                }}
+                aria-label={tts.enabled ? "Turn off read-aloud" : "Read answers aloud"}
+                title={tts.enabled ? "Read-aloud on" : "Read answers aloud"}
+                className={`rounded-md px-2.5 py-1.5 transition-colors ${
+                  tts.enabled
+                    ? "bg-accent/15 text-accent"
+                    : "border border-input text-muted-foreground hover:text-foreground"
+                } ${tts.speaking ? "animate-pulse" : ""}`}
+              >
+                {tts.enabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+              </button>
+            )}
             {speech.supported && (
               <button
                 type="button"
-                onClick={speech.toggle}
+                onClick={() => {
+                  if (!speech.listening) askedByVoice.current = true;
+                  speech.toggle();
+                }}
                 disabled={asking}
                 aria-label={speech.listening ? "Stop listening" : "Speak your question"}
                 title={speech.listening ? "Stop listening" : "Speak your question"}
