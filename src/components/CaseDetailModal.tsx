@@ -31,6 +31,7 @@ import {
   getCaseResults,
   updateInformalStatus,
   scheduleInformalReview,
+  resolveInformalSettlement,
   saveInformalAppraiserCategory,
   saveAttendanceType,
   type ProtestCase,
@@ -106,6 +107,9 @@ import {
   getLatestSettlementAgreement,
   confirmSettlementAgreement,
   signSettlementAgreement,
+  recordSettlementResponse,
+  verifySignedSettlementCopy,
+  confirmSettlementOutcome,
   type SettlementAgreementRecord,
 } from "@/lib/settlement-agreement";
 import { getEffectiveTaxRate } from "@/lib/texas-tax-rates";
@@ -176,6 +180,12 @@ export function CaseDetailView({
   // evidence-aware feature here (Corvus's guidance, Pre-Filing Check,
   // Generate Suggested Reason) reads from.
   const [evidenceDocuments, setEvidenceDocuments] = useState<DocumentRecord[]>([]);
+  // Lifted (not local to SettlementSignatureSection) so the top-of-case
+  // "informal outcome unconfirmed" banner and HearingPrepSection's inline
+  // warning read the same record the settlement section writes.
+  const [settlementAgreement, setSettlementAgreement] = useState<SettlementAgreementRecord | null>(
+    null,
+  );
 
   function load() {
     setLoading(true);
@@ -189,6 +199,9 @@ export function CaseDetailView({
     getProtestEvidenceDocuments(userId, property.id)
       .then(setEvidenceDocuments)
       .catch((err) => console.error("Could not load this case's evidence documents:", err));
+    getLatestSettlementAgreement(protest.id)
+      .then(setSettlementAgreement)
+      .catch((err) => console.error("Could not load this case's settlement agreement:", err));
   }
 
   useEffect(load, [protest.id]);
@@ -252,6 +265,8 @@ export function CaseDetailView({
             noticeSignedAt={noticeSignedAt}
           />
 
+          <InformalOutcomeBanner protest={current} agreement={settlementAgreement} />
+
           <CasePlanSection
             userId={userId}
             property={property}
@@ -309,11 +324,19 @@ export function CaseDetailView({
             property={property}
             caseData={caseData}
             evidenceDocuments={evidenceDocuments}
+            settlementAgreement={settlementAgreement}
             onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
           />
 
           {current.status !== "requested" && (
-            <SettlementSignatureSection userId={userId} protest={current} property={property} />
+            <SettlementSignatureSection
+              userId={userId}
+              protest={current}
+              property={property}
+              agreement={settlementAgreement}
+              onAgreementChange={setSettlementAgreement}
+              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+            />
           )}
 
           <DecisionNoticeSection
@@ -2506,12 +2529,14 @@ function HearingPrepSection({
   property,
   caseData,
   evidenceDocuments,
+  settlementAgreement,
   onUpdate,
 }: {
   protest: ProtestRecord;
   property: PropertyRecord;
   caseData: ProtestCase | null;
   evidenceDocuments: DocumentRecord[];
+  settlementAgreement: SettlementAgreementRecord | null;
   onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
   const [notice, setNotice] = useState<HearingNoticeRecord | null>(null);
@@ -2579,6 +2604,8 @@ function HearingPrepSection({
           {hearingStatus}
         </span>
       </div>
+
+      <InformalOutcomeBanner protest={protest} agreement={settlementAgreement} inline />
 
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <span className="text-muted-foreground">Who&apos;s attending:</span>
@@ -2953,25 +2980,73 @@ function DecisionNoticeSection({
   );
 }
 
-// A real settlement offer document awaiting the user's signature — upload,
-// AI reads the real settled value/terms, the user must explicitly confirm
-// it looks correct before signing is even offered, then a real signature,
-// then download + a reminder that submitting it is still on the user (no
-// county has an e-filing integration with this app). See
-// settlement-agreement.ts for the actual read/verify/sign/download
-// mechanics.
+// Amber, non-blocking notice at the top of the case (and inline in
+// HearingPrepSection) whenever the county's informal proposed value is on
+// the table but the owner hasn't recorded what came of it. Product asked
+// for a warning, not a hard gate — the case still works, this just keeps
+// the history honest.
+function InformalOutcomeBanner({
+  protest,
+  agreement,
+  inline = false,
+}: {
+  protest: ProtestRecord;
+  agreement: SettlementAgreementRecord | null;
+  inline?: boolean;
+}) {
+  const unresolved =
+    protest.status !== "resolved" &&
+    (protest.informalStatus === "proposed_value_received" ||
+      (!!agreement && !agreement.outcomeConfirmedAt));
+  if (!unresolved) return null;
+  return (
+    <div
+      className={`${inline ? "mt-3" : "mt-4"} rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs`}
+    >
+      <div className="font-semibold text-amber-700">Informal outcome not confirmed yet</div>
+      <p className="mt-1 text-muted-foreground">
+        The county&apos;s informal proposed value hasn&apos;t been resolved. Record whether you
+        accepted or rejected it, and whether you&apos;re satisfied, before working the formal
+        hearing — otherwise the case history and savings won&apos;t be right.
+      </p>
+      <button
+        type="button"
+        onClick={() =>
+          document
+            .getElementById("case-settlement-signature")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }
+        className="btn-outline mt-2 text-xs py-1"
+      >
+        Go to the settlement section
+      </button>
+    </div>
+  );
+}
+
+// The county's proposed value / settlement offer, end to end: AI reads the
+// real settled value/terms off the uploaded document, the owner says
+// whether they've already accepted/rejected it, otherwise they confirm it
+// looks right and sign here (or upload the copy they signed in person for
+// AI to verify), and finally they confirm Satisfied / Not Satisfied — which
+// resolves the case at the settled value or unlocks formal-hearing prep.
+// See settlement-agreement.ts for the read/verify/sign/outcome mechanics.
 function SettlementSignatureSection({
   userId,
   protest,
   property,
+  agreement,
+  onAgreementChange,
+  onUpdate,
 }: {
   userId: string;
   protest: ProtestRecord;
   property: PropertyRecord;
+  agreement: SettlementAgreementRecord | null;
+  onAgreementChange: (a: SettlementAgreementRecord | null) => void;
+  onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
-  const [agreement, setAgreement] = useState<SettlementAgreementRecord | null>(null);
   const [originalDoc, setOriginalDoc] = useState<DocumentRecord | null>(null);
-  const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pending, setPending] = useState<DecisionExtraction | null>(null);
@@ -2982,20 +3057,18 @@ function SettlementSignatureSection({
   const [signerName, setSignerName] = useState("");
   const [signing, setSigning] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [recordingResponse, setRecordingResponse] = useState(false);
+  const [verifyingCopy, setVerifyingCopy] = useState(false);
+  const [signedCopyExtraction, setSignedCopyExtraction] = useState<DecisionExtraction | null>(null);
+  const [confirmingOutcome, setConfirmingOutcome] = useState(false);
 
   useEffect(() => {
-    getLatestSettlementAgreement(protest.id)
-      .then((a) => {
-        setAgreement(a);
-        if (a?.documentId) {
-          getDocumentById(userId, a.documentId)
-            .then(setOriginalDoc)
-            .catch(() => {});
-        }
-      })
-      .catch((err) => console.error("Could not load settlement agreement:", err))
-      .finally(() => setLoading(false));
-  }, [protest.id, userId]);
+    if (agreement?.documentId) {
+      getDocumentById(userId, agreement.documentId)
+        .then(setOriginalDoc)
+        .catch(() => {});
+    }
+  }, [agreement?.documentId, userId]);
 
   async function handleUpload(file: File) {
     setUploading(true);
@@ -3018,14 +3091,31 @@ function SettlementSignatureSection({
       const doc = await uploadDocument(userId, property.id, pendingFile, SETTLEMENT_DOCUMENT_TYPE);
       setOriginalDoc(doc);
       const saved = await saveSettlementAgreement(userId, protest.id, doc.id, pending);
-      setAgreement(saved);
+      onAgreementChange(saved);
       setPending(null);
       setPendingFile(null);
-      toast.success("Settlement document saved — review it below before signing.");
+      toast.success("Settlement document saved — tell us what came of it below.");
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not save this document."));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleResponse(status: "not_yet" | "accepted" | "rejected") {
+    if (!agreement) return;
+    setRecordingResponse(true);
+    try {
+      await recordSettlementResponse(protest.id, agreement.id, status);
+      onAgreementChange({
+        ...agreement,
+        responseStatus: status,
+        responseRecordedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save your response."));
+    } finally {
+      setRecordingResponse(false);
     }
   }
 
@@ -3034,7 +3124,7 @@ function SettlementSignatureSection({
     setConfirming(true);
     try {
       await confirmSettlementAgreement(agreement.id);
-      setAgreement({ ...agreement, userConfirmedAt: new Date().toISOString() });
+      onAgreementChange({ ...agreement, userConfirmedAt: new Date().toISOString() });
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not save your confirmation."));
     } finally {
@@ -3054,14 +3144,39 @@ function SettlementSignatureSection({
         signature,
         signerName.trim(),
       );
-      setAgreement(record);
+      onAgreementChange(record);
       toast.success(
-        "Signed. Download the completed settlement below and submit it to your county.",
+        "Signed. Download the completed settlement below, then confirm whether you're satisfied.",
       );
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not sign this document."));
     } finally {
       setSigning(false);
+    }
+  }
+
+  async function handleVerifySignedCopy(file: File) {
+    if (!agreement) return;
+    setVerifyingCopy(true);
+    try {
+      const { record, extraction } = await verifySignedSettlementCopy(
+        userId,
+        agreement,
+        property,
+        protest,
+        file,
+      );
+      onAgreementChange(record);
+      setSignedCopyExtraction(extraction);
+      toast.success(
+        extraction.signaturePresent === "No"
+          ? "Uploaded, but AI couldn't find a completed signature on it — double-check the copy."
+          : "Signed copy verified.",
+      );
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not verify this signed copy."));
+    } finally {
+      setVerifyingCopy(false);
     }
   }
 
@@ -3082,13 +3197,50 @@ function SettlementSignatureSection({
     }
   }
 
+  async function handleOutcome(outcome: "satisfied" | "not_satisfied") {
+    if (!agreement) return;
+    const accepted = agreement.responseStatus === "accepted" || !!agreement.signedAt;
+    if (accepted && outcome === "satisfied" && agreement.settledValue == null) {
+      toast.error("No settled value on file yet — upload the settlement document above first.");
+      return;
+    }
+    setConfirmingOutcome(true);
+    try {
+      await confirmSettlementOutcome(protest.id, agreement.id, outcome);
+      onAgreementChange({
+        ...agreement,
+        outcome,
+        outcomeConfirmedAt: new Date().toISOString(),
+      });
+      if (accepted && outcome === "satisfied") {
+        const settledValue = agreement.settledValue as number;
+        await resolveInformalSettlement(protest.id, settledValue);
+        onUpdate({
+          status: "resolved",
+          finalValue: settledValue,
+          escalationPath: "accept",
+          closedAt: new Date().toISOString(),
+          informalStatus: "accepted",
+        });
+        toast.success(`Settlement accepted — case resolved at ${currency(settledValue)}.`);
+      } else {
+        await updateInformalStatus(protest.id, "rejected");
+        onUpdate({ informalStatus: "rejected" });
+        toast.success("Outcome recorded — formal-hearing prep is now unlocked.");
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not record this outcome."));
+    } finally {
+      setConfirmingOutcome(false);
+    }
+  }
+
   function handleDiscard() {
     setPending(null);
     setPendingFile(null);
     setUploadError(null);
   }
 
-  if (loading) return null;
   if (protest.status === "requested" || protest.status === "resolved") return null;
 
   const uploadButton = (
@@ -3114,13 +3266,32 @@ function SettlementSignatureSection({
     </label>
   );
 
+  const notResponded = agreement != null && agreement.responseStatus == null && !agreement.signedAt;
+  const signHerePath =
+    agreement != null &&
+    !agreement.signedAt &&
+    (agreement.responseStatus === "not_yet" || agreement.responseStatus == null);
+  const canOfferSignedCopy =
+    agreement != null &&
+    !agreement.signedAt &&
+    !agreement.signedCopyVerifiedAt &&
+    agreement.responseStatus !== "rejected";
+  const readyForOutcome =
+    agreement != null &&
+    !agreement.outcomeConfirmedAt &&
+    (agreement.responseStatus === "accepted" ||
+      agreement.responseStatus === "rejected" ||
+      !!agreement.signedAt ||
+      !!agreement.signedCopyVerifiedAt);
+
   return (
     <div id="case-settlement-signature" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Settlement Offer Signature</h4>
+      <h4 className="text-sm font-semibold">Settlement / Proposed Value</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        If your county sends a settlement offer that needs your signature, upload it here. AI reads
-        the real settled value and terms, you confirm it looks right, then sign and download the
-        completed copy to submit yourself.
+        When the county proposes a value or sends a settlement, upload it here. AI reads the real
+        settled value and terms; you tell us whether you&apos;ve already accepted or rejected it, or
+        sign it here (or upload the copy you signed in person), then confirm whether you&apos;re
+        satisfied with the outcome.
       </p>
 
       {!agreement && !pending && (
@@ -3212,7 +3383,36 @@ function SettlementSignatureSection({
             </div>
           )}
 
-          {!agreement.userConfirmedAt && !agreement.signedAt && (
+          {notResponded && (
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="text-xs font-semibold">Have you already responded to this offer?</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={() => handleResponse("accepted")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  I&apos;ve accepted it
+                </button>
+                <button
+                  onClick={() => handleResponse("rejected")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  I&apos;ve rejected it
+                </button>
+                <button
+                  onClick={() => handleResponse("not_yet")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  Not yet
+                </button>
+              </div>
+            </div>
+          )}
+
+          {signHerePath && !agreement.userConfirmedAt && (
             <div className="mt-3 border-t border-border pt-3">
               <button
                 onClick={handleConfirmLooksCorrect}
@@ -3224,7 +3424,7 @@ function SettlementSignatureSection({
             </div>
           )}
 
-          {agreement.userConfirmedAt && !agreement.signedAt && (
+          {signHerePath && agreement.userConfirmedAt && (
             <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
               <div className="text-xs font-semibold">Sign to accept this settlement</div>
               <label className="mt-2 grid gap-1 text-xs">
@@ -3254,6 +3454,77 @@ function SettlementSignatureSection({
             </div>
           )}
 
+          {canOfferSignedCopy && (
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="text-xs font-semibold">Signed it in person at the CAD office?</div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Upload the copy you signed — AI verifies the value, date, tax year, terms, and that
+                it&apos;s actually signed.
+              </p>
+              <label
+                className={`mt-2 inline-flex btn-outline cursor-pointer text-xs py-1.5 ${
+                  verifyingCopy ? "pointer-events-none opacity-60" : ""
+                }`}
+              >
+                {verifyingCopy ? "Verifying…" : "Upload Signed Copy"}
+                <input
+                  type="file"
+                  accept="image/*,.pdf"
+                  className="hidden"
+                  disabled={verifyingCopy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (file) handleVerifySignedCopy(file);
+                  }}
+                />
+              </label>
+            </div>
+          )}
+
+          {agreement.signedCopyVerifiedAt && (
+            <div className="mt-3 rounded-md bg-secondary/40 p-2 text-xs">
+              <div className="font-semibold text-foreground">
+                Signed copy verified {new Date(agreement.signedCopyVerifiedAt).toLocaleDateString()}
+              </div>
+              <div className="mt-1 grid gap-1 sm:grid-cols-2">
+                <Field
+                  label="Value on signed copy"
+                  value={
+                    signedCopyExtraction?.finalValue != null
+                      ? currency(signedCopyExtraction.finalValue)
+                      : agreement.settledValue != null
+                        ? currency(agreement.settledValue)
+                        : "Not stated"
+                  }
+                />
+                <Field
+                  label="Signed date"
+                  value={signedCopyExtraction?.signedDate ?? "Not stated"}
+                />
+                <Field
+                  label="Tax year on copy"
+                  value={signedCopyExtraction?.taxYear ?? agreement.taxYear ?? "Not stated"}
+                />
+                <Field
+                  label="Signature present"
+                  value={signedCopyExtraction?.signaturePresent ?? "Unclear"}
+                />
+              </div>
+              {signedCopyExtraction?.discrepancies &&
+                signedCopyExtraction.discrepancies.length > 0 && (
+                  <div className="mt-2 rounded-md bg-destructive/10 p-2 text-destructive">
+                    <span className="font-semibold">Discrepancies on the signed copy:</span>
+                    <ul className="mt-1 grid gap-0.5">
+                      {signedCopyExtraction.discrepancies.map((d, i) => (
+                        <li key={i}>• {d}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+            </div>
+          )}
+
           {agreement.signedAt && (
             <div className="mt-3 rounded-md bg-secondary/40 p-3 text-xs">
               <div className="font-semibold text-foreground">
@@ -3272,6 +3543,53 @@ function SettlementSignatureSection({
               </button>
             </div>
           )}
+
+          {readyForOutcome && (
+            <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
+              <div className="text-xs font-semibold">Are you satisfied with this outcome?</div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                This is what moves the case forward. Satisfied with an accepted value closes the
+                case at that value. Not satisfied — or a rejected offer — unlocks formal-hearing
+                prep.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={() => handleOutcome("satisfied")}
+                  disabled={confirmingOutcome || agreement.responseStatus === "rejected"}
+                  className="btn-accent text-xs py-1.5 disabled:opacity-60"
+                >
+                  Satisfied
+                </button>
+                <button
+                  onClick={() => handleOutcome("not_satisfied")}
+                  disabled={confirmingOutcome}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  Not satisfied
+                </button>
+              </div>
+            </div>
+          )}
+
+          {agreement.outcomeConfirmedAt && (
+            <div className="mt-3 rounded-md bg-secondary/40 p-3 text-xs">
+              <div className="font-semibold text-foreground">
+                Outcome recorded:{" "}
+                {agreement.outcome === "satisfied" ? "Satisfied" : "Not satisfied"}
+              </div>
+              <p className="mt-1 text-muted-foreground">
+                {agreement.outcome === "satisfied" &&
+                (agreement.responseStatus === "accepted" || agreement.signedAt)
+                  ? "Case resolved at the settled value."
+                  : "Proceeding to the formal hearing — prep is unlocked below."}
+              </p>
+            </div>
+          )}
+
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Your county&apos;s CAD website usually reflects an accepted value within a few business
+            days — check there to confirm it took effect.
+          </p>
         </div>
       )}
     </div>
