@@ -163,14 +163,7 @@ export type ModuleAnalysisInput = {
 };
 
 export type BatchModuleId =
-  | "strategy"
-  | "comps"
-  | "site"
-  | "improvement"
-  | "zoning"
-  | "income"
-  | "evidence"
-  | "executive";
+  "strategy" | "comps" | "site" | "improvement" | "zoning" | "income" | "evidence" | "executive";
 
 // One ranked valuation strategy from Module 2 — see StrategyList/StrategyDetail in
 // src/routes/ai-report.tsx and the "strategy" MODULE_SPEC in the edge function.
@@ -395,16 +388,26 @@ export async function getModuleAnalysis<K extends BatchModuleId>(
 // from the same record plus whatever that module has already generated (priorData).
 // Ephemeral by design: the answer is only ever held in the calling component's own
 // state, never persisted, so it resets when the modal closes.
+export type ModuleQAEvidenceContext = {
+  linkedDocs: { name: string; notes: string | null }[];
+  strategyRationale: string | null;
+};
+
 export async function askModuleQuestion(
   moduleId: string,
   question: string,
   input: ModuleAnalysisInput,
   priorModuleData?: unknown,
+  // The central documents tagged to this module + the selected strategy's
+  // rationale — lets the answer cite the evidence that backs a finding and
+  // name what's still missing (see src/lib/document-modules.ts).
+  evidenceContext?: ModuleQAEvidenceContext,
 ): Promise<string> {
   const result = await invokeEdgeFunction<{ answer: string }>("ai-report-modules", {
     moduleId,
     question,
     priorModuleData,
+    evidenceContext,
     ...input,
   });
   return result.answer;

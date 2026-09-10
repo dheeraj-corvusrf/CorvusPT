@@ -943,10 +943,20 @@ alter table public.documents
   add column if not exists ai_explanation text,
   add column if not exists edited_from uuid references public.documents (id) on delete set null;
 
+-- Which AI Report modules / case sections a document feeds — set by the
+-- assign-document-modules edge function on upload (AI reads the file and
+-- picks every relevant module, so one doc can serve several), and editable
+-- by the owner from the Documents tab. A GIN index so module reads
+-- (documents where 'zoning' = any(modules)) stay cheap. See
+-- src/lib/document-modules.ts for the canonical tag list.
+alter table public.documents add column if not exists modules text[] not null default '{}';
+create index if not exists documents_modules_gin on public.documents using gin (modules);
+
 -- file_name (rename), plus the ones the user controls directly from the
--- Documents tab. ai_explanation is written only by the review-document edge
--- function (service role); edited_from is set on insert.
-grant update (file_name, deleted_at, use_as_evidence, dup_reviewed, duplicate_of)
+-- Documents tab (including the module tags above). ai_explanation is written
+-- only by the review-document edge function (service role); edited_from is
+-- set on insert.
+grant update (file_name, deleted_at, use_as_evidence, dup_reviewed, duplicate_of, modules)
   on public.documents to authenticated;
 
 -- Backfill: earlier uploads used protest_evidence_items.document_id (now legacy —

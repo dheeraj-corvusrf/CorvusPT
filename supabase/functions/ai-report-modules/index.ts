@@ -18,7 +18,7 @@
 //
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions.
-import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { PROSE_STYLE, BULLET_STYLE } from "../_shared/prose-style.ts";
 import { GEMINI_MODEL_REASONING, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
@@ -182,6 +182,12 @@ type ModulesInput = {
   // request is a Q&A follow-up, not a module-analysis request.
   question?: string;
   priorModuleData?: unknown;
+  // Central documents tagged to this module + the selected strategy's
+  // rationale — lets a Q&A answer cite the real supporting evidence.
+  evidenceContext?: {
+    linkedDocs?: { name?: string; notes?: string | null }[];
+    strategyRationale?: string | null;
+  };
   // Real, user-confirmed exclusions (see module-overrides.ts and
   // src/lib/module-overrides.ts). notApplicableFactors/notApplicableComponents
   // hard-clamp that exact site factor / building component's status server-side
@@ -1578,17 +1584,40 @@ Deno.serve(async (req: Request) => {
         input.priorModuleData != null
           ? `\n\nThis module's current analysis (already generated):\n${JSON.stringify(input.priorModuleData).slice(0, 4000)}`
           : "";
+      const linkedDocs = Array.isArray(input.evidenceContext?.linkedDocs)
+        ? input.evidenceContext!.linkedDocs.filter((d) => d && typeof d.name === "string")
+        : [];
+      const docsText = linkedDocs.length
+        ? `\n\nCentral documents the owner has tagged to this module:\n${linkedDocs
+            .map(
+              (d) => `- ${d.name}${d.notes ? ` — AI check: ${String(d.notes).slice(0, 300)}` : ""}`,
+            )
+            .join("\n")}`
+        : "\n\nNo documents are tagged to this module yet.";
+      const stratText = input.evidenceContext?.strategyRationale
+        ? `\n\nWhy the case's chosen protest strategy was selected:\n${String(
+            input.evidenceContext.strategyRationale,
+          ).slice(0, 1200)}`
+        : "";
       const system =
         `${PREAMBLE}\n\nThe user is looking at the "${input.moduleId ?? "this"}" report module ` +
-        "and asked a follow-up question about it. Answer directly in 2-4 sentences, grounded " +
-        "only in the record and analysis below plus general knowledge of Texas commercial " +
-        "property appraisal practice. If the answer genuinely isn't knowable from what's given, " +
-        "say so rather than guessing.\n\nReturn ONLY a JSON object with exactly this shape:\n" +
-        '{"answer": "<2-4 sentences>"}';
+        "and asked a follow-up question about it. Ground your answer only in the record, the " +
+        "analysis, the tagged documents, and the strategy rationale below, plus general " +
+        "knowledge of Texas commercial property appraisal practice. Cover, as far as the " +
+        "material supports it: why the finding / strategy was reached, which of the tagged " +
+        "documents actually back it (name them), what is still missing to make it stronger, " +
+        "and which other report module should investigate further. If something genuinely " +
+        "isn't knowable from what's given, say so rather than guessing.\n\n" +
+        `${BULLET_STYLE}\n\nReturn ONLY a JSON object with exactly this shape:\n` +
+        '{"answer": "<markdown bullets / short table>"}';
       const parsed = await generateJson(apiKey, system, [
-        { text: `${record}${priorText}\n\nQuestion: ${input.question.trim().slice(0, 500)}` },
+        {
+          text: `${record}${priorText}${docsText}${stratText}\n\nQuestion: ${input.question
+            .trim()
+            .slice(0, 500)}`,
+        },
       ]);
-      const answer = typeof parsed.answer === "string" ? parsed.answer.slice(0, 1200) : "";
+      const answer = typeof parsed.answer === "string" ? parsed.answer.slice(0, 2000) : "";
       return new Response(JSON.stringify({ answer }), { status: 200, headers: corsHeaders });
     }
 

@@ -14,7 +14,7 @@
 // real countyReference.arbContact.email the caller already has on file
 // (see county-protest-info.ts), so a drafted email is only ever offered
 // when addressed to a real, verified address, never one the model invents.
-import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { PROSE_STYLE, STRUCTURED_BULLET_STYLE } from "../_shared/prose-style.ts";
 import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
@@ -50,10 +50,12 @@ Rules:
 - applicableDeadlines: real, dated deadlines that apply to this informal review, copied from the notice or county reference (evidence-submission cutoff, informal-request cutoff, appeal/escalation deadline). Each item is "<label>: <date or timeframe>". Empty array if none are actually stated.
 - missingInfo: things the owner needs in order to act but that the notice and case record given below do NOT provide (e.g. no informal-review contact stated, no scheduling channel, no evidence deadline). For each, say what to do to get it (which office/number to call). Empty array if nothing important is missing.
 - nextSteps: 1-3 imperative actions the owner should take right now, most important first.
-- Plain prose only — no markdown, no bullet characters inside string fields (use the array fields for lists).
+- Each free-text field is rendered as markdown — keep it terse: one or two short sentences, or "- " bullets when the field holds several parallel points. Prefer the dedicated array fields (steps, documentsToProvide, evidenceToUse, applicableDeadlines, missingInfo, nextSteps) for lists; keep the array items themselves to one concrete point each.
 - Return ONLY a JSON object matching this exact shape: {"available":"<Yes|No|Unclear>","appraiserCategory":"<one of: Land Appraiser | Improvement Appraiser | Commercial Appraiser | Retail Appraiser | Office Appraiser | Daycare/School Appraiser | Other>","whoToContact":"<string>","howToRequest":"<string>","documentsToProvide":[<string>, ...],"requestedValueGuidance":"<string>","evidenceToUse":[<string>, ...],"whatToSay":"<string>","whatNotToSay":"<string>","respondingToProposedValue":"<string>","acceptingEndsCase":"<string>","steps":[<string>, ...],"whereToSchedule":"<string>","applicableDeadlines":[<string>, ...],"missingInfo":[<string>, ...],"nextSteps":[<string>, ...],"draftEmailSubject":"<string, only if an email address was given below — otherwise empty string>","draftEmailBody":"<string, only if an email address was given below — otherwise empty string, written in the property owner's own voice, referencing the real address/account number/tax year/requested value given below>"}
 
-${PROSE_STYLE}`;
+${PROSE_STYLE}
+
+${STRUCTURED_BULLET_STYLE}`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

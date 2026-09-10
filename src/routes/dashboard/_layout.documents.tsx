@@ -31,6 +31,7 @@ import {
   type CategorizedUpload,
 } from "@/lib/document-categorize";
 import { attachHearingNoticeToCase } from "@/lib/hearing-notice-intake";
+import { MODULE_CATALOG, MODULE_TAG_LABEL, setDocumentModules } from "@/lib/document-modules";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -570,6 +571,7 @@ function Documents() {
         onDownload={handleDownload}
         onAnalyze={handleAnalyze}
         onRename={handleRename}
+        onModulesChange={(id, modules) => patchDoc(id, { modules })}
         analyzing={viewDoc ? analyzingIds.has(viewDoc.id) : false}
       />
 
@@ -609,6 +611,7 @@ function DocumentViewerModal({
   onDownload,
   onAnalyze,
   onRename,
+  onModulesChange,
   analyzing,
 }: {
   doc: DocumentRecord | null;
@@ -616,11 +619,26 @@ function DocumentViewerModal({
   onDownload: (doc: DocumentRecord) => void;
   onAnalyze: (doc: DocumentRecord) => void;
   onRename: (doc: DocumentRecord, name: string) => void;
+  onModulesChange: (id: string, modules: string[]) => void;
   analyzing: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [savingModules, setSavingModules] = useState(false);
   const kind = doc ? previewKind(doc.fileName) : "none";
+
+  async function changeModules(next: string[]) {
+    if (!doc) return;
+    setSavingModules(true);
+    try {
+      await setDocumentModules(doc.id, next);
+      onModulesChange(doc.id, next);
+    } catch {
+      toast.error("Could not update which modules use this document.");
+    } finally {
+      setSavingModules(false);
+    }
+  }
 
   useEffect(() => {
     if (!doc) {
@@ -718,6 +736,47 @@ function DocumentViewerModal({
                 and get a suggested name.
               </p>
             )}
+          </div>
+        )}
+
+        {doc && (
+          <div className="border-border rounded-lg border p-3 text-sm">
+            <div className="font-medium">Used by</div>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              AI assigned this document to these modules on upload. Add or remove any — all modules
+              read from this one repository.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {(doc.modules ?? []).length === 0 && (
+                <span className="text-muted-foreground text-xs">No modules yet.</span>
+              )}
+              {(doc.modules ?? []).map((m) => (
+                <button
+                  key={m}
+                  disabled={savingModules}
+                  onClick={() => changeModules((doc.modules ?? []).filter((x) => x !== m))}
+                  className="badge-soft bg-accent/10 text-accent disabled:opacity-60"
+                  title="Remove"
+                >
+                  {MODULE_TAG_LABEL[m] ?? m} ✕
+                </button>
+              ))}
+              <select
+                value=""
+                disabled={savingModules}
+                onChange={(e) => {
+                  if (e.target.value) changeModules([...(doc.modules ?? []), e.target.value]);
+                }}
+                className="border-input bg-background rounded-md border px-2 py-1 text-xs disabled:opacity-60"
+              >
+                <option value="">+ add…</option>
+                {MODULE_CATALOG.filter((c) => !(doc.modules ?? []).includes(c.id)).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
 
@@ -1117,6 +1176,23 @@ function DocRow({
                 <VerdictBadge doc={doc} />
               )}
               {isEvidenceDoc(doc) && <span className="badge-soft">Evidence</span>}
+              {doc.documentType?.startsWith("AI Data Sheet — ") && (
+                <span
+                  className="badge-soft-warning"
+                  title="Drafted by AI from typical values — verify before relying on it"
+                >
+                  AI-generated
+                </span>
+              )}
+              {(doc.modules ?? []).map((m) => (
+                <span
+                  key={m}
+                  className="badge-soft bg-accent/10 text-accent"
+                  title="Used by this AI Report module / case section"
+                >
+                  {MODULE_TAG_LABEL[m] ?? m}
+                </span>
+              ))}
             </div>
             {doc.aiVerdict && doc.aiVerdict !== "valid" && doc.aiNotes && (
               <p className="text-muted-foreground mt-1 text-xs">{doc.aiNotes}</p>

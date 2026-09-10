@@ -141,6 +141,12 @@ import {
   PROTEST_EVIDENCE_DOCUMENT_TYPE,
   type DocumentRecord,
 } from "@/lib/documents";
+import { tagUploadedDocument, setDocumentModules, MODULE_TAG_LABEL } from "@/lib/document-modules";
+import {
+  generateDataSheet,
+  buildDataSheetFile,
+  DATA_SHEET_DOCUMENT_TYPE_PREFIX,
+} from "@/lib/data-sheet";
 import { analyzeEvidence, type EvidenceAnalysis, type DocumentStatus } from "@/lib/protest-reason";
 import { buildEvidencePacket } from "@/lib/evidence-packet";
 import { categorizeEvidenceUploads } from "@/lib/evidence-categorize";
@@ -183,6 +189,7 @@ import {
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { LoadingLine } from "@/components/LoadingLine";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import { PropertyImage } from "@/components/PropertyImage";
 import {
   hashModuleInput,
@@ -517,6 +524,7 @@ function Report() {
             (d) =>
               d.useAsEvidence !== false &&
               (d.useAsEvidence === true ||
+                (d.modules?.length ?? 0) > 0 ||
                 d.documentType === EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType?.startsWith("Strategy Evidence: ") ||
@@ -636,8 +644,8 @@ function Report() {
   // render after evidenceDocs updates so loadModule sees the new file. Only
   // when Module 2 has already run — never a cold fetch. Starts from the
   // mount count so an initial load doesn't re-trigger it.
-  const strategyEvidenceCount = evidenceDocs.filter((d) =>
-    d.documentType?.startsWith("Strategy Evidence: "),
+  const strategyEvidenceCount = evidenceDocs.filter(
+    (d) => d.modules?.includes("strategy") || d.documentType?.startsWith("Strategy Evidence: "),
   ).length;
   const strategyEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -661,7 +669,10 @@ function Report() {
   // single upload (AI-tagged "Improvement: <component>") re-runs the
   // condition assessment + its dependents.
   const improvementEvidenceCount = evidenceDocs.filter(
-    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+    (d) =>
+      d.modules?.includes("improvement") ||
+      d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+      d.documentType?.startsWith("Improvement: "),
   ).length;
   const improvementEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -684,8 +695,8 @@ function Report() {
   // Same, for Module 6 (Zoning & Classification) — a doc uploaded from the
   // card's per-aspect "Needs data" chip (tagged "Zoning: <aspect>") re-runs
   // the classification check + its dependents.
-  const zoningEvidenceCount = evidenceDocs.filter((d) =>
-    d.documentType?.startsWith("Zoning: "),
+  const zoningEvidenceCount = evidenceDocs.filter(
+    (d) => d.modules?.includes("zoning") || d.documentType?.startsWith("Zoning: "),
   ).length;
   const zoningEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -995,7 +1006,7 @@ function Report() {
       (strategyId ? `Strategy Evidence: ${strategyId}` : EVIDENCE_DOCUMENT_TYPE);
     setUploadingEvidence(true);
     try {
-      const uploaded: DocumentRecord[] = [];
+      const uploaded: { doc: DocumentRecord; file: File }[] = [];
       for (const file of toUpload) {
         if (file.size > UPLOAD_LIMITS.maxFileBytes) {
           toast.error(
@@ -1003,11 +1014,26 @@ function Report() {
           );
           continue;
         }
-        uploaded.push(await uploadDocument(user.id, property.id, file, documentType));
+        uploaded.push({
+          doc: await uploadDocument(user.id, property.id, file, documentType),
+          file,
+        });
       }
       if (uploaded.length > 0) {
-        setEvidenceDocs((prev) => [...prev, ...uploaded]);
+        setEvidenceDocs((prev) => [...prev, ...uploaded.map((u) => u.doc)]);
         toast.success(`Added ${uploaded.length} evidence file${uploaded.length === 1 ? "" : "s"}.`);
+        // One classification per file → the module tags every relevant
+        // module reads by (documents.modules). Runs after the toast so the
+        // upload never blocks on it; the tags stream in and re-key the
+        // per-module digests.
+        void Promise.all(
+          uploaded.map(async ({ doc, file }) => {
+            const modules = await tagUploadedDocument(doc.id, file);
+            if (modules.length > 0) {
+              setEvidenceDocs((prev) => prev.map((d) => (d.id === doc.id ? { ...d, modules } : d)));
+            }
+          }),
+        );
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not upload evidence.");
@@ -1035,7 +1061,10 @@ function Report() {
       return null;
     }
     const doc = await uploadDocument(user.id, property.id, file, "Comp Sale Evidence");
-    setEvidenceDocs((prev) => [...prev, doc]);
+    // A comp sale document — feeds the Comparable Sales module (and the
+    // strategy that rests on it). Known kind, so tag it directly.
+    void setDocumentModules(doc.id, ["comps", "strategy"]).catch(() => {});
+    setEvidenceDocs((prev) => [...prev, { ...doc, modules: ["comps", "strategy"] }]);
     return await extractCompSale(doc.id);
   }
 
@@ -1059,8 +1088,10 @@ function Report() {
   }
 
   // Powers every module's "Ask AI" box (see ModuleQABox) — grounded in the
-  // same record loadModule() sends plus whatever that module has already
-  // generated, so an answer never comes from a blank slate.
+  // same record loadModule() sends, whatever that module has already
+  // generated, AND the central documents tagged to this module + the
+  // selected strategy's rationale, so the answer can name the evidence that
+  // supports a finding and what's still missing.
   async function askQuestion(moduleId: string, question: string): Promise<string> {
     const input: ModuleAnalysisInput = {
       address: state.address,
@@ -1071,7 +1102,57 @@ function Report() {
       totalValue: state.totalValue,
       taxYear: state.taxYear,
     };
-    return askModuleQuestion(moduleId, question, input, moduleData[moduleId]?.data ?? null);
+    const linkedDocs = evidenceDocs
+      .filter((d) => d.modules?.includes(moduleId))
+      .map((d) => ({ name: d.fileName, notes: d.aiNotes ?? null }));
+    const strategyData = moduleData.strategy?.data as
+      { rationale?: string; strategyRationale?: string } | undefined;
+    const strategyRationale = strategyData?.strategyRationale ?? strategyData?.rationale ?? null;
+    return askModuleQuestion(moduleId, question, input, moduleData[moduleId]?.data ?? null, {
+      linkedDocs,
+      strategyRationale,
+    });
+  }
+
+  // "AI fills in the missing data" — drafts a starter data sheet for what a
+  // module says it's missing, renders it to a PDF, files it in the central
+  // repository, and tags it to that module (so it shows in that module's
+  // document list, badged AI-generated). It is a reference document the
+  // owner reviews — never fed back into a module as a real input.
+  async function handleGenerateDataSheet(
+    moduleId: string,
+    moduleLabel: string,
+    moduleResult: unknown,
+  ): Promise<string | null> {
+    if (!user) return null;
+    const property = await ensureProperty();
+    if (!property) {
+      toast.error("Could not save this property. Please try again.");
+      return null;
+    }
+    try {
+      const sheet = await generateDataSheet(moduleId, moduleLabel, moduleResult, {
+        address: state.address,
+        cad: state.cad,
+        propertyType: state.propertyType,
+        totalValue: state.totalValue,
+        taxYear: state.taxYear,
+      });
+      const file = await buildDataSheetFile(sheet);
+      const doc = await uploadDocument(
+        user.id,
+        property.id,
+        file,
+        `${DATA_SHEET_DOCUMENT_TYPE_PREFIX}${moduleLabel}`,
+      );
+      await setDocumentModules(doc.id, [moduleId]).catch(() => {});
+      setEvidenceDocs((prev) => [...prev, { ...doc, modules: [moduleId] }]);
+      toast.success(`Starter data sheet added to your documents: ${sheet.title}`);
+      return file.name;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not generate a data sheet.");
+      return null;
+    }
   }
 
   function loadModule(id: string, opts?: { force?: boolean }) {
@@ -1259,7 +1340,7 @@ function Report() {
             zoning: c.zoning ?? null,
           })),
           uploadedDocs: evidenceDocs
-            .filter((d) => d.documentType?.startsWith("Zoning: "))
+            .filter((d) => d.modules?.includes("zoning") || d.documentType?.startsWith("Zoning: "))
             .map((d) => d.fileName),
         };
       }
@@ -1399,7 +1480,9 @@ function Report() {
       // handling. Capped to the 4 most recent, mirroring the server-side cap.
       const improvementDocs = evidenceDocs.filter(
         (d) =>
-          d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+          d.modules?.includes("improvement") ||
+          d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+          d.documentType?.startsWith("Improvement: "),
       );
       if (id === "improvement" && improvementDocs.length > 0) {
         const recent = improvementDocs.slice(-4);
@@ -2358,6 +2441,7 @@ function Report() {
                 cadFetching={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
+                onGenerateDataSheet={() => Promise.resolve(null)}
                 existingProtest={null}
                 resolvedProperty={null}
                 caseDocuments={[]}
@@ -2438,6 +2522,7 @@ function Report() {
             cadFetching={cadFetching}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
+            onGenerateDataSheet={handleGenerateDataSheet}
             existingProtest={existingProtest}
             resolvedProperty={resolvedProperty}
             caseDocuments={caseDocuments}
@@ -4828,8 +4913,10 @@ function ImprovementCardVisual({
           Interior); the modal is where a file can be tagged to a component by
           hand. */}
       {onUpload && missing > 0 && (
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- the label wraps a focusable file <input>; the handlers only stop the click from bubbling to the card that opens the modal.
         <label
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
           className={`mx-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-accent/40 px-3 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10 ${
             uploading ? "pointer-events-none opacity-60" : ""
           }`}
@@ -5961,9 +6048,11 @@ function ZoningAspectTiles({
       </div>
 
       {onUpload && needsAny && (
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- the label wraps a focusable file <input>; the handlers only stop the click from bubbling to the card that opens the modal.
         <label
           className="mt-2 flex cursor-pointer items-center justify-center gap-1 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10"
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
         >
           <input
             type="file"
@@ -6848,7 +6937,9 @@ function IncomeWorkspace({
   onForceReload: () => void;
   onMarkNotApplicable: () => void;
 }) {
-  const incomeDocs = evidenceDocs.filter((d) => d.documentType?.startsWith("Income: "));
+  const incomeDocs = evidenceDocs.filter(
+    (d) => d.modules?.includes("income") || d.documentType?.startsWith("Income: "),
+  );
   const docKinds = [
     ...new Set(
       incomeDocs
@@ -8140,6 +8231,14 @@ function ModulePreviewContent({
   cadFetching: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
+  // "AI fills in the missing data" — drafts a starter data sheet for the
+  // inputs this module reports as missing and files it in the central
+  // repository, tagged to this module. Returns the new doc's filename.
+  onGenerateDataSheet: (
+    moduleId: string,
+    moduleLabel: string,
+    moduleResult: unknown,
+  ) => Promise<string | null>;
   // Module 10 only — real case state + navigation, so it can show real
   // filing readiness and a genuinely working "View Analysis"/CTA without a
   // page reload (just switches which module is open in this same modal).
@@ -8798,7 +8897,10 @@ function ModulePreviewContent({
           </div>
           <MiniMeter value={data.confidencePct} label="Analysis confidence" />
           {data.confidenceReasoning && (
-            <p className="mt-2 text-xs text-muted-foreground">{data.confidenceReasoning}</p>
+            <MarkdownLite
+              className="mt-2 text-xs text-muted-foreground"
+              text={data.confidenceReasoning}
+            />
           )}
         </div>
 
@@ -8807,7 +8909,7 @@ function ModulePreviewContent({
             <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               AI Methodology
             </div>
-            <p className="text-xs text-muted-foreground">{data.methodology}</p>
+            <MarkdownLite className="text-xs text-muted-foreground" text={data.methodology} />
           </div>
         )}
 
@@ -8916,7 +9018,9 @@ function ModulePreviewContent({
       const siteGis = siteGisMap.data;
       const gaps = countDataGaps(d.factors);
       const nextModule = MODULES.find((mm) => mm.id === "improvement");
-      const siteDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Site: "));
+      const siteDocs = evidenceDocs.filter(
+        (doc) => doc.modules?.includes("site") || doc.documentType?.startsWith("Site: "),
+      );
       const siteFactorKinds = d.factors.map((f) => f.factor);
       // One upload -> AI reads each file and tags it to the site factor it
       // documents (Floodplain, Easements, Drainage, …), or leaves it generic
@@ -9147,6 +9251,7 @@ function ModulePreviewContent({
       const d = moduleState.data as ModuleResultMap["improvement"];
       const improvementDocs = evidenceDocs.filter(
         (doc) =>
+          doc.modules?.includes("improvement") ||
           doc.documentType === EVIDENCE_DOCUMENT_TYPE ||
           doc.documentType?.startsWith("Improvement: "),
       );
@@ -9372,7 +9477,9 @@ function ModulePreviewContent({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      const zoningDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Zoning: "));
+      const zoningDocs = evidenceDocs.filter(
+        (doc) => doc.modules?.includes("zoning") || doc.documentType?.startsWith("Zoning: "),
+      );
       // One upload -> AI tags each file to the aspect it documents. Mirrors
       // Module 7 / Module 8's bulk categorize-then-upload. Reuses the shared
       // "reading documents" flag (only one module modal is open at a time).
@@ -10194,11 +10301,72 @@ function ModulePreviewContent({
 // (a deterministic formula, not an AI call) — every other module gets one.
 function ModulePreviewBody(props: Parameters<typeof ModulePreviewContent>[0]) {
   const showQA = !props.m.requiresUserData && props.m.id !== "savings" && !!props.moduleState?.data;
+  const showDataSheet =
+    props.allowEvidenceUpload && props.m.id !== "savings" && !!props.moduleState?.data;
   return (
     <>
       <ModulePreviewContent {...props} />
+      {showDataSheet && (
+        <ModuleDataSheetButton
+          moduleId={props.m.id}
+          moduleLabel={props.m.title}
+          moduleResult={props.moduleState?.data}
+          onGenerate={props.onGenerateDataSheet}
+        />
+      )}
       {showQA && <ModuleQABox moduleId={props.m.id} onAskQuestion={props.onAskQuestion} />}
     </>
+  );
+}
+
+// "AI fills in the missing data" — drafts a starter data sheet for whatever
+// inputs this module reports as missing and files it in the central
+// repository, tagged to this module. The sheet is clearly labelled
+// AI-generated assumptions; it's a gathering aid, not real data.
+function ModuleDataSheetButton({
+  moduleId,
+  moduleLabel,
+  moduleResult,
+  onGenerate,
+}: {
+  moduleId: string;
+  moduleLabel: string;
+  moduleResult: unknown;
+  onGenerate: (
+    moduleId: string,
+    moduleLabel: string,
+    moduleResult: unknown,
+  ) => Promise<string | null>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [madeFile, setMadeFile] = useState<string | null>(null);
+  return (
+    <div className="mt-4 border-t border-border/60 pt-4 print:hidden">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Missing data
+      </div>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        Let AI draft a starter sheet for the inputs this module is missing — typical values, their
+        basis, and where to confirm each. Filed in your documents and tagged to this module;
+        it&apos;s an assumptions aid, not verified data.
+      </p>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          const name = await onGenerate(moduleId, moduleLabel, moduleResult);
+          setMadeFile(name);
+          setBusy(false);
+        }}
+        className="btn-outline mt-2 text-sm disabled:opacity-50"
+      >
+        {busy ? "Drafting…" : "Generate a starter data sheet"}
+      </button>
+      {madeFile && (
+        <p className="mt-1.5 text-xs text-success">Added “{madeFile}” to your documents.</p>
+      )}
+    </div>
   );
 }
 
@@ -10239,25 +10407,32 @@ function ModuleQABox({
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Ask AI About This Module
       </div>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        Ask why a finding or strategy was chosen, what evidence supports it, what&apos;s missing, or
+        which module to check next.
+      </p>
       {thread.length > 0 && (
         <div className="mt-2 grid gap-2.5">
           {thread.map((t, i) => (
             <div key={i} className="text-sm">
               <div className="font-medium">{t.question}</div>
-              <div className="mt-0.5 text-muted-foreground">{t.answer}</div>
+              <MarkdownLite className="mt-0.5 text-muted-foreground" text={t.answer} />
             </div>
           ))}
         </div>
       )}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
-      <div className="mt-2 flex gap-2">
-        <input
-          type="text"
+      <div className="mt-2 flex items-end gap-2">
+        <textarea
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
           }}
+          rows={2}
           placeholder="Ask a follow-up question…"
           disabled={asking}
           className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-sm disabled:opacity-60"

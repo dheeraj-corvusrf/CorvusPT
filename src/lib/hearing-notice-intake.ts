@@ -2,6 +2,7 @@ import { listProtests } from "./protests";
 import { getCountyProtestInfo } from "./county-protest-info";
 import { extractHearingNotice, saveHearingNotice } from "./hearing-notice";
 import { scheduleHearing } from "./protest-case";
+import { setDocumentModules } from "./document-modules";
 import type { PropertyRecord } from "./properties";
 
 // When a file the Documents tab classified as "Hearing Notice / ARB" lands
@@ -36,6 +37,9 @@ export async function attachHearingNoticeToCase(
       getCountyProtestInfo(matchedProperty.cad),
     );
     await saveHearingNotice(userId, pr.id, documentId, extraction);
+    // Known document kind — tag it straight to the hearing section (and the
+    // evidence packet) rather than re-running the classifier.
+    await setDocumentModules(documentId, ["hearing", "evidence"]).catch(() => {});
 
     if (extraction.hearingDate) {
       await scheduleHearing(pr.id, extraction.hearingDate, {

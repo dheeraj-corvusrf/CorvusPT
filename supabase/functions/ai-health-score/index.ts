@@ -3,7 +3,7 @@
 //
 // No Supabase auth check — same known-risk pattern already accepted for the other
 // guest-accessible AI functions (classify-document, ask-about-document, route-intent).
-import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { PROSE_STYLE, STRUCTURED_BULLET_STYLE } from "../_shared/prose-style.ts";
 import { GEMINI_MODEL_REASONING, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
@@ -41,7 +41,10 @@ specific site defects, or facts not given below — if you don't have enough inf
 factor, say so (set dataSufficient to false and explain what's missing) rather than fabricating
 a number.
 
-${PROSE_STYLE}`;
+${PROSE_STYLE}
+
+${STRUCTURED_BULLET_STYLE}
+The word caps in the schema below still apply. These fields stay single sentences (they are one-liners, not lists): executiveConclusion, confidenceReasoning, methodology, nextStep — you may still **bold** the one key number in them. Only factorsIncreasing / factorsReducing are lists, and they are already separate array fields.`;
 
 const str = (v: unknown, len: number): string => (typeof v === "string" ? v.slice(0, len) : "");
 
