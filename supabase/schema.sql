@@ -1551,6 +1551,26 @@ create table if not exists public.settlement_agreements (
   updated_at timestamptz not null default now()
 );
 
+-- The informal-settlement outcome flow (see SettlementSignatureSection in
+-- CaseDetailModal.tsx): whether the owner has already accepted/rejected the
+-- county's proposed value outside the app, an optional "I signed it in
+-- person" copy for AI to verify, and the owner's confirmed Satisfied /
+-- Not Satisfied read that drives whether the case resolves at the settled
+-- value or proceeds to a formal hearing.
+alter table public.settlement_agreements add column if not exists response_status text;
+alter table public.settlement_agreements drop constraint if exists settlement_agreements_response_status_check;
+alter table public.settlement_agreements add constraint settlement_agreements_response_status_check
+  check (response_status is null or response_status in ('not_yet', 'accepted', 'rejected'));
+alter table public.settlement_agreements add column if not exists response_recorded_at timestamptz;
+alter table public.settlement_agreements add column if not exists signed_in_person boolean not null default false;
+alter table public.settlement_agreements add column if not exists signed_copy_document_id uuid references public.documents (id) on delete set null;
+alter table public.settlement_agreements add column if not exists signed_copy_verified_at timestamptz;
+alter table public.settlement_agreements add column if not exists outcome text;
+alter table public.settlement_agreements drop constraint if exists settlement_agreements_outcome_check;
+alter table public.settlement_agreements add constraint settlement_agreements_outcome_check
+  check (outcome is null or outcome in ('satisfied', 'not_satisfied'));
+alter table public.settlement_agreements add column if not exists outcome_confirmed_at timestamptz;
+
 alter table public.settlement_agreements enable row level security;
 
 drop policy if exists "Users can view their own settlement agreements" on public.settlement_agreements;

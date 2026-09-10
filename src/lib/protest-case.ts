@@ -289,6 +289,33 @@ export async function acceptSettlement(protestId: string, offerValue: number): P
   );
 }
 
+// The "Accepted + Satisfied" path from SettlementSignatureSection — same
+// terminal update as acceptSettlement, but also lands the informal
+// sub-tracker on "accepted" so the case history reads correctly (the offer
+// came from the informal review, not a post-hearing decision).
+export async function resolveInformalSettlement(
+  protestId: string,
+  settledValue: number,
+): Promise<void> {
+  const { error } = await supabase
+    .from("protests")
+    .update({
+      final_value: settledValue,
+      escalation_path: "accept",
+      closed_at: new Date().toISOString(),
+      status: "resolved",
+      informal_status: "accepted",
+    })
+    .eq("id", protestId);
+  if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    `Informal settlement accepted at ${currencyText(settledValue)} — case resolved.`,
+    { finalValue: settledValue },
+  );
+}
+
 export async function scheduleHearing(
   protestId: string,
   date: string,

@@ -7,7 +7,9 @@ import {
   type DocumentRecord,
 } from "./documents";
 import { extractDecisionDocument, type DecisionExtraction } from "./decision-notice";
+import { logCaseEvent } from "./case-audit";
 import type { PropertyRecord } from "./properties";
+import type { ProtestRecord } from "./protests";
 import type { SignatureValue } from "@/components/SignaturePad";
 
 // Real "settlement offer awaiting signature" flow: upload the county's own
@@ -38,6 +40,17 @@ export type SettlementAgreementRecord = {
   signatureData: string | null;
   signedAt: string | null;
   signedDocumentId: string | null;
+  // Informal-settlement outcome flow (see SettlementSignatureSection):
+  // whether the owner already responded to the county's proposed value
+  // outside the app, an optional signed-in-person copy that AI verified, and
+  // the owner's confirmed Satisfied / Not Satisfied read.
+  responseStatus: "not_yet" | "accepted" | "rejected" | null;
+  responseRecordedAt: string | null;
+  signedInPerson: boolean;
+  signedCopyDocumentId: string | null;
+  signedCopyVerifiedAt: string | null;
+  outcome: "satisfied" | "not_satisfied" | null;
+  outcomeConfirmedAt: string | null;
   createdAt: string;
 };
 
@@ -56,6 +69,13 @@ type SettlementAgreementRow = {
   signature_data: string | null;
   signed_at: string | null;
   signed_document_id: string | null;
+  response_status: "not_yet" | "accepted" | "rejected" | null;
+  response_recorded_at: string | null;
+  signed_in_person: boolean | null;
+  signed_copy_document_id: string | null;
+  signed_copy_verified_at: string | null;
+  outcome: "satisfied" | "not_satisfied" | null;
+  outcome_confirmed_at: string | null;
   created_at: string;
 };
 
@@ -85,6 +105,13 @@ function fromRow(row: SettlementAgreementRow): SettlementAgreementRecord {
     signatureData: row.signature_data,
     signedAt: row.signed_at,
     signedDocumentId: row.signed_document_id,
+    responseStatus: row.response_status,
+    responseRecordedAt: row.response_recorded_at,
+    signedInPerson: !!row.signed_in_person,
+    signedCopyDocumentId: row.signed_copy_document_id,
+    signedCopyVerifiedAt: row.signed_copy_verified_at,
+    outcome: row.outcome,
+    outcomeConfirmedAt: row.outcome_confirmed_at,
     createdAt: row.created_at,
   };
 }
@@ -139,6 +166,106 @@ export async function confirmSettlementAgreement(id: string): Promise<void> {
     .update({ user_confirmed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq("id", id);
   if (error) throw error;
+}
+
+// Whether the owner has already responded to the county's proposed value
+// outside the app — asked up front so the flow doesn't push someone to
+// re-sign something they already accepted, or to sign something they've
+// already turned down. "not_yet" keeps them in the sign-here path.
+export async function recordSettlementResponse(
+  protestId: string,
+  id: string,
+  status: "not_yet" | "accepted" | "rejected",
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("settlement_agreements")
+    .update({ response_status: status, response_recorded_at: now, updated_at: now })
+    .eq("id", id);
+  if (error) throw error;
+  void logCaseEvent(protestId, "status_change", `Informal settlement response: ${status}.`, {
+    responseStatus: status,
+  });
+}
+
+// The owner signed the settlement in person at the CAD office and now
+// uploads that signed copy — AI verifies the real value/date/tax year/terms
+// and reports whether a completed signature block is actually on it (see
+// extract-decision-document's expectSigned path). The signed copy is filed
+// as its own document; the offer row's value/terms are backfilled from this
+// read when they weren't captured earlier.
+export async function verifySignedSettlementCopy(
+  userId: string,
+  agreement: SettlementAgreementRecord,
+  property: PropertyRecord,
+  protest: ProtestRecord,
+  file: File,
+): Promise<{ record: SettlementAgreementRecord; extraction: DecisionExtraction }> {
+  const doc = await uploadDocument(userId, property.id, file, SETTLEMENT_SIGNED_DOCUMENT_TYPE);
+  const extraction = await extractDecisionDocument(property, protest, file, { expectSigned: true });
+
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = {
+    signed_in_person: true,
+    signed_copy_document_id: doc.id,
+    signed_copy_verified_at: now,
+    updated_at: now,
+  };
+  if (agreement.settledValue == null && extraction.finalValue != null) {
+    patch.settled_value = extraction.finalValue;
+  }
+  if (!agreement.termsSummary && extraction.settlementTerms) {
+    patch.terms_summary = extraction.settlementTerms;
+  }
+  if (agreement.discrepancies.length === 0 && extraction.discrepancies.length > 0) {
+    patch.discrepancies = JSON.stringify(extraction.discrepancies);
+  }
+
+  const { error } = await supabase
+    .from("settlement_agreements")
+    .update(patch)
+    .eq("id", agreement.id);
+  if (error) throw error;
+
+  void logCaseEvent(protest.id, "document_added", "Signed settlement copy uploaded and verified.", {
+    signedCopyDocumentId: doc.id,
+    signaturePresent: extraction.signaturePresent,
+    signedDate: extraction.signedDate,
+    finalValue: extraction.finalValue,
+  });
+
+  return {
+    record: {
+      ...agreement,
+      signedInPerson: true,
+      signedCopyDocumentId: doc.id,
+      signedCopyVerifiedAt: now,
+      settledValue: agreement.settledValue ?? extraction.finalValue,
+      termsSummary: agreement.termsSummary ?? extraction.settlementTerms,
+      discrepancies:
+        agreement.discrepancies.length > 0 ? agreement.discrepancies : extraction.discrepancies,
+    },
+    extraction,
+  };
+}
+
+// The owner's confirmed read of the outcome — this is what drives whether
+// the case resolves at the settled value or proceeds to a formal hearing
+// (see SettlementSignatureSection). Recorded with its own timestamp.
+export async function confirmSettlementOutcome(
+  protestId: string,
+  id: string,
+  outcome: "satisfied" | "not_satisfied",
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("settlement_agreements")
+    .update({ outcome, outcome_confirmed_at: now, updated_at: now })
+    .eq("id", id);
+  if (error) throw error;
+  void logCaseEvent(protestId, "status_change", `Informal settlement outcome: ${outcome}.`, {
+    outcome,
+  });
 }
 
 const PAGE_WIDTH = 612;
