@@ -23,6 +23,21 @@ export type ModuleAnalysisInput = {
   // missing. See loadModule()'s health branch in ai-report.tsx.
   valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
+  // Module 8 (evidence) only — what the app can already verify before asking
+  // the user for anything. evidenceOnFile: the protest-evidence documents
+  // actually uploaded (+ their analyze-document read). authoritativeFacts:
+  // real one-liners the app itself computes (CAD record, value history,
+  // zoning, site GIS, income, comps) — never fabricated. selectedStrategy:
+  // the top strategy name, so Critical is judged against what that argument
+  // truly needs. See loadModule()'s evidence branch in ai-report.tsx.
+  evidenceOnFile?: {
+    name: string;
+    category: string | null;
+    aiNotes: string | null;
+    verdict: string | null;
+  }[];
+  authoritativeFacts?: string[];
+  selectedStrategy?: string | null;
   // Module 2's own per-strategy scores, sent when loading comps/site/improvement/
   // zoning so their guidance stays consistent with — and prioritized by — the
   // Strategy module's ranking. See loadModule()'s sequencing in ai-report.tsx.
@@ -331,6 +346,23 @@ export type ModuleResultMap = {
   evidence: {
     items: {
       item: string;
+      // priority is the real driver now — only "Critical" items block the
+      // user; Important/Supporting/Optional are shown as ways to strengthen
+      // the case. importance/availability are kept, DERIVED from
+      // priority/status, so the quadrant card + executive readiness keep
+      // working while callers migrate. See MODULE_SPECS.evidence.
+      priority: "Critical" | "Important" | "Supporting" | "Optional";
+      // Verified: a document on file or an authoritative record (CAD, value
+      // history, GIS) directly satisfies this. Found: a document plausibly
+      // matches but isn't confirmed. Missing: nothing on file.
+      status: "Verified" | "Found" | "Missing";
+      // Where it was found — "CAD record", "USGS + FEMA", an exact filename,
+      // or null when Missing.
+      foundIn: string | null;
+      // One plain sentence: what this item actually proves for the case.
+      whyNeeded: string;
+      // Why it's Verified, or exactly what's still unconfirmed.
+      verificationNote: string;
       importance: "High" | "Low";
       availability: "High" | "Low";
       // Real, concrete suggestions for what to upload to satisfy this

@@ -51,6 +51,16 @@ type ModulesInput = {
   assessmentRatio?: { medianPct: number; cod: number; codOverCeiling: number } | null;
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
   evidenceFileNames?: string[];
+  // Module 8 (evidence) — verify-before-asking inputs. See MODULE_SPECS.evidence
+  // and loadModule()'s evidence branch in ai-report.tsx.
+  evidenceOnFile?: {
+    name?: string;
+    category?: string | null;
+    aiNotes?: string | null;
+    verdict?: string | null;
+  }[];
+  authoritativeFacts?: string[];
+  selectedStrategy?: string | null;
   // Module 2's own per-strategy scores, sent when calling comps/site/improvement/
   // zoning so their guidance stays consistent with — and prioritized by — the
   // Strategy module's ranking. See loadModule()'s sequencing in ai-report.tsx.
@@ -316,10 +326,18 @@ const evidenceDocumentSuggestions = (
         .slice(0, 4)
     : [];
 
+const EVIDENCE_PRIORITIES = ["Critical", "Important", "Supporting", "Optional"] as const;
+const EVIDENCE_STATUSES = ["Verified", "Found", "Missing"] as const;
+
 const evidenceItems = (
   v: unknown,
 ): {
   item: string;
+  priority: (typeof EVIDENCE_PRIORITIES)[number];
+  status: (typeof EVIDENCE_STATUSES)[number];
+  foundIn: string | null;
+  whyNeeded: string;
+  verificationNote: string;
   importance: "High" | "Low";
   availability: "High" | "Low";
   documentSuggestions: { documentName: string; whatToInclude: string; whereToObtain: string }[];
@@ -327,14 +345,41 @@ const evidenceItems = (
   Array.isArray(v)
     ? v
         .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
-        .map((x) => ({
-          item: String(x.item ?? "").slice(0, 120),
-          importance: x.importance === "High" ? ("High" as const) : ("Low" as const),
-          availability: x.availability === "High" ? ("High" as const) : ("Low" as const),
-          documentSuggestions: evidenceDocumentSuggestions(x.documentSuggestions),
-        }))
+        .map((x) => {
+          const priority = EVIDENCE_PRIORITIES.includes(
+            x.priority as (typeof EVIDENCE_PRIORITIES)[number],
+          )
+            ? (x.priority as (typeof EVIDENCE_PRIORITIES)[number])
+            : // Back-compat: an old "importance": "High" maps to Important, not
+              // Critical — never auto-escalate a stale item to blocking.
+              x.importance === "High"
+              ? ("Important" as const)
+              : ("Supporting" as const);
+          const status = EVIDENCE_STATUSES.includes(x.status as (typeof EVIDENCE_STATUSES)[number])
+            ? (x.status as (typeof EVIDENCE_STATUSES)[number])
+            : x.availability === "High"
+              ? ("Found" as const)
+              : ("Missing" as const);
+          const foundIn =
+            status !== "Missing" && typeof x.foundIn === "string" && x.foundIn.trim()
+              ? x.foundIn.trim().slice(0, 120)
+              : null;
+          return {
+            item: String(x.item ?? "").slice(0, 120),
+            priority,
+            status,
+            foundIn,
+            whyNeeded: typeof x.whyNeeded === "string" ? x.whyNeeded.slice(0, 300) : "",
+            verificationNote:
+              typeof x.verificationNote === "string" ? x.verificationNote.slice(0, 300) : "",
+            // Derived, kept for the quadrant card + executive readiness.
+            importance: (priority === "Critical" ? "High" : "Low") as "High" | "Low",
+            availability: (status === "Missing" ? "Low" : "High") as "High" | "Low",
+            documentSuggestions: evidenceDocumentSuggestions(x.documentSuggestions),
+          };
+        })
         .filter((x) => x.item.length > 0)
-        .slice(0, 6)
+        .slice(0, 10)
     : [];
 
 // Module 10 (executive) parsers — real modules only, so a bad/invented
@@ -1116,27 +1161,39 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
   },
   evidence: {
     instruction:
-      "Produce a prioritized evidence checklist for the protest packet. For each item, judge its " +
-      "importance to the case (High/Low) and how readily available it typically is to a property " +
-      "owner (High/Low) — this powers a priority-quadrant view, so favor items that actually differ " +
-      "on these two axes rather than marking everything High/High. importance is High only for an " +
-      "item that would materially change the strategy/value argument if missing, Low otherwise; " +
-      "availability is High only for something the owner already has or can obtain with no real " +
-      "effort (a photo, a bill), Low for something that takes real work to get (a certified " +
-      "appraisal, a rent roll). This checklist feeds a real completeness score shown to the user — " +
-      "given the same property record, always select the same real evidence types and classify them " +
-      "the same way, not a different list each time. For EACH item, also give 1-3 concrete " +
-      "documentSuggestions the owner could actually upload to satisfy it: documentName is a short " +
-      'real document type (e.g. "Independent Fee Appraisal Report", "Site Photos — Utility ' +
-      'Meter Locations"), whatToInclude is one plain sentence on what the document should actually ' +
-      "show or state, and whereToObtain names a REAL, GENERAL source type for this kind of document " +
-      "— never a specific company/URL/portal you can't verify — using only these kinds of sources: " +
-      "the county appraisal district (CAD) website or office, a licensed land surveyor, a licensed " +
-      "property appraiser (MAI), the property owner's own records, the city or county " +
-      "planning/zoning department, a general contractor or licensed inspector, or the owner's own " +
-      "camera/phone (for photos). Never invent a specific named vendor, website, or phone number.",
+      "Build the evidence checklist for this protest, then VERIFY as much of it as you can from " +
+      "what's already on file before asking the user for anything. You are given (when available): " +
+      "the documents already uploaded for this property with their AI-check read (evidenceOnFile), " +
+      "real facts the app itself has already established (authoritativeFacts — CAD record, value " +
+      "history, zoning, site GIS, income, comps), and the selected protest strategy " +
+      "(selectedStrategy). Rules:\n" +
+      "- For EACH item set status: 'Verified' when a specific uploaded document OR a specific line " +
+      "in authoritativeFacts DIRECTLY satisfies it; 'Found' when an uploaded document plausibly " +
+      "relates to it but doesn't clearly confirm it; 'Missing' when nothing on file covers it. " +
+      "NEVER mark Verified/Found from assumption — only from a document or fact actually listed. " +
+      "foundIn names the exact source ('CAD record', 'USGS + FEMA', or the exact file name), or " +
+      "null when Missing.\n" +
+      "- priority is exactly one of Critical | Important | Supporting | Optional. Critical ONLY for " +
+      "an item the selected strategy's argument genuinely fails without — this is the only tier " +
+      "that blocks the user. Important strengthens the case materially; Supporting helps at the " +
+      "margin; Optional is nice-to-have. Given the same record + strategy, classify the same way " +
+      "every time.\n" +
+      "- whyNeeded: one plain sentence — what this item actually proves for THIS case (not a " +
+      "generic definition). verificationNote: one plain sentence — why it's Verified (cite the " +
+      "source), or exactly what is still unconfirmed.\n" +
+      "- For EACH item still Missing or Found, give 1-3 concrete documentSuggestions: documentName " +
+      'is a short real document type (e.g. "Independent Fee Appraisal Report", "Site Photos — ' +
+      'Utility Meter Locations"), whatToInclude is one sentence on what it must show, and ' +
+      "whereToObtain names a REAL GENERAL source type — never a specific company/URL/portal — " +
+      "using only: the county appraisal district (CAD) website or office, a licensed land " +
+      "surveyor, a licensed property appraiser (MAI), the owner's own records, the city/county " +
+      "planning or zoning department, a general contractor or licensed inspector, or the owner's " +
+      "own camera. Never invent a named vendor, website, or phone number.\n" +
+      "- 6-10 items. Favor items that differ on priority and status rather than a flat list.",
     schema:
-      `{"items": [{"item": "<short item>", "importance": "<High | Low>", "availability": "<High | Low>", ` +
+      `{"items": [{"item": "<short item>", "priority": "<Critical | Important | Supporting | ` +
+      `Optional>", "status": "<Verified | Found | Missing>", "foundIn": "<exact source, or null>", ` +
+      `"whyNeeded": "<one sentence>", "verificationNote": "<one sentence>", ` +
       `"documentSuggestions": [{"documentName": "<short document type>", "whatToInclude": ` +
       `"<one sentence>", "whereToObtain": "<a general real source type>"}, ...]}, ...]}`,
     parse: (p) => ({ items: evidenceItems(p.items) }),
@@ -1299,6 +1356,33 @@ function buildRecord(input: ModulesInput): string {
   if (input.evidenceFileNames && input.evidenceFileNames.length > 0) {
     lines.push(
       `Evidence documents already uploaded by the owner: ${input.evidenceFileNames.join(", ")}`,
+    );
+  }
+  if (input.selectedStrategy) {
+    lines.push(`Selected protest strategy: ${input.selectedStrategy}`);
+  }
+  const onFile = Array.isArray(input.evidenceOnFile)
+    ? input.evidenceOnFile.filter((d) => typeof d?.name === "string" && d.name.trim())
+    : [];
+  if (onFile.length > 0) {
+    lines.push(
+      `Documents ON FILE for this property (name — AI category / verdict — AI notes):\n` +
+        onFile
+          .slice(0, 20)
+          .map(
+            (d) =>
+              `- ${d.name} — ${d.category ?? "uncategorized"}${
+                d.verdict ? ` / ${d.verdict}` : ""
+              }${d.aiNotes ? ` — ${String(d.aiNotes).slice(0, 200)}` : ""}`,
+          )
+          .join("\n"),
+    );
+  }
+  if (Array.isArray(input.authoritativeFacts) && input.authoritativeFacts.length > 0) {
+    lines.push(
+      `Facts the app has ALREADY established for this property (real, computed — treat as ` +
+        `authoritative; use to mark items Verified):\n` +
+        input.authoritativeFacts.map((f) => `- ${f}`).join("\n"),
     );
   }
   if (input.priorityContext && input.priorityContext.length > 0) {
