@@ -14,6 +14,8 @@ import {
   TrendingDown,
   Loader2,
   Mic,
+  Volume2,
+  VolumeX,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -48,6 +50,7 @@ import { getHearingNudge } from "@/lib/hearing-nudge";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { useSpeechInput } from "@/hooks/use-speech-input";
+import { useSpeechOutput } from "@/hooks/use-speech-output";
 import { ICON_COLORS } from "@/lib/icon-colors";
 
 export const Route = createFileRoute("/dashboard/_layout/")({
@@ -81,6 +84,10 @@ function Overview() {
   // Voice input for the "Ask AI" quick action — fills the box as you speak;
   // you still hit Enter. Same on-device Web Speech hook as the Ask AI widget.
   const askSpeech = useSpeechInput(setAskQuery);
+  // Read the AI's reply aloud — when the toggle is on, or when the question
+  // was just asked by voice (a spoken question gets a spoken answer).
+  const askTts = useSpeechOutput();
+  const askedByVoice = useRef(false);
   const [nudge, setNudge] = useState<string | null>(null);
   const nudgedPropertyId = useRef<string | null>(null);
   const [hearingNudge, setHearingNudge] = useState<string | null>(null);
@@ -255,11 +262,16 @@ function Overview() {
     setAsking(true);
     try {
       const result = await askRouter(askQuery.trim());
+      if (result.message) {
+        toast.message(result.message);
+        if (askTts.enabled || askedByVoice.current) askTts.speak(result.message);
+      }
       nav({ to: result.destination });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not process that. Please try again.");
     } finally {
       setAsking(false);
+      askedByVoice.current = false;
     }
   }
 
@@ -396,15 +408,36 @@ function Overview() {
             </span>
             <input
               value={askQuery}
-              onChange={(e) => setAskQuery(e.target.value)}
+              onChange={(e) => {
+                setAskQuery(e.target.value);
+                askedByVoice.current = false;
+              }}
               placeholder={askSpeech.listening ? "Listening…" : "Ask AI…"}
               disabled={asking}
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            {askTts.supported && (
+              <button
+                type="button"
+                onClick={() => askTts.setEnabled(!(askTts.enabled || askTts.speaking))}
+                aria-label={askTts.enabled ? "Turn off read-aloud" : "Read answers aloud"}
+                title={askTts.enabled ? "Read-aloud on" : "Read answers aloud"}
+                className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border transition-colors ${
+                  askTts.enabled
+                    ? "bg-accent/10 text-accent"
+                    : "text-muted-foreground hover:text-foreground"
+                } ${askTts.speaking ? "animate-pulse" : ""}`}
+              >
+                {askTts.enabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+              </button>
+            )}
             {askSpeech.supported && (
               <button
                 type="button"
-                onClick={askSpeech.toggle}
+                onClick={() => {
+                  if (!askSpeech.listening) askedByVoice.current = true;
+                  askSpeech.toggle();
+                }}
                 disabled={asking}
                 aria-label={askSpeech.listening ? "Stop listening" : "Speak your question"}
                 title={askSpeech.listening ? "Stop listening" : "Speak your question"}
