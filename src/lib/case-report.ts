@@ -9,7 +9,7 @@ import type { ProtestRecord } from "./protests";
 import type { CountyProtestInfo } from "./county-protest-info";
 import type { CaseGuidance } from "./case-guidance";
 import type { CaseRecordItem } from "./case-record";
-import type { PreFilingCheckItem } from "./pre-filing-check";
+import { isBlockingUnresolved, type PreFilingCheckItem } from "./pre-filing-check";
 import type { DocumentRecord } from "./documents";
 import type { HearingPrepGuide } from "./hearing-prep";
 import { INFORMAL_STATUS_LABEL } from "./protests";
@@ -423,11 +423,12 @@ export function buildCaseReport(i: CaseReportInputs): ProtestCaseReport {
   );
   for (const it of outstandingProof.slice(0, 5))
     nextActions.push({ category: "waiting_on_user", label: it.label, detail: it.detail });
-  const blockedPreFiling = (i.preFilingItems ?? []).filter(
-    (it) => it.blocking && it.status === "missing",
-  );
+  const blockedPreFiling = (i.preFilingItems ?? []).filter(isBlockingUnresolved);
   for (const it of blockedPreFiling)
-    nextActions.push({ category: "waiting_on_user", label: `Provide: ${it.label}` });
+    nextActions.push({
+      category: "waiting_on_user",
+      label: it.status === "needs_review" ? `Confirm: ${it.label}` : `Provide: ${it.label}`,
+    });
 
   // Next step — the single prioritized action
   let primary: NextAction | null = null;
