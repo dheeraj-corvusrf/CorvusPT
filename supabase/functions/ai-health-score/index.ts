@@ -29,6 +29,15 @@ type HealthScoreInput = {
   valueTrend?: { jumpTriggered: boolean; jumpPct: number | null } | null;
   valueHistory?: { year: number; total: number }[];
   evidenceFileNames?: string[];
+  // Property detail the app really has (from the CAD record / AI-fetched base
+  // data). Present here means "known" — the prompt must not report it missing.
+  legalDescription?: string | null;
+  subdivision?: string | null;
+  buildingSqft?: number | null;
+  yearBuilt?: number | null;
+  buildingClass?: string | null;
+  lotSizeAcres?: number | null;
+  lastTransferDate?: string | null;
 };
 
 const PREAMBLE = `You are CorvusPT's AI property tax analyst for Texas commercial properties.
@@ -40,6 +49,20 @@ practice. Do NOT invent specific comparable sale prices, specific building squar
 specific site defects, or facts not given below — if you don't have enough information for a
 factor, say so (set dataSufficient to false and explain what's missing) rather than fabricating
 a number.
+
+TEXAS IS A NON-DISCLOSURE STATE. Sale prices, sale dates as prices, and sale-based cap rates
+are NEVER public here and can never be obtained — a recorded transfer DATE is the most that
+exists. So do NOT list "sale price", "explicit sale price", "recent sale", "market sale data",
+or "purchase price" as a missing item, do NOT put it in confidenceReasoning, and do NOT lower
+confidencePct because it is absent. Treat market-transaction price data as not-applicable, not
+as a gap.
+
+When building area / year built / construction class / lot size ARE given in the record below,
+they are KNOWN — never call them missing or say the analysis "lacks property details". Only
+name a data gap the owner could actually close by uploading something (a rent roll, an
+independent appraisal, condition photos, a survey). If the record already has assessed values,
+a multi-year value history, a county ratio study, and comparable properties, confidencePct
+should sit in the moderate-to-strong band (roughly 55-80), not the 20s.
 
 ${PROSE_STYLE}
 
@@ -96,12 +119,16 @@ comparable properties", "property has condition issues", "assessment jumped shar
 prior years", "assessment ratio above the county norm".
 "factorsReducing": ["<plain phrase, max ~12 words, that makes the protest WEAKER or harder
 to win>", ...] (up to 5, empty array if none apply). Same terse style. Style like: "strong
-comparable assessments nearby", "recent sale supports the CAD value", "limited evidence of
-overvaluation", "county ratio study shows uniform assessments".
+comparable assessments nearby", "limited evidence of overvaluation", "county ratio study
+shows uniform assessments". Never "no sale price / no recent sale" — that is not obtainable
+in Texas and is not a weakness.
 "confidencePct": <integer 0-100, how confident this analysis is given the data actually
-available>,
-"confidenceReasoning": "<ONE short sentence, max ~15 words, naming what's missing — not a
-list, the UI already shows what data was pulled elsewhere>",
+available. Do NOT dock points for market sale prices — those never exist in Texas. With
+assessed values + multi-year history + a ratio study + comps present, this belongs in the
+55-80 band>,
+"confidenceReasoning": "<ONE short sentence, max ~15 words, naming only a gap the OWNER could
+close by uploading (rent roll, appraisal, condition photos, survey). Never mention sale price
+or building details that are already given above.>",
 "methodology": "<ONE short sentence, max ~18 words, on how the score was reached — not
 model internals>",
 "nextStep": "<ONE short sentence, max ~12 words: the single next action>",
@@ -168,6 +195,18 @@ Deno.serve(async (req: Request) => {
       input.improvementValue != null &&
         `Improvement value: $${input.improvementValue.toLocaleString()}`,
       `Total assessed value: $${input.totalValue.toLocaleString()}`,
+      input.legalDescription && `Legal description: ${input.legalDescription}`,
+      input.subdivision && `Subdivision: ${input.subdivision}`,
+      input.buildingSqft != null &&
+        `Building area (per CAD): ${Math.round(input.buildingSqft).toLocaleString()} SF — this IS known, do not report it missing`,
+      input.yearBuilt != null &&
+        `Year built (per CAD): ${input.yearBuilt} — this IS known, do not report it missing`,
+      input.buildingClass &&
+        `Construction class (per CAD): ${input.buildingClass} — this IS known, do not report it missing`,
+      input.lotSizeAcres != null &&
+        `Lot size (per CAD): ${input.lotSizeAcres.toFixed(3).replace(/\.?0+$/, "")} acres`,
+      input.lastTransferDate &&
+        `Most recent recorded transfer: ${input.lastTransferDate} (a deed date only — Texas does not disclose sale prices, so there is no price to be missing)`,
     ];
     if (input.compsSummary) {
       const c = input.compsSummary;

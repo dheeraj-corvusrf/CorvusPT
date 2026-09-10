@@ -41,6 +41,16 @@ export type CadRecord = {
   bisPropertyId?: string | null;
   valueHistory?: CadValueHistoryEntry[];
   deeds?: CadDeed[];
+  // Structure / lot detail — only populated for the counties whose parcel
+  // layer actually publishes it (Denton, Collin, Tarrant, Fort Bend, Williamson
+  // for building data; Harris/Travis/Grayson for lot size only — verified live
+  // against each ArcGIS layer's metadata). Null everywhere else; never
+  // fabricated. See applyStructureDetail() in supabase/functions/cad-lookup.
+  buildingSqft?: number | null;
+  yearBuilt?: number | null;
+  buildingClass?: string | null;
+  lotSizeSqft?: number | null;
+  lotSizeAcres?: number | null;
 };
 
 // nearby: real parcels on the same street (any house number), from the same

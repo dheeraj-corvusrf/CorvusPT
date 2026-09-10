@@ -1571,10 +1571,27 @@ function Report() {
       );
       input.valueTrend = buildValueTrend(state.valueHistory);
       if (id === "health") {
-        input.valueHistory = (state.valueHistory ?? [])
+        const stateHistory = (state.valueHistory ?? [])
           .map((h) => ({ year: h.year, total: h.appraisedValue ?? h.marketValue ?? null }))
           .filter((h): h is { year: number; total: number } => h.total != null)
           .sort((a, b) => a.year - b.year);
+        // Fall back to the base-data snapshot's history when intake carries
+        // none, so a base-data-backed property stops reporting "no historical
+        // values" (it's on the CAD, we fetched it).
+        const bdCad = baseData?.snapshot.cad ?? null;
+        const bdHistory = (bdCad?.valueHistory ?? [])
+          .filter((h): h is { year: number; total: number } => h.total != null)
+          .sort((a, b) => a.year - b.year);
+        input.valueHistory = stateHistory.length > 0 ? stateHistory : bdHistory;
+        // Property detail the app actually has — from intake, else the
+        // AI-fetched base data. Omitted (not guessed) when neither has it.
+        input.legalDescription = state.legalDescription ?? bdCad?.legalDescription ?? null;
+        input.subdivision = state.subdivision ?? bdCad?.subdivision ?? null;
+        input.buildingSqft = bdCad?.buildingSqft ?? null;
+        input.yearBuilt = bdCad?.yearBuilt ?? null;
+        input.buildingClass = bdCad?.buildingClass ?? null;
+        input.lotSizeAcres = bdCad?.lotSizeAcres ?? null;
+        input.lastTransferDate = bdCad?.deeds?.[0]?.date ?? null;
       }
       input.evidenceFileNames = evidenceDocs.map((d) => d.fileName);
     }

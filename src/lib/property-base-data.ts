@@ -45,6 +45,13 @@ export type PropertyBaseSnapshot = {
     taxYear: number | null;
     legalDescription: string | null;
     subdivision: string | null;
+    // Structure / lot detail — only present for the counties whose parcel layer
+    // publishes it (see CadRecord in cad-lookup.ts). Null otherwise.
+    buildingSqft: number | null;
+    yearBuilt: number | null;
+    buildingClass: string | null;
+    lotSizeSqft: number | null;
+    lotSizeAcres: number | null;
     valueHistory: { year: number; total: number | null }[];
     deeds: { date: string | null; type: string | null; instrumentNum: string | null }[];
   } | null;
@@ -86,6 +93,11 @@ function trimCad(record: CadRecord | null): PropertyBaseSnapshot["cad"] {
     taxYear: record.taxYear,
     legalDescription: record.legalDescription ?? null,
     subdivision: record.subdivision ?? null,
+    buildingSqft: record.buildingSqft ?? null,
+    yearBuilt: record.yearBuilt ?? null,
+    buildingClass: record.buildingClass ?? null,
+    lotSizeSqft: record.lotSizeSqft ?? null,
+    lotSizeAcres: record.lotSizeAcres ?? null,
     valueHistory: (record.valueHistory ?? [])
       .map((h) => ({ year: h.year, total: h.appraisedValue ?? h.marketValue ?? null }))
       .sort((a, b) => a.year - b.year),
@@ -170,6 +182,17 @@ export function buildBaseDataMarkdown(
     if (c.propertyType) lines.push(`- Property classification: ${c.propertyType}`);
     if (c.legalDescription) lines.push(`- Legal description: ${c.legalDescription}`);
     if (c.subdivision) lines.push(`- Subdivision: ${c.subdivision}`);
+    if (c.buildingSqft != null)
+      lines.push(`- Building area (per CAD): ${Math.round(c.buildingSqft).toLocaleString()} SF`);
+    if (c.yearBuilt != null) lines.push(`- Year built (per CAD): ${c.yearBuilt}`);
+    if (c.buildingClass) lines.push(`- Construction class (per CAD): ${c.buildingClass}`);
+    if (c.lotSizeAcres != null || c.lotSizeSqft != null) {
+      const parts = [
+        c.lotSizeSqft != null ? `${Math.round(c.lotSizeSqft).toLocaleString()} SF` : null,
+        c.lotSizeAcres != null ? `${c.lotSizeAcres.toFixed(3).replace(/\.?0+$/, "")} acres` : null,
+      ].filter(Boolean);
+      lines.push(`- Lot size (per CAD): ${parts.join(" / ")}`);
+    }
     lines.push(
       `- Assessed values${c.taxYear ? ` (tax year ${c.taxYear})` : ""}: land ${money(c.landValue)}, ` +
         `improvement ${money(c.improvementValue)}, total ${money(c.totalValue)}`,
@@ -304,6 +327,20 @@ export function diffBaseSnapshots(
   valChange("total assessed value", a.totalValue, b.totalValue);
   valChange("land value", a.landValue, b.landValue);
   valChange("improvement value", a.improvementValue, b.improvementValue);
+  if (
+    a.buildingSqft != null &&
+    b.buildingSqft != null &&
+    Math.abs(a.buildingSqft - b.buildingSqft) > 1
+  ) {
+    notes.push(
+      `CAD building area ${Math.round(a.buildingSqft).toLocaleString()} → ${Math.round(
+        b.buildingSqft,
+      ).toLocaleString()} SF`,
+    );
+  }
+  if (a.yearBuilt != null && b.yearBuilt != null && a.yearBuilt !== b.yearBuilt) {
+    notes.push(`CAD year built ${a.yearBuilt} → ${b.yearBuilt}`);
+  }
   if (a.taxYear != null && b.taxYear != null && a.taxYear !== b.taxYear) {
     notes.push(`tax year ${a.taxYear} → ${b.taxYear}`);
   }

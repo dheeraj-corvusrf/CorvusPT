@@ -30,6 +30,11 @@ type CadSnap = {
   taxYear: number | null;
   legalDescription: string | null;
   subdivision: string | null;
+  buildingSqft: number | null;
+  yearBuilt: number | null;
+  buildingClass: string | null;
+  lotSizeSqft: number | null;
+  lotSizeAcres: number | null;
   valueHistory: { year: number; total: number | null }[];
   deeds: { date: string | null; type: string | null; instrumentNum: string | null }[];
 };
@@ -47,6 +52,11 @@ function trimCad(record: any): CadSnap | null {
     taxYear: record.taxYear ?? null,
     legalDescription: record.legalDescription ?? null,
     subdivision: record.subdivision ?? null,
+    buildingSqft: record.buildingSqft ?? null,
+    yearBuilt: record.yearBuilt ?? null,
+    buildingClass: record.buildingClass ?? null,
+    lotSizeSqft: record.lotSizeSqft ?? null,
+    lotSizeAcres: record.lotSizeAcres ?? null,
     valueHistory: Array.isArray(record.valueHistory)
       ? record.valueHistory
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -88,6 +98,18 @@ function diffCad(a: CadSnap | null, b: CadSnap | null): string | null {
     notes.push("legal description changed");
   if (b.deeds.length > a.deeds.length)
     notes.push(`${b.deeds.length - a.deeds.length} new recorded deed/transfer`);
+  if (
+    a.buildingSqft != null &&
+    b.buildingSqft != null &&
+    Math.abs(a.buildingSqft - b.buildingSqft) > 1
+  )
+    notes.push(
+      `CAD building area ${Math.round(a.buildingSqft).toLocaleString()} → ${Math.round(
+        b.buildingSqft,
+      ).toLocaleString()} SF`,
+    );
+  if (a.yearBuilt != null && b.yearBuilt != null && a.yearBuilt !== b.yearBuilt)
+    notes.push(`CAD year built ${a.yearBuilt} → ${b.yearBuilt}`);
   return notes.length > 0 ? notes.join("; ") : null;
 }
 
