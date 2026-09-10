@@ -10,9 +10,14 @@ import type { AttendanceType } from "./protests";
 //    NOT appear in person at the ARB hearing — read from the Notice of
 //    Protest's own "how will you appear" answer once it's been filled in.
 
-export type FilingStepId = "file" | "agent" | "affidavit" | "evidence";
+export type FilingStepId = "prefiling" | "file" | "agent" | "affidavit" | "evidence";
 
 export const FILING_STEP_META: Record<FilingStepId, { label: string; blurb: string }> = {
+  prefiling: {
+    label: "Pre-Filing Check",
+    blurb:
+      "Corvus confirms the case's county, property, tax year, owner, deadline, and county requirements before you file.",
+  },
   file: {
     label: "File Protest",
     blurb:
@@ -52,7 +57,9 @@ function willNotAppearInPerson(hearingAppearance: string | null): boolean {
 }
 
 export function requiredFilingSteps(input: FilingStepInput): FilingStepId[] {
-  const steps: FilingStepId[] = ["file"];
+  // Pre-Filing Check always comes first — it runs between Corvus's guidance and
+  // the protest form.
+  const steps: FilingStepId[] = ["prefiling", "file"];
 
   if (
     input.attendanceType === "Authorized Agent" ||

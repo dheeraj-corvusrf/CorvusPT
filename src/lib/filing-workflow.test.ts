@@ -11,20 +11,21 @@ function input(over: Partial<FilingStepInput> = {}): FilingStepInput {
 }
 
 describe("requiredFilingSteps", () => {
-  it("owner appears in person, no agent → File Protest + Evidence only", () => {
-    expect(requiredFilingSteps(input())).toEqual(["file", "evidence"]);
+  it("owner appears in person, no agent → Pre-Filing Check, File Protest, Evidence", () => {
+    expect(requiredFilingSteps(input())).toEqual(["prefiling", "file", "evidence"]);
   });
 
-  it("always starts with File and ends with Evidence", () => {
+  it("always starts with Pre-Filing Check then File, and ends with Evidence", () => {
     const s = requiredFilingSteps(
       input({ attendanceType: "Both", hearingAppearance: "By videoconference" }),
     );
-    expect(s[0]).toBe("file");
+    expect(s.slice(0, 2)).toEqual(["prefiling", "file"]);
     expect(s[s.length - 1]).toBe("evidence");
   });
 
   it("adds the Agent step when an agent will represent the owner", () => {
     expect(requiredFilingSteps(input({ attendanceType: "Authorized Agent" }))).toEqual([
+      "prefiling",
       "file",
       "agent",
       "evidence",
@@ -49,11 +50,11 @@ describe("requiredFilingSteps", () => {
     ).toContain("affidavit");
   });
 
-  it("can require all four steps", () => {
+  it("can require all five steps", () => {
     expect(
       requiredFilingSteps(
         input({ attendanceType: "Authorized Agent", hearingAppearance: "By videoconference" }),
       ),
-    ).toEqual(["file", "agent", "affidavit", "evidence"]);
+    ).toEqual(["prefiling", "file", "agent", "affidavit", "evidence"]);
   });
 });

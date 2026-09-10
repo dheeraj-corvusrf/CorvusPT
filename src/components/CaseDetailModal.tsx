@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -455,30 +455,17 @@ export function CaseDetailView({
                 caseData={caseData}
                 onReload={load}
               />
-              {current.status === "requested" ? (
-                <PreFilingGate
-                  userId={userId}
-                  property={property}
-                  protest={current}
-                  caseData={caseData}
-                  evidenceDocuments={evidenceDocuments}
-                  noticeSignedAt={noticeSignedAt}
-                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-                  onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
-                  onNoticeSigned={setNoticeSignedAt}
-                />
-              ) : (
-                <DocumentsSection
-                  userId={userId}
-                  protest={current}
-                  property={property}
-                  strategyRecommendation={caseData?.strategyRecommendation ?? null}
-                  noticeSignedAt={noticeSignedAt}
-                  evidenceDocuments={evidenceDocuments}
-                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-                  onNoticeSigned={setNoticeSignedAt}
-                />
-              )}
+              <DocumentsSection
+                userId={userId}
+                protest={current}
+                property={property}
+                strategyRecommendation={caseData?.strategyRecommendation ?? null}
+                noticeSignedAt={noticeSignedAt}
+                evidenceDocuments={evidenceDocuments}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
+                onNoticeSigned={setNoticeSignedAt}
+              />
             </div>
           )}
 
@@ -998,77 +985,6 @@ function NextStepFooter({
   );
 }
 
-// Runs before the user can reach Documents/filing at all. Every fact comes
-// from getPreFilingCheck() — real case/property/evidence fields, plus real
-// per-county data from county-protest-info.ts, never AI-invented. If a
-// blocking field (case identity/deadline) is missing, filing stops here and
-// DocumentsSection is not rendered until it's corrected — the non-blocking
-// procedural rows (filing method, county contact, etc.) are informational
-// and never stop filing on their own, since the app's own generic form is
-// always a valid fallback even where a specific county detail isn't
-// confirmed.
-function PreFilingGate({
-  userId,
-  property,
-  protest,
-  caseData,
-  evidenceDocuments,
-  noticeSignedAt,
-  onUpdate,
-  onPropertyUpdate,
-  onNoticeSigned,
-}: {
-  userId: string;
-  property: PropertyRecord;
-  protest: ProtestRecord;
-  caseData: ProtestCase | null;
-  evidenceDocuments: DocumentRecord[];
-  noticeSignedAt: string | null;
-  onUpdate: (patch: Partial<ProtestRecord>) => void;
-  onPropertyUpdate: (patch: Partial<PropertyRecord>) => void;
-  onNoticeSigned: (signedAt: string | null) => void;
-}) {
-  const items = getPreFilingCheck(property, protest, evidenceDocuments.length);
-  const blocked = isPreFilingBlocked(items);
-
-  return (
-    <>
-      {/* While the readiness check is blocked the Documents section (and its
-          own id="case-documents") isn't rendered — so Corvus Guidance's
-          "Review Notice of Protest" link would scroll to nothing. Carry the
-          id here in that case so the link lands the user on exactly what's
-          blocking them. Exactly one element ever has the id. */}
-      <div id={blocked ? "case-documents" : undefined} className="mt-5 border-t border-border pt-5">
-        <PreFilingCheckList
-          items={items}
-          blocked={blocked}
-          propertyId={property.id}
-          onFixed={onPropertyUpdate}
-        />
-        {blocked && (
-          <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-            Corvus AI can't confirm this case is ready to file — please correct or confirm the
-            field(s) marked "Missing" or "Needs review" above before filing. Use the editor next to
-            each one. Documents are hidden until this is resolved.
-          </div>
-        )}
-      </div>
-      {!blocked && (
-        <DocumentsSection
-          userId={userId}
-          protest={protest}
-          property={property}
-          strategyRecommendation={caseData?.strategyRecommendation ?? null}
-          noticeSignedAt={noticeSignedAt}
-          evidenceDocuments={evidenceDocuments}
-          onUpdate={onUpdate}
-          onNoticeSigned={onNoticeSigned}
-        />
-      )}
-    </>
-  );
-}
-
 // Maps a blocking PreFilingCheckItem's label to the real property field it
 // corrects and the input shape that field needs — County uses a closed
 // dropdown of the exact cad strings the rest of the app recognizes (a
@@ -1537,6 +1453,9 @@ export function DocumentsSection({
   evidenceDocuments,
   onUpdate,
   onNoticeSigned,
+  // Correct a blocking Pre-Filing Check field (County / Deadline / …) right in
+  // the workflow's first step. Optional — omitted by the admin copy.
+  onPropertyUpdate,
   // Staff must never sign a legal filing on a customer's behalf — the admin
   // panel's copy of this section (AdminCaseProgressModal) passes false to
   // hide signing entirely, keeping Save Progress/Download available for
@@ -1551,6 +1470,7 @@ export function DocumentsSection({
   evidenceDocuments: DocumentRecord[];
   onUpdate: (patch: Partial<ProtestRecord>) => void;
   onNoticeSigned: (signedAt: string | null) => void;
+  onPropertyUpdate?: (patch: Partial<PropertyRecord>) => void;
   allowSigning?: boolean;
 }) {
   const [markingFiled, setMarkingFiled] = useState(false);
@@ -1635,15 +1555,13 @@ export function DocumentsSection({
       }),
     [protest.attendanceType, noticeHearingAppearance],
   );
-  const [activeStep, setActiveStep] = useState<FilingStepId>(filingSteps[0]);
-  // Keep the open step valid if the step set changes (e.g. the affidavit step
-  // drops out after the user picks "In person").
-  useEffect(() => {
-    if (!filingSteps.includes(activeStep)) setActiveStep(filingSteps[0]);
-  }, [filingSteps, activeStep]);
+  const preFilingItems = getPreFilingCheck(property, protest, evidenceDocuments.length);
+  const preFilingBlocked = isPreFilingBlocked(preFilingItems);
 
   function stepDone(id: FilingStepId): boolean {
     switch (id) {
+      case "prefiling":
+        return !preFilingBlocked;
       case "file":
         return !!noticeSignedAt;
       case "agent":
@@ -1653,6 +1571,38 @@ export function DocumentsSection({
       case "evidence":
         return !!protest.evidenceSubmittedConfirmedAt;
     }
+  }
+
+  const firstIncomplete = filingSteps.find((s) => !stepDone(s)) ?? filingSteps[0];
+  const [activeStep, setActiveStep] = useState<FilingStepId>(
+    preFilingBlocked ? "prefiling" : firstIncomplete,
+  );
+  // Auto-advance: when the step the user is currently on gets completed, move
+  // them to the next step that still needs work — so they never have to figure
+  // out "what's next". Manual back-navigation to review a completed step is
+  // preserved (only advances if they were sitting on the step that just
+  // finished).
+  const prevFirstIncomplete = useRef(firstIncomplete);
+  useEffect(() => {
+    const prev = prevFirstIncomplete.current;
+    prevFirstIncomplete.current = firstIncomplete;
+    if (!filingSteps.includes(activeStep)) {
+      setActiveStep(firstIncomplete);
+    } else if (preFilingBlocked && activeStep !== "prefiling") {
+      setActiveStep("prefiling");
+    } else if (prev !== firstIncomplete && activeStep === prev) {
+      setActiveStep(firstIncomplete);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filingSteps.join(","), preFilingBlocked, firstIncomplete]);
+
+  function selectStep(id: FilingStepId) {
+    // While the Pre-Filing Check is blocked, nothing after it is actionable.
+    if (preFilingBlocked && id !== "prefiling") {
+      toast.info("Finish the Pre-Filing Check first — resolve the flagged field(s).");
+      return;
+    }
+    setActiveStep(id);
   }
 
   async function handleMarkEvidenceSubmitted() {
@@ -1694,14 +1644,35 @@ export function DocumentsSection({
   // swaps in a saved draft/signed submission if one exists — a prior Save
   // Progress or Sign & Submit always wins over freshly-computed defaults.
   function openProtestEditor() {
-    setValues(
-      getNoticeOfProtestDefaults(property, property.taxYear, strategyRecommendation, authorization),
+    const defaults = getNoticeOfProtestDefaults(
+      property,
+      property.taxYear,
+      strategyRecommendation,
+      authorization,
     );
+    setValues(defaults);
     setEditingForm("protest");
     setSigningOpen(false);
     setSignature(null);
     getSubmission(protest.id, "notice_of_protest")
-      .then((existing) => existing && setValues(existing.fieldValues))
+      .then((existing) => {
+        if (existing) {
+          setValues(existing.fieldValues);
+          return;
+        }
+        // No saved draft — auto-draft the "facts to resolve protest" text from
+        // the case's evidence so the form opens as complete as Corvus can make
+        // it. Always editable; the user still reviews before signing.
+        if (evidenceDocuments.length > 0 && !defaults["Facts to resolve protest"]) {
+          draftProtestReason(property, strategyRecommendation, evidenceDocuments)
+            .then((text) =>
+              setValues((v) =>
+                v["Facts to resolve protest"] ? v : { ...v, "Facts to resolve protest": text },
+              ),
+            )
+            .catch((err) => console.error("Auto-draft of protest reason failed:", err));
+        }
+      })
       .catch((err) => console.error("Could not load saved Notice of Protest draft:", err));
   }
 
@@ -2013,9 +1984,33 @@ export function DocumentsSection({
         steps={filingSteps}
         active={activeStep}
         isDone={stepDone}
-        onSelect={setActiveStep}
+        lockedAfterPrefiling={preFilingBlocked}
+        onSelect={selectStep}
       />
       <p className="mt-2 text-xs text-muted-foreground">{FILING_STEP_META[activeStep].blurb}</p>
+
+      {/* --- Step: Pre-Filing Check --- */}
+      {activeStep === "prefiling" && (
+        <div className="mt-3">
+          <PreFilingCheckList
+            items={preFilingItems}
+            blocked={preFilingBlocked}
+            propertyId={property.id}
+            onFixed={onPropertyUpdate ?? (() => {})}
+          />
+          {preFilingBlocked ? (
+            <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+              Corvus can't confirm this case is ready to file — resolve the field(s) marked
+              "Missing" or "Needs review" above (use the editor beside each). The filing steps
+              unlock once this is clear.
+            </div>
+          ) : (
+            <div className="mt-3 rounded-md border border-success/30 bg-success/5 p-3 text-sm text-success">
+              Everything checks out — continue to File Protest.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* --- Step: File Protest --- */}
       {activeStep === "file" && (
@@ -2035,11 +2030,24 @@ export function DocumentsSection({
               </button>
             </div>
           )}
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <button onClick={openProtestEditor} className="btn-accent text-xs py-1.5">
-              {noticeSignedAt ? "Review Notice of Protest" : "Open Notice of Protest (Form 50-132)"}
+              File Protest
             </button>
+            {noticeSignedAt && (
+              <>
+                <span className="text-xs text-success">✓ Signed</span>
+                <Link to="/dashboard/documents" className="text-xs text-accent hover:underline">
+                  View in Documents tab →
+                </Link>
+              </>
+            )}
           </div>
+          <p className="text-xs text-muted-foreground">
+            Opens the Notice of Protest (Form 50-132) pre-filled from your case — Corvus drafts the
+            "reasons" from your evidence; review every field, then Save, Sign &amp; download. The
+            signed form is saved to your Documents.
+          </p>
 
           {/* Filing itself always happens on the county's own site or mailbox —
               CorvusRF has no e-filing integration with any appraisal district
@@ -2247,11 +2255,14 @@ function FilingStepBar({
   steps,
   active,
   isDone,
+  lockedAfterPrefiling,
   onSelect,
 }: {
   steps: FilingStepId[];
   active: FilingStepId;
   isDone: (id: FilingStepId) => boolean;
+  // While the Pre-Filing Check is blocked, every step after it is inert.
+  lockedAfterPrefiling: boolean;
   onSelect: (id: FilingStepId) => void;
 }) {
   return (
@@ -2259,6 +2270,7 @@ function FilingStepBar({
       {steps.map((id, i) => {
         const done = isDone(id);
         const here = id === active;
+        const locked = lockedAfterPrefiling && id !== "prefiling";
         return (
           <li key={id} className="flex items-center gap-1">
             {i > 0 && <span className="text-muted-foreground/40">→</span>}
@@ -2269,12 +2281,14 @@ function FilingStepBar({
               className={`rounded-full px-2.5 py-1 font-medium ${
                 here
                   ? "bg-accent/15 text-accent"
-                  : done
-                    ? "text-success hover:bg-secondary"
-                    : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                  : locked
+                    ? "text-muted-foreground/40"
+                    : done
+                      ? "text-success hover:bg-secondary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
               }`}
             >
-              <span className="tabular-nums">{done ? "✓" : i + 1}</span>{" "}
+              <span className="tabular-nums">{locked ? "🔒" : done ? "✓" : i + 1}</span>{" "}
               {FILING_STEP_META[id].label}
             </button>
           </li>
