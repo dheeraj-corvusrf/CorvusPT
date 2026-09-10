@@ -2065,35 +2065,50 @@ function InformalReviewSection({
           <div className="grid gap-2 sm:grid-cols-2 text-xs">
             <div>
               <div className="font-semibold text-foreground">Where to Schedule</div>
-              <p className="text-muted-foreground">{guidance.whereToSchedule || "Not stated."}</p>
+              <MarkdownLite
+                className="text-muted-foreground"
+                text={guidance.whereToSchedule || "Not stated."}
+              />
             </div>
             <div>
               <div className="font-semibold text-foreground">Who to Contact</div>
-              <p className="text-muted-foreground">{guidance.whoToContact || "Not confirmed."}</p>
+              <MarkdownLite
+                className="text-muted-foreground"
+                text={guidance.whoToContact || "Not confirmed."}
+              />
             </div>
             <div>
               <div className="font-semibold text-foreground">How to Request It</div>
-              <p className="text-muted-foreground">{guidance.howToRequest || "Not confirmed."}</p>
+              <MarkdownLite
+                className="text-muted-foreground"
+                text={guidance.howToRequest || "Not confirmed."}
+              />
             </div>
             <div>
               <div className="font-semibold text-foreground">What Value to Request</div>
-              <p className="text-muted-foreground">{guidance.requestedValueGuidance}</p>
+              <MarkdownLite
+                className="text-muted-foreground"
+                text={guidance.requestedValueGuidance}
+              />
             </div>
             <div>
               <div className="font-semibold text-foreground">Responding to a Proposed Value</div>
-              <p className="text-muted-foreground">{guidance.respondingToProposedValue}</p>
+              <MarkdownLite
+                className="text-muted-foreground"
+                text={guidance.respondingToProposedValue}
+              />
             </div>
             <div>
               <div className="font-semibold text-foreground">What to Say</div>
-              <p className="text-muted-foreground">{guidance.whatToSay}</p>
+              <MarkdownLite className="text-muted-foreground" text={guidance.whatToSay} />
             </div>
             <div>
               <div className="font-semibold text-foreground">What Not to Say</div>
-              <p className="text-muted-foreground">{guidance.whatNotToSay}</p>
+              <MarkdownLite className="text-muted-foreground" text={guidance.whatNotToSay} />
             </div>
             <div className="sm:col-span-2">
               <div className="font-semibold text-foreground">Does Accepting End the Case?</div>
-              <p className="text-muted-foreground">{guidance.acceptingEndsCase}</p>
+              <MarkdownLite className="text-muted-foreground" text={guidance.acceptingEndsCase} />
             </div>
           </div>
 
@@ -2490,9 +2505,10 @@ function GuideText({ label, value, bold }: { label: string; value: string; bold?
   return (
     <div className="mt-2">
       <div className="text-xs font-semibold text-foreground">{label}</div>
-      <p className={`mt-0.5 text-muted-foreground ${bold ? "font-medium text-foreground" : ""}`}>
-        {value}
-      </p>
+      <MarkdownLite
+        text={value}
+        className={`mt-0.5 text-muted-foreground ${bold ? "font-medium text-foreground" : ""}`}
+      />
     </div>
   );
 }
@@ -2650,13 +2666,13 @@ function HearingPrepSection({
 
           <div>
             <div className="font-semibold">Hearing Summary</div>
-            <p className="mt-1 text-muted-foreground">{guide.hearingSummary}</p>
+            <MarkdownLite className="mt-1 text-muted-foreground" text={guide.hearingSummary} />
           </div>
 
           {guide.evidencePacketNote && (
             <div className="rounded-md bg-secondary/40 p-2 text-xs">
-              <span className="font-semibold">Evidence Packet: </span>
-              {guide.evidencePacketNote}
+              <div className="font-semibold">Evidence Packet</div>
+              <MarkdownLite className="mt-0.5" text={guide.evidencePacketNote} />
             </div>
           )}
 

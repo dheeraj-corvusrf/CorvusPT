@@ -19,7 +19,7 @@
 //    comps/case numbers given, but is free text (like every other
 //    guidance field this app's AI functions return) — same discipline as
 //    informal-review-guidance's requestedValueGuidance.
-import { PROSE_STYLE } from "../_shared/prose-style.ts";
+import { PROSE_STYLE, STRUCTURED_BULLET_STYLE } from "../_shared/prose-style.ts";
 import { GEMINI_MODEL_FAST, geminiUrl } from "../_shared/gemini.ts";
 
 const corsHeaders = {
@@ -38,10 +38,12 @@ Rules:
 - valueToRequest / requestedValue: ground this in the real comps.indicated numbers when available (e.g. "near the comps-indicated median of $X"), or the real strategy/evidence context when comps aren't available. Never state a number that wasn't given to you.
 - Every section should reference REAL specifics from the input (the real address, real evidence file names, real comp addresses/values when given) rather than generic advice that could apply to any hearing.
 - Never guarantee, promise, or imply a specific outcome or reduction — describe this as what the evidence supports, not what will happen.
-- Plain prose in free-text fields, no markdown. Arrays should have 2-6 short, concrete items each, never empty unless there is genuinely nothing real to say.
+- Each free-text field is rendered as markdown — keep it terse: one or two short sentences, or "- " bullets when the field holds several parallel points, never a run-on paragraph. The scripted openingStatement / closingStatement stay as plain spoken prose (no bullets). Arrays should have 2-6 short, concrete items each, never empty unless there is genuinely nothing real to say.
 - Return ONLY a JSON object with this exact shape: {"hearingSummary":<string>,"evidencePacketNote":<string>,"beforeHearing":{"whatToReview":[<string>,...],"documentsToHaveReady":[<string>,...],"valueToRequest":<string>,"keyEvidence":[<string>,...],"howToOrganize":<string>,"questionPrep":<string>},"duringHearing":{"openingStatement":<string>,"valueExplanation":<string>,"comparableEvidencePresentation":<string>,"conditionArguments":<string>,"requestedValue":<string>,"closingStatement":<string>},"propertySpecificArguments":[<string>,...],"questionsToAsk":[<string>,...],"questionsArbMayAsk":[<string>,...],"weaknessesAndRisks":[<string>,...],"documentsToHave":[<string>,...],"submissionInstructions":<string>,"countyContact":<string>,"hearingLogistics":<string>}
 
-${PROSE_STYLE}`;
+${PROSE_STYLE}
+
+${STRUCTURED_BULLET_STYLE}`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

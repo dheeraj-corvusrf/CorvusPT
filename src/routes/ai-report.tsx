@@ -183,6 +183,7 @@ import {
 import { ProtestAuthorizationFlow } from "@/components/ProtestAuthorizationFlow";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { LoadingLine } from "@/components/LoadingLine";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import { PropertyImage } from "@/components/PropertyImage";
 import {
   hashModuleInput,
@@ -8798,7 +8799,10 @@ function ModulePreviewContent({
           </div>
           <MiniMeter value={data.confidencePct} label="Analysis confidence" />
           {data.confidenceReasoning && (
-            <p className="mt-2 text-xs text-muted-foreground">{data.confidenceReasoning}</p>
+            <MarkdownLite
+              className="mt-2 text-xs text-muted-foreground"
+              text={data.confidenceReasoning}
+            />
           )}
         </div>
 
@@ -8807,7 +8811,7 @@ function ModulePreviewContent({
             <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               AI Methodology
             </div>
-            <p className="text-xs text-muted-foreground">{data.methodology}</p>
+            <MarkdownLite className="text-xs text-muted-foreground" text={data.methodology} />
           </div>
         )}
 

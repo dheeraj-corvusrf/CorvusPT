@@ -27,3 +27,14 @@ export const BULLET_STYLE = `FORMAT — the caller renders your answer as markdo
 - Bold the single most important number or finding with **…**.
 - No preamble, no closing summary line. Start with the first bullet or the table.
 - Keep the whole answer under ~120 words unless a table genuinely needs more rows.`;
+
+// Formatting rule for the multi-field advisory JSON functions whose
+// individual free-text fields the caller renders as markdown — the
+// informal-review guidance, the hearing-prep guide, the health-score
+// narrative. Splice in AFTER PROSE_STYLE in those prompts. Unlike
+// BULLET_STYLE this is per-field (each field answers one specific thing),
+// not one long answer.
+export const STRUCTURED_BULLET_STYLE = `FORMATTING — the caller renders each free-text field as markdown, so make every field scannable, not a paragraph:
+- If a field holds one point, give one or two short sentences. If it holds several parallel points, give "- " bullets, one point per bullet — never a run-on paragraph.
+- Use a markdown table (| … | … |) inside a field only when laying out 3+ parallel values that read better aligned (e.g. option vs. cost vs. deadline).
+- Bold the single most important number or term in a field with **…**. No "Here is…" preamble, no trailing recap sentence.`;
