@@ -3026,6 +3026,7 @@ function cardDataGap(
   moduleId: string,
   data: unknown,
   compsMap: { data: CompsResult | null },
+  overrides: ModuleOverride[] = [],
 ): { label: string; docType: string } | null {
   if (!data) return null;
   const GENERIC = PROTEST_EVIDENCE_DOCUMENT_TYPE;
@@ -3065,6 +3066,17 @@ function cardDataGap(
             label:
               "Upload a zoning letter, plat, or the legal description to confirm classification",
             docType: "Zoning: General",
+          }
+        : null;
+    }
+    case "improvement": {
+      const missing = (data as ModuleResultMap["improvement"]).buildingComponents.filter(
+        (c) => !c.hasPhoto && !isItemNotApplicable(overrides, "improvement", c.component),
+      ).length;
+      return missing > 0
+        ? {
+            label: `Upload photos of ${missing} building component${missing === 1 ? "" : "s"} to assess condition & depreciation`,
+            docType: GENERIC,
           }
         : null;
     }
@@ -3184,7 +3196,7 @@ function ModuleCard({
   // effects in Report()).
   const dataGap =
     unlocked && hasFullAccess && status === "Completed"
-      ? cardDataGap(m.id, moduleState?.data, compsMap)
+      ? cardDataGap(m.id, moduleState?.data, compsMap, overrides)
       : null;
   return (
     <div className="card-elev overflow-hidden flex flex-col">
@@ -3663,13 +3675,14 @@ function ModuleVisual({
         improvementValue ?? null,
       );
       return (
+        // No mid-card "Upload photos" button — the card shows one "Upload data"
+        // control at the bottom (see cardDataGap's "improvement" case), same as
+        // modules 4 and 6.
         <ImprovementCardVisual
           d={d}
           depreciation={depreciation}
           address={address}
           overrides={overrides}
-          uploading={uploadingEvidence}
-          onUpload={hasFullAccess ? (files) => onUploadEvidence(files) : undefined}
           onOpen={onOpen}
         />
       );
@@ -5478,7 +5491,7 @@ function ImprovementCardVisual({
       ) : (
         <p className="text-center text-[10px] text-muted-foreground">
           {missing > 0
-            ? `Upload photos of ${missing} component${missing === 1 ? "" : "s"} to assess condition & depreciation.`
+            ? `Condition photos needed for ${missing} component${missing === 1 ? "" : "s"} to compute depreciation.`
             : "Additional data needed to compute depreciation."}
         </p>
       )}
