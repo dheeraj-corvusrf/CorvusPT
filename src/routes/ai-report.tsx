@@ -351,6 +351,12 @@ function Report() {
   const [existingProtest, setExistingProtest] = useState<ProtestRecord | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
   const [cadFetching, setCadFetching] = useState(false);
+  // Module 8's "Auto-source evidence" — the full live CAD record (not just
+  // the classification field handleFetchCadDetails keeps) plus a flag for
+  // the button's spinner. Fed into the evidence module so it can verify
+  // checklist items against real records before asking the user.
+  const [evidenceCadRecord, setEvidenceCadRecord] = useState<CadRecord | null>(null);
+  const [autoSourcingEvidence, setAutoSourcingEvidence] = useState(false);
 
   // "Fetch details" (Module 6) — re-pull this property's CAD record from the
   // live county source and update the classification-relevant field
@@ -390,6 +396,43 @@ function Report() {
       loadModule("zoning", { force: true });
     } finally {
       setCadFetching(false);
+    }
+  }
+
+  // Module 8's "Auto-source evidence" — pull everything the app CAN pull for
+  // this property (the live CAD record; site GIS if we have coordinates),
+  // then re-run the evidence module so it can mark checklist items
+  // Verified / Found from real records before asking the user for anything.
+  // Only ~6 counties expose a live CAD API (texas_cad_vendor_landscape
+  // memory); the rest just don't add a record.
+  async function handleAutoSourceEvidence() {
+    setAutoSourcingEvidence(true);
+    try {
+      const pulled: string[] = [];
+      let record: CadRecord | null = null;
+      if (state.cad && state.accountNumber) {
+        record = await cadLookupByAccount(state.cad, state.accountNumber).catch(() => null);
+      }
+      if (!record && state.address) {
+        const res = await cadLookup(state.address).catch(() => null);
+        if (res && res.matched === true) record = res.record;
+      }
+      if (record) {
+        setEvidenceCadRecord(record);
+        pulled.push("CAD record");
+      }
+      if (siteCoords && !siteGisMap.attempted && !siteGisMap.loading) {
+        loadSiteGis(siteCoords.lat, siteCoords.lng);
+        pulled.push("site GIS (FEMA + USGS)");
+      }
+      loadModule("evidence", { force: true });
+      toast.success(
+        pulled.length > 0
+          ? `Pulled ${pulled.join(" and ")}. Re-checking your evidence…`
+          : "No live county source for this property — re-checking against what's on file…",
+      );
+    } finally {
+      setAutoSourcingEvidence(false);
     }
   }
   // Which tier's checkout is currently redirecting, for the unpaid-property
@@ -1261,6 +1304,96 @@ function Report() {
       if (context.length > 0) input.notApplicableContext = context;
     }
 
+    // Module 8 — everything the app can already verify, so the checklist can
+    // mark items Verified/Found instead of asking the user. evidenceOnFile:
+    // the real protest-evidence docs + their analyze-document read.
+    // authoritativeFacts: real one-liners the app itself computes (nothing
+    // fabricated). selectedStrategy: so Critical is judged against the
+    // argument that strategy actually needs.
+    if (id === "evidence") {
+      const onFile = evidenceDocs.filter(
+        (d) =>
+          d.useAsEvidence === true ||
+          (d.useAsEvidence !== false &&
+            (d.modules?.includes("evidence") ||
+              d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
+              d.documentType?.startsWith("Evidence Category: "))),
+      );
+      if (onFile.length > 0) {
+        input.evidenceOnFile = onFile.slice(0, 20).map((d) => ({
+          name: d.fileName,
+          category: d.category ?? null,
+          aiNotes: d.aiNotes ?? null,
+          verdict: d.aiVerdict ?? null,
+        }));
+      }
+      input.selectedStrategy =
+        (moduleData.strategy?.data as ModuleResultMap["strategy"] | undefined)?.strategies[0]
+          ?.name ?? null;
+
+      const facts: string[] = [];
+      const cr = evidenceCadRecord;
+      if (cr) {
+        if (cr.totalValue != null)
+          facts.push(`CAD record: total assessed value $${cr.totalValue.toLocaleString()}.`);
+        if (cr.landValue != null)
+          facts.push(`CAD record: land value $${cr.landValue.toLocaleString()}.`);
+        if (cr.improvementValue != null)
+          facts.push(`CAD record: improvement value $${cr.improvementValue.toLocaleString()}.`);
+        if (cr.legalDescription)
+          facts.push(`CAD record: legal description "${cr.legalDescription}".`);
+        if (Array.isArray(cr.deeds) && cr.deeds.length > 0)
+          facts.push(
+            `CAD record: ${cr.deeds.length} recorded deed/transfer${cr.deeds.length === 1 ? "" : "s"} on file (most recent ${cr.deeds[0]?.date ?? "date n/a"}).`,
+          );
+        if (Array.isArray(cr.valueHistory) && cr.valueHistory.length >= 2) {
+          const hv = cr.valueHistory
+            .map((h) => ({ year: h.year, total: h.appraisedValue ?? h.marketValue ?? null }))
+            .filter((h): h is { year: number; total: number } => h.total != null)
+            .sort((a, b) => a.year - b.year);
+          if (hv.length >= 2 && hv[0].total > 0) {
+            const first = hv[0];
+            const last = hv[hv.length - 1];
+            const pct = Math.round(((last.total - first.total) / first.total) * 100);
+            facts.push(
+              `CAD value history: ${first.year} $${first.total.toLocaleString()} → ${last.year} $${last.total.toLocaleString()} (${pct >= 0 ? "+" : ""}${pct}%).`,
+            );
+          }
+        }
+      }
+      const zoningData = moduleData.zoning?.data as ModuleResultMap["zoning"] | undefined;
+      if (zoningData) {
+        facts.push(
+          `Zoning & Classification (Module 6): classification looks ${zoningData.matches}` +
+            (zoningData.discrepancies[0]?.detail
+              ? `; discrepancy noted: ${zoningData.discrepancies[0].detail}`
+              : "; no discrepancy detected") +
+            `.`,
+        );
+      }
+      if (siteGisMap.data) {
+        const g = siteGisMap.data;
+        if (g.floodZone)
+          facts.push(
+            `Site GIS (FEMA): flood zone ${g.floodZone.zone} — ${g.floodZone.label}${g.floodZone.inSFHA ? " (Special Flood Hazard Area)" : ""}.`,
+          );
+        if (g.elevationFt != null)
+          facts.push(`Site GIS (USGS): ground elevation ~${Math.round(g.elevationFt)} ft.`);
+      }
+      if (incomeComputed.complete && incomeComputed.indicatedValue != null) {
+        facts.push(
+          `Income approach (Module 7, deterministic): NOI ÷ cap rate ${incomeComputed.capRatePct}% = indicated value $${incomeComputed.indicatedValue.toLocaleString()}.`,
+        );
+      }
+      const cs = buildCompsSummary(compsMap.data);
+      if (cs && cs.count > 0) {
+        facts.push(
+          `Comparable sales (Module 3): ${cs.count} comps, median $${cs.median.toLocaleString()} (range $${cs.min.toLocaleString()}–$${cs.max.toLocaleString()}).`,
+        );
+      }
+      if (facts.length > 0) input.authoritativeFacts = facts;
+    }
+
     // Real signals (never fabricated) shared by Module 1 (health) and Module
     // 2 (strategy) — same helpers, same real sources, for both.
     if (id === "health" || id === "strategy") {
@@ -1395,16 +1528,18 @@ function Report() {
         }
         const evidenceData = moduleData.evidence?.data as ModuleResultMap["evidence"] | undefined;
         if (evidenceData) {
+          // priority/status are the real model now; the importance/availability
+          // fallback keeps a stale cached shape working.
+          const isCriticalMissing = (i: ModuleResultMap["evidence"]["items"][number]) =>
+            i.priority
+              ? i.priority === "Critical" && i.status === "Missing"
+              : i.importance === "High" && i.availability === "Low";
+          const isMissing = (i: ModuleResultMap["evidence"]["items"][number]) =>
+            i.status ? i.status === "Missing" : i.availability === "Low";
           input.evidenceReadiness = {
-            criticalMissing: evidenceData.items
-              .filter((i) => i.importance === "High" && i.availability === "Low")
-              .map((i) => i.item),
+            criticalMissing: evidenceData.items.filter(isCriticalMissing).map((i) => i.item),
             importantMissing: evidenceData.items
-              .filter(
-                (i) =>
-                  !(i.importance === "High" && i.availability === "Low") &&
-                  i.availability === "Low",
-              )
+              .filter((i) => isMissing(i) && !isCriticalMissing(i))
               .map((i) => i.item),
             uploadedCount: evidenceDocs.length,
           };
@@ -2439,6 +2574,8 @@ function Report() {
                 onRefreshSiteGis={() => {}}
                 siteGisRefreshing={false}
                 cadFetching={false}
+                onAutoSourceEvidence={() => {}}
+                autoSourcingEvidence={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
                 onGenerateDataSheet={() => Promise.resolve(null)}
@@ -2520,6 +2657,8 @@ function Report() {
             onRefreshSiteGis={handleRefreshSiteGis}
             siteGisRefreshing={siteGisRefreshing}
             cadFetching={cadFetching}
+            onAutoSourceEvidence={handleAutoSourceEvidence}
+            autoSourcingEvidence={autoSourcingEvidence}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
             onGenerateDataSheet={handleGenerateDataSheet}
@@ -4480,6 +4619,21 @@ function EvidenceQuadrant({ items }: { items: ModuleResultMap["evidence"]["items
           <ArrowRight className="h-3.5 w-3.5 shrink-0" />
         </div>
       )}
+      {(() => {
+        // New model, when the AI actually populated status/priority: how many
+        // items are already verified vs. how many Critical ones still need
+        // gathering. Falls back to nothing when only the legacy shape exists.
+        const verified = items.filter((i) => i.status && i.status !== "Missing").length;
+        const criticalMissing = items.filter(
+          (i) => i.priority === "Critical" && i.status === "Missing",
+        ).length;
+        if (!items.some((i) => i.status)) return null;
+        return (
+          <div className="mt-1.5 text-center text-[10px] text-muted-foreground">
+            {verified} verified · {criticalMissing} critical to gather
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -8182,6 +8336,8 @@ function ModulePreviewContent({
   onRefreshSiteGis,
   siteGisRefreshing,
   cadFetching,
+  onAutoSourceEvidence,
+  autoSourcingEvidence,
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
@@ -8229,6 +8385,10 @@ function ModulePreviewContent({
   onRefreshSiteGis: () => void;
   siteGisRefreshing: boolean;
   cadFetching: boolean;
+  // Module 8 only — pull the live CAD record + site GIS, then re-run the
+  // evidence module so it verifies against real records before asking.
+  onAutoSourceEvidence: () => void;
+  autoSourcingEvidence: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
   // "AI fills in the missing data" — drafts a starter data sheet for the
@@ -9617,7 +9777,21 @@ function ModulePreviewContent({
     }
     case "evidence": {
       const d = moduleState.data as ModuleResultMap["evidence"];
-      const focus = d.items.filter((i) => i.importance === "High" && i.availability === "Low");
+      // priority/status is the real model; importance/availability fall back
+      // for a stale cache. Only Critical + Missing blocks the user.
+      const evPriority = (it: ModuleResultMap["evidence"]["items"][number]) =>
+        it.priority ?? (it.importance === "High" ? "Important" : "Supporting");
+      const evStatus = (it: ModuleResultMap["evidence"]["items"][number]) =>
+        it.status ?? (it.availability === "Low" ? "Missing" : "Found");
+      const onFileItems = d.items.filter((i) => evStatus(i) !== "Missing");
+      const needsActionItems = d.items.filter(
+        (i) => evStatus(i) === "Missing" && evPriority(i) === "Critical",
+      );
+      const strengthenItems = d.items.filter(
+        (i) => evStatus(i) === "Missing" && evPriority(i) !== "Critical",
+      );
+      const verifiedCount = d.items.filter((i) => evStatus(i) === "Verified").length;
+      const foundCount = d.items.filter((i) => evStatus(i) === "Found").length;
       // Real protest-case evidence — the generic PROTEST_EVIDENCE_DOCUMENT_TYPE
       // tag CaseDetailModal's own evidence-checklist upload uses (so a file
       // uploaded from either path shows up here together), PLUS anything
@@ -9724,39 +9898,84 @@ function ModulePreviewContent({
         }
       }
 
+      const renderEvidenceRow = (it: ModuleResultMap["evidence"]["items"][number]) => {
+        const slug = evidenceItemSlug(it.item);
+        const uploadedForItem = protestEvidenceDocs.filter(
+          (doc) => doc.documentType === `Evidence Category: ${slug}`,
+        );
+        return (
+          <EvidenceCategoryRow
+            key={it.item}
+            it={it}
+            uploadedDocs={uploadedForItem}
+            expanded={expandedEvidenceItem === it.item}
+            onToggleExpand={() =>
+              setExpandedEvidenceItem((prev) => (prev === it.item ? null : it.item))
+            }
+            uploadingEvidence={uploadingEvidence}
+            onUploadEvidence={(files) =>
+              onUploadEvidence(files, undefined, `Evidence Category: ${slug}`)
+            }
+          />
+        );
+      };
+
       return (
         <div className="mt-4 grid gap-3">
-          {focus.length > 0 && (
-            <div className="min-w-0 flex items-center justify-between gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive">
-              <span className="min-w-0 flex-1 truncate">
-                Focus Here First: {focus.map((i) => i.item).join(", ")}
-              </span>
-              <ArrowRight className="h-4 w-4 shrink-0" />
+          {allowEvidenceUpload && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3">
+              <div className="min-w-0 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">{verifiedCount} verified</span> ·{" "}
+                {foundCount} to review ·{" "}
+                <span
+                  className={needsActionItems.length > 0 ? "font-semibold text-destructive" : ""}
+                >
+                  {needsActionItems.length} need action
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onAutoSourceEvidence}
+                disabled={autoSourcingEvidence}
+                className="btn-outline text-xs py-1.5 disabled:opacity-60"
+              >
+                {autoSourcingEvidence ? "Sourcing…" : "Auto-source evidence"}
+              </button>
             </div>
           )}
-          <div className="grid gap-2">
-            {d.items.map((it) => {
-              const slug = evidenceItemSlug(it.item);
-              const uploadedForItem = protestEvidenceDocs.filter(
-                (doc) => doc.documentType === `Evidence Category: ${slug}`,
-              );
-              return (
-                <EvidenceCategoryRow
-                  key={it.item}
-                  it={it}
-                  uploadedDocs={uploadedForItem}
-                  expanded={expandedEvidenceItem === it.item}
-                  onToggleExpand={() =>
-                    setExpandedEvidenceItem((prev) => (prev === it.item ? null : it.item))
-                  }
-                  uploadingEvidence={uploadingEvidence}
-                  onUploadEvidence={(files) =>
-                    onUploadEvidence(files, undefined, `Evidence Category: ${slug}`)
-                  }
-                />
-              );
-            })}
-          </div>
+
+          {needsActionItems.length > 0 && (
+            <div className="grid gap-2 rounded-md bg-destructive/5 p-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-destructive">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Needs your action — {needsActionItems.length} critical item
+                {needsActionItems.length === 1 ? "" : "s"} missing
+              </div>
+              {needsActionItems.map(renderEvidenceRow)}
+            </div>
+          )}
+
+          {onFileItems.length > 0 && (
+            <div className="grid gap-2">
+              <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                On file &amp; verified — {onFileItems.length}
+              </div>
+              {onFileItems.map(renderEvidenceRow)}
+            </div>
+          )}
+
+          {strengthenItems.length > 0 && (
+            <div className="grid gap-2">
+              <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                Strengthen your case (optional) — {strengthenItems.length}
+              </div>
+              <p className="-mt-1 text-[11px] text-muted-foreground">
+                None of these block your protest — they add weight where the case is thin.
+              </p>
+              {strengthenItems.map(renderEvidenceRow)}
+            </div>
+          )}
+
           {allowEvidenceUpload && (
             <div className="border-t border-border/60 pt-4 print:hidden">
               <div className="text-sm font-medium">Upload Evidence</div>
@@ -10607,12 +10826,26 @@ function EvidenceCategoryRow({
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[]) => void;
 }) {
+  // priority drives the tone now (only Critical is "blocking"); fall back to
+  // the legacy importance/availability when a stale cache lacks it.
+  const priority = it.priority ?? (it.importance === "High" ? "Important" : "Supporting");
+  const status = it.status ?? (it.availability === "Low" ? "Missing" : "Found");
   const tone =
-    it.importance === "High" && it.availability === "Low"
-      ? { bg: "bg-destructive/10", text: "text-destructive", label: "Top Priority" }
-      : it.importance === "High"
-        ? { bg: "bg-warning/15", text: "text-warning-foreground", label: "High Priority" }
-        : { bg: "bg-secondary/60", text: "text-muted-foreground", label: null };
+    priority === "Critical" && status === "Missing"
+      ? { bg: "bg-destructive/10", text: "text-destructive" }
+      : status !== "Missing"
+        ? { bg: "bg-success/10", text: "text-success" }
+        : priority === "Important"
+          ? { bg: "bg-warning/15", text: "text-warning-foreground" }
+          : { bg: "bg-secondary/60", text: "text-muted-foreground" };
+  const statusLabel =
+    status === "Verified" ? "Verified" : status === "Found" ? "Found — review" : "Missing";
+  const statusTone =
+    status === "Verified"
+      ? "bg-success/15 text-success"
+      : status === "Found"
+        ? "bg-accent/15 text-accent"
+        : "bg-secondary/60 text-muted-foreground";
 
   return (
     <div className={`min-w-0 rounded-lg ${tone.bg}`}>
@@ -10621,17 +10854,13 @@ function EvidenceCategoryRow({
         onClick={onToggleExpand}
         className="flex w-full min-w-0 items-center gap-2 p-3 text-left"
       >
-        {tone.label && (
-          <span className={`shrink-0 text-[10px] font-bold uppercase ${tone.text}`}>
-            {tone.label}
-          </span>
-        )}
+        <span className={`shrink-0 text-[10px] font-bold uppercase ${tone.text}`}>{priority}</span>
         <span className="min-w-0 flex-1 text-sm">{it.item}</span>
-        {uploadedDocs.length > 0 && (
-          <span className="shrink-0 whitespace-nowrap rounded-full bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold text-success">
-            {uploadedDocs.length} uploaded
-          </span>
-        )}
+        <span
+          className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${statusTone}`}
+        >
+          {statusLabel}
+        </span>
         <ChevronDown
           className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`}
         />
@@ -10639,6 +10868,23 @@ function EvidenceCategoryRow({
 
       {expanded && (
         <div className="grid gap-2 border-t border-black/5 px-3 pb-3 pt-2.5">
+          {it.whyNeeded && (
+            <p className="text-xs">
+              <span className="font-semibold">Why it matters: </span>
+              <span className="text-muted-foreground">{it.whyNeeded}</span>
+            </p>
+          )}
+          {it.verificationNote && (
+            <p className="text-xs text-muted-foreground">
+              {status !== "Missing" && it.foundIn ? (
+                <>
+                  <CheckCircle2 className="mr-1 inline h-3 w-3 text-success" />
+                  <span className="font-medium text-foreground">{it.foundIn}: </span>
+                </>
+              ) : null}
+              {it.verificationNote}
+            </p>
+          )}
           {uploadedDocs.length > 0 && (
             <ul className="grid gap-1 text-xs text-muted-foreground">
               {uploadedDocs.map((doc) => (
