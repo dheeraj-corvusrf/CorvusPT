@@ -142,6 +142,7 @@ import { requiredFilingSteps, FILING_STEP_META, type FilingStepId } from "@/lib/
 import { verdictMeta } from "@/lib/documents";
 import { PdfFormEditor } from "@/components/PdfFormEditor";
 import { FilingMethodsList } from "@/components/FilingMethodsList";
+import { Modal } from "@/components/Modal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SignaturePad, type SignatureValue } from "@/components/SignaturePad";
 
@@ -257,6 +258,8 @@ export function CaseDetailView({
   // where Corvus flags it as blocking, without leaving this modal.
   const [property, setProperty] = useState<PropertyRecord>(propertyProp);
   const [acknowledging, setAcknowledging] = useState(false);
+  // The step-by-step filing workflow opens in its own focused popup.
+  const [filingOpen, setFilingOpen] = useState(false);
   // Real signed_at off the Notice of Protest submission (see
   // protest-form-submissions.ts) — the one honest signal this app has for
   // "has the customer actually signed this," distinct from and never
@@ -347,6 +350,8 @@ export function CaseDetailView({
     }
     const targetTab = ANCHOR_TAB[anchor];
     if (targetTab && targetTab !== activeTab) setActiveTab(targetTab);
+    // The filing steps live inside the popup — open it so the anchor exists.
+    if (targetTab === "file") setFilingOpen(true);
     // Give the newly-mounted panel a couple of frames to appear.
     let tries = 0;
     const tryScroll = () => {
@@ -455,6 +460,18 @@ export function CaseDetailView({
                 caseData={caseData}
                 onReload={load}
               />
+              <FilingWorkflowLauncher
+                property={property}
+                protest={current}
+                evidenceCount={evidenceDocuments.length}
+                noticeSignedAt={noticeSignedAt}
+                onOpen={() => setFilingOpen(true)}
+              />
+            </div>
+          )}
+
+          {filingOpen && (
+            <Modal onClose={() => setFilingOpen(false)} xl>
               <DocumentsSection
                 userId={userId}
                 protest={current}
@@ -466,7 +483,7 @@ export function CaseDetailView({
                 onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
                 onNoticeSigned={setNoticeSignedAt}
               />
-            </div>
+            </Modal>
           )}
 
           {/* --- Informal Review --- */}
@@ -1444,6 +1461,44 @@ function FilingConfirmationFlow({
   );
 }
 
+// The entry point to the step-by-step filing workflow (which opens in its own
+// popup). Shows where the case is at a glance so the button reads "Start" vs.
+// "Continue", and flags a blocked Pre-Filing Check up front.
+function FilingWorkflowLauncher({
+  property,
+  protest,
+  evidenceCount,
+  noticeSignedAt,
+  onOpen,
+}: {
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceCount: number;
+  noticeSignedAt: string | null;
+  onOpen: () => void;
+}) {
+  const blocked = isPreFilingBlocked(getPreFilingCheck(property, protest, evidenceCount));
+  const started = !!noticeSignedAt || protest.status !== "requested";
+  return (
+    <div className="mt-5 border-t border-border pt-5">
+      <h4 className="text-sm font-semibold">Prepare &amp; File</h4>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
+        forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
+        signing, filing, and your evidence package. Everything you sign is saved to your Documents.
+      </p>
+      {blocked && (
+        <p className="mt-2 text-xs text-warning-foreground">
+          Action needed in the Pre-Filing Check — open the workflow to resolve it.
+        </p>
+      )}
+      <button onClick={onOpen} className="btn-accent mt-3 text-xs py-1.5">
+        {started ? "Continue Filing" : blocked ? "Review Pre-Filing Check" : "Start Filing"}
+      </button>
+    </div>
+  );
+}
+
 export function DocumentsSection({
   userId,
   protest,
@@ -1973,11 +2028,12 @@ export function DocumentsSection({
   const hasEvidence = evidenceDocuments.length > 0;
 
   return (
-    <div id="case-documents" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Prepare &amp; File</h4>
+    <div id="case-documents">
+      <h4 className="font-serif text-lg font-semibold">File Your Protest</h4>
       <p className="text-xs text-muted-foreground">
-        A guided, step-by-step filing. Official Texas Comptroller forms, pre-filled from this case —
-        review or edit every field in-app, then sign and file.
+        Corvus takes you through only the steps this case needs — one at a time. Official Texas
+        Comptroller forms, pre-filled; review every field, then sign. Completed forms save to your
+        Documents.
       </p>
 
       <FilingStepBar
