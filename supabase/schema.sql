@@ -602,6 +602,17 @@ alter table public.protests add constraint protests_informal_status_check
 -- informal_status = 'scheduled'.
 alter table public.protests add column if not exists informal_review_date date;
 
+-- Time-of-day and mode the owner scheduled the informal review for, once
+-- they have one — the same treatment hearing_time/hearing_mode get above,
+-- read by the calendar-event builders (tax-calendar.ts + its two
+-- server-side mirrors) to put a real time in the informal-review event.
+-- Nullable: an informal review with only a date agreed never has these.
+alter table public.protests add column if not exists informal_review_time text;
+alter table public.protests add column if not exists informal_review_mode text;
+alter table public.protests drop constraint if exists protests_informal_review_mode_check;
+alter table public.protests add constraint protests_informal_review_mode_check
+  check (informal_review_mode is null or informal_review_mode in ('In Person', 'Phone', 'Videoconference', 'Affidavit', 'Unknown'));
+
 -- AI's own read of which appraiser specialty this property's informal
 -- review would route to (see informal-review-guidance edge function) —
 -- internal/supporting detail only, used to address a drafted email

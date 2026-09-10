@@ -498,6 +498,8 @@ export function toProtestRecord(record: AdminProtestRecord): ProtestRecord {
     hearingMode: null,
     informalStatus: "not_requested",
     informalReviewDate: null,
+    informalReviewTime: null,
+    informalReviewMode: null,
     informalAppraiserCategory: null,
     attendanceType: null,
     arbDecision: record.arbDecision,
