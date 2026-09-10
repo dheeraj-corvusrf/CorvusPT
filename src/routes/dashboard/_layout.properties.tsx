@@ -63,6 +63,8 @@ import {
   Gavel,
   FilePlus,
   Trash2,
+  Ban,
+  RotateCcw,
 } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
@@ -1121,6 +1123,7 @@ function PropertyActionsMenu({
         )}
         {showSubMgmt && p.cancelAtPeriodEnd && (
           <DropdownMenuItem onClick={onResume} disabled={resumingId === p.id}>
+            <RotateCcw className="mr-2 h-4 w-4" />
             {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
           </DropdownMenuItem>
         )}
@@ -1130,6 +1133,7 @@ function PropertyActionsMenu({
             disabled={cancelingId === p.id}
             className="text-warning-foreground"
           >
+            <Ban className="mr-2 h-4 w-4" />
             {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
           </DropdownMenuItem>
         )}
