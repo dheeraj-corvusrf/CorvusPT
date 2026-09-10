@@ -1338,7 +1338,11 @@ function Report() {
     }
   }
 
-  function loadModule(id: string, opts?: { force?: boolean }) {
+  // opts.force  — always regenerate via the AI (Regenerate with AI).
+  // opts.recheck — re-read module_results even though data is already shown:
+  //   an identical input hash re-serves the stored bytes (no AI call), only a
+  //   real input change regenerates. Backs the "Refresh" control.
+  function loadModule(id: string, opts?: { force?: boolean; recheck?: boolean }) {
     // No AI call backs this module anymore — it renders straight from the
     // deterministic `estimated` value (see estimateSavings() above).
     if (id === "savings") return;
@@ -1348,7 +1352,10 @@ function Report() {
     // and the eager-load effect already skips it via requiresUserData).
     if (id === "income" && !incomeComputed.dataComplete) return;
     const existing = moduleData[id];
-    if ((existing && (existing.loading || (existing.data && !opts?.force))) || !state.totalValue)
+    if (
+      (existing && (existing.loading || (existing.data && !opts?.force && !opts?.recheck))) ||
+      !state.totalValue
+    )
       return;
     setModuleData((prev) => ({ ...prev, [id]: { data: null, loading: true, error: null } }));
     const input: ModuleAnalysisInput = {
@@ -1592,6 +1599,14 @@ function Report() {
         input.buildingClass = bdCad?.buildingClass ?? null;
         input.lotSizeAcres = bdCad?.lotSizeAcres ?? null;
         input.lastTransferDate = bdCad?.deeds?.[0]?.date ?? null;
+        // The real comps gap feeds the deterministic health-score formula
+        // (see computeHealthScore) — same computation the comps modal renders.
+        const hStats = computeComparableStats(
+          compsMap.data?.subject ?? null,
+          compsMap.data?.comps ?? [],
+          state.totalValue,
+        );
+        input.compsGapPct = hStats.valuationGapPct;
       }
       input.evidenceFileNames = evidenceDocs.map((d) => d.fileName);
     }
@@ -2748,7 +2763,7 @@ function Report() {
               onUploadEvidence={handleUploadEvidence}
               onSaveIncomeAnalysis={saveIncomeAnalysis}
               onOpen={() => openModule(m)}
-              onForceReload={() => loadModule(m.id, { force: true })}
+              onForceReload={() => loadModule(m.id, { recheck: true })}
             />
           ))}
         </div>
@@ -2853,17 +2868,35 @@ function Report() {
                   : "Updated just now"}
               </span>
               {openModel.id !== "savings" && (
-                <button
-                  type="button"
-                  onClick={() => loadModule(openModel.id, { force: true })}
-                  disabled={moduleData[openModel.id]?.loading}
-                  className="inline-flex items-center gap-1 font-medium text-accent hover:underline disabled:opacity-50"
-                >
-                  <RefreshCw
-                    className={`h-3 w-3 ${moduleData[openModel.id]?.loading ? "animate-spin" : ""}`}
-                  />
-                  Regenerate
-                </button>
+                <>
+                  {/* Refresh re-checks the cache: identical inputs → the exact
+                      same stored result, no AI call. Only a real input change
+                      re-runs the analysis. */}
+                  <button
+                    type="button"
+                    onClick={() => loadModule(openModel.id, { recheck: true })}
+                    disabled={moduleData[openModel.id]?.loading}
+                    className="inline-flex items-center gap-1 font-medium text-accent hover:underline disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 ${moduleData[openModel.id]?.loading ? "animate-spin" : ""}`}
+                    />
+                    Refresh
+                  </button>
+                  <span aria-hidden>·</span>
+                  {/* Force a fresh AI pass — for re-wording an answer that reads
+                      oddly. The figures are computed from CAD data, so they
+                      barely move. */}
+                  <button
+                    type="button"
+                    onClick={() => loadModule(openModel.id, { force: true })}
+                    disabled={moduleData[openModel.id]?.loading}
+                    title="Ask the AI to re-write the wording. Figures are computed from CAD data and won't move."
+                    className="hover:underline disabled:opacity-50"
+                  >
+                    Regenerate with AI
+                  </button>
+                </>
               )}
             </div>
           )}
@@ -2882,7 +2915,7 @@ function Report() {
             evidenceDocs={evidenceDocs}
             uploadingEvidence={uploadingEvidence}
             onUploadEvidence={handleUploadEvidence}
-            onForceReload={() => loadModule(openModel.id, { force: true })}
+            onForceReload={() => loadModule(openModel.id, { recheck: true })}
             onFetchCadDetails={handleFetchCadDetails}
             onRefreshSiteGis={handleRefreshSiteGis}
             siteGisRefreshing={siteGisRefreshing}
@@ -6123,8 +6156,12 @@ function StrategyDetail({
           <span
             className="shrink-0 font-serif text-lg font-bold"
             style={{ color: scoreColor(s.strengthScore) }}
+            title="AI estimate — the CAD value, savings and comparable figures shown elsewhere are computed from county data, not the model."
           >
             {s.strengthScore}
+            <span className="ml-1 align-middle text-[9px] font-normal text-muted-foreground">
+              AI est.
+            </span>
           </span>
         ) : (
           <span className="shrink-0 whitespace-nowrap rounded-full bg-warning/20 px-2 py-1 text-[10px] font-semibold text-warning-foreground">
