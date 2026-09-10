@@ -39,6 +39,7 @@ function toIsoDate(value: string): string {
 
 const EVENT_TYPE_LABEL: Record<string, string> = {
   protest_deadline: "Protest Deadline",
+  informal_review: "Informal Review",
   hearing: "ARB Hearing",
   arb_decision: "ARB Decision",
   tax_due: "Tax Bill Due",
@@ -120,7 +121,7 @@ Deno.serve(async (req: Request) => {
       adminClient
         .from("protests")
         .select(
-          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date, tax_year",
+          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date, informal_review_time, tax_year",
         )
         .eq("user_id", userId),
       adminClient
@@ -173,6 +174,21 @@ Deno.serve(async (req: Request) => {
 
   for (const pr of protests ?? []) {
     const address = propertyById.get(pr.property_id)?.address ?? "your property";
+    // Mirrors the informal_review branch in src/lib/tax-calendar.ts's
+    // fromProtest() (and _shared/google-calendar-sync.ts) by hand — this
+    // feed omitted it entirely before. Real time-of-day folded into the
+    // title the same way the hearing block below does.
+    if (pr.informal_status === "scheduled" && pr.informal_review_date) {
+      const informalParts = [`Informal review — ${address}`];
+      if (pr.informal_review_time) informalParts.push(`at ${pr.informal_review_time}`);
+      events.push({
+        id: `informal-review:${pr.id}`,
+        date: toIsoDate(pr.informal_review_date),
+        type: "informal_review",
+        title: informalParts.join(" "),
+        amount: null,
+      });
+    }
     if (pr.status === "hearing_scheduled" && pr.hearing_date) {
       // Real time/location from an actual uploaded hearing notice, when
       // there is one (see extract-hearing-notice) — mirrors

@@ -127,6 +127,14 @@ export function hearingEventTitle(
   return parts.join(" ");
 }
 
+// Same treatment for the informal review — a real time-of-day the owner
+// scheduled it for (see scheduleInformalReview in protest-case.ts), folded
+// into the title text. Kept in sync by hand with the two server-side
+// mirrors (_shared/google-calendar-sync.ts, calendar-feed/index.ts).
+export function informalReviewEventTitle(address: string, time: string | null | undefined): string {
+  return time ? `Informal review — ${address} at ${time}` : `Informal review — ${address}`;
+}
+
 function fromProtest(
   pr: ProtestRecord,
   properties: PropertyRecord[],
@@ -144,7 +152,7 @@ function fromProtest(
       id: `informal-review:${pr.id}`,
       date: toIsoDate(pr.informalReviewDate),
       type: "informal_review",
-      title: `Informal review — ${address}`,
+      title: informalReviewEventTitle(address, pr.informalReviewTime),
       amount: null,
       propertyId: pr.propertyId,
       linkTo: "/dashboard/properties",
