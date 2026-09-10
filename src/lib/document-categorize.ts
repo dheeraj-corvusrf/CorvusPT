@@ -1,6 +1,7 @@
 import { fileToDataUrl } from "./intake-store";
 import { classifyDocument, type Extraction } from "./document-ai";
 import { uploadDocument, type DocumentRecord } from "./documents";
+import { tagUploadedDocument } from "./document-modules";
 import type { PropertyRecord } from "./properties";
 
 // Bulk-upload-and-sort for the Documents tab: the user picks several files
@@ -92,7 +93,14 @@ export async function classifyAndUpload(
       file,
       extraction.documentType,
     );
-    return { ...base, status: "done", extraction, matchedProperty, document };
+    const modules = await tagUploadedDocument(document.id, file);
+    return {
+      ...base,
+      status: "done",
+      extraction,
+      matchedProperty,
+      document: { ...document, modules },
+    };
   } catch (err) {
     return {
       ...base,
@@ -128,7 +136,8 @@ export async function classifyAndUploadToProperty(
       dataUrl,
     });
     const document = await uploadDocument(userId, property.id, file, extraction.documentType);
-    return { ...base, status: "done", extraction, document };
+    const modules = await tagUploadedDocument(document.id, file);
+    return { ...base, status: "done", extraction, document: { ...document, modules } };
   } catch (err) {
     return {
       ...base,
@@ -154,7 +163,14 @@ export async function assignAndUpload(
       upload.file,
       upload.extraction?.documentType ?? null,
     );
-    return { ...upload, status: "done", matchedProperty: property, document, error: null };
+    const modules = await tagUploadedDocument(document.id, upload.file);
+    return {
+      ...upload,
+      status: "done",
+      matchedProperty: property,
+      document: { ...document, modules },
+      error: null,
+    };
   } catch (err) {
     return {
       ...upload,

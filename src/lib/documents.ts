@@ -68,6 +68,11 @@ export type DocumentRecord = {
   dupReviewed?: boolean;
   aiExplanation?: string | null;
   editedFrom?: string | null;
+  // Which AI Report modules / case sections this document feeds — set by
+  // assign-document-modules on upload, editable in the Documents tab. See
+  // src/lib/document-modules.ts. Optional for the same reason as the fields
+  // above; fromRow always populates it (to [] when the column is null).
+  modules?: string[];
 };
 
 type DocumentRow = {
@@ -90,10 +95,11 @@ type DocumentRow = {
   dup_reviewed: boolean | null;
   ai_explanation: string | null;
   edited_from: string | null;
+  modules: string[] | null;
 };
 
 const SELECT_COLUMNS =
-  "id, property_id, file_name, storage_path, document_type, uploaded_at, category, source, ai_verdict, ai_notes, ai_cross_refs, ai_checked_at, suggested_name, deleted_at, use_as_evidence, duplicate_of, dup_reviewed, ai_explanation, edited_from";
+  "id, property_id, file_name, storage_path, document_type, uploaded_at, category, source, ai_verdict, ai_notes, ai_cross_refs, ai_checked_at, suggested_name, deleted_at, use_as_evidence, duplicate_of, dup_reviewed, ai_explanation, edited_from, modules";
 
 function fromRow(row: DocumentRow): DocumentRecord {
   return {
@@ -116,6 +122,7 @@ function fromRow(row: DocumentRow): DocumentRecord {
     dupReviewed: row.dup_reviewed ?? false,
     aiExplanation: row.ai_explanation,
     editedFrom: row.edited_from,
+    modules: row.modules ?? [],
   };
 }
 

@@ -141,6 +141,7 @@ import {
   PROTEST_EVIDENCE_DOCUMENT_TYPE,
   type DocumentRecord,
 } from "@/lib/documents";
+import { tagUploadedDocument, setDocumentModules, MODULE_TAG_LABEL } from "@/lib/document-modules";
 import { analyzeEvidence, type EvidenceAnalysis, type DocumentStatus } from "@/lib/protest-reason";
 import { buildEvidencePacket } from "@/lib/evidence-packet";
 import { categorizeEvidenceUploads } from "@/lib/evidence-categorize";
@@ -518,6 +519,7 @@ function Report() {
             (d) =>
               d.useAsEvidence !== false &&
               (d.useAsEvidence === true ||
+                (d.modules?.length ?? 0) > 0 ||
                 d.documentType === EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType?.startsWith("Strategy Evidence: ") ||
@@ -637,8 +639,8 @@ function Report() {
   // render after evidenceDocs updates so loadModule sees the new file. Only
   // when Module 2 has already run — never a cold fetch. Starts from the
   // mount count so an initial load doesn't re-trigger it.
-  const strategyEvidenceCount = evidenceDocs.filter((d) =>
-    d.documentType?.startsWith("Strategy Evidence: "),
+  const strategyEvidenceCount = evidenceDocs.filter(
+    (d) => d.modules?.includes("strategy") || d.documentType?.startsWith("Strategy Evidence: "),
   ).length;
   const strategyEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -662,7 +664,10 @@ function Report() {
   // single upload (AI-tagged "Improvement: <component>") re-runs the
   // condition assessment + its dependents.
   const improvementEvidenceCount = evidenceDocs.filter(
-    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+    (d) =>
+      d.modules?.includes("improvement") ||
+      d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+      d.documentType?.startsWith("Improvement: "),
   ).length;
   const improvementEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -685,8 +690,8 @@ function Report() {
   // Same, for Module 6 (Zoning & Classification) — a doc uploaded from the
   // card's per-aspect "Needs data" chip (tagged "Zoning: <aspect>") re-runs
   // the classification check + its dependents.
-  const zoningEvidenceCount = evidenceDocs.filter((d) =>
-    d.documentType?.startsWith("Zoning: "),
+  const zoningEvidenceCount = evidenceDocs.filter(
+    (d) => d.modules?.includes("zoning") || d.documentType?.startsWith("Zoning: "),
   ).length;
   const zoningEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -996,7 +1001,7 @@ function Report() {
       (strategyId ? `Strategy Evidence: ${strategyId}` : EVIDENCE_DOCUMENT_TYPE);
     setUploadingEvidence(true);
     try {
-      const uploaded: DocumentRecord[] = [];
+      const uploaded: { doc: DocumentRecord; file: File }[] = [];
       for (const file of toUpload) {
         if (file.size > UPLOAD_LIMITS.maxFileBytes) {
           toast.error(
@@ -1004,11 +1009,26 @@ function Report() {
           );
           continue;
         }
-        uploaded.push(await uploadDocument(user.id, property.id, file, documentType));
+        uploaded.push({
+          doc: await uploadDocument(user.id, property.id, file, documentType),
+          file,
+        });
       }
       if (uploaded.length > 0) {
-        setEvidenceDocs((prev) => [...prev, ...uploaded]);
+        setEvidenceDocs((prev) => [...prev, ...uploaded.map((u) => u.doc)]);
         toast.success(`Added ${uploaded.length} evidence file${uploaded.length === 1 ? "" : "s"}.`);
+        // One classification per file → the module tags every relevant
+        // module reads by (documents.modules). Runs after the toast so the
+        // upload never blocks on it; the tags stream in and re-key the
+        // per-module digests.
+        void Promise.all(
+          uploaded.map(async ({ doc, file }) => {
+            const modules = await tagUploadedDocument(doc.id, file);
+            if (modules.length > 0) {
+              setEvidenceDocs((prev) => prev.map((d) => (d.id === doc.id ? { ...d, modules } : d)));
+            }
+          }),
+        );
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not upload evidence.");
@@ -1036,7 +1056,10 @@ function Report() {
       return null;
     }
     const doc = await uploadDocument(user.id, property.id, file, "Comp Sale Evidence");
-    setEvidenceDocs((prev) => [...prev, doc]);
+    // A comp sale document — feeds the Comparable Sales module (and the
+    // strategy that rests on it). Known kind, so tag it directly.
+    void setDocumentModules(doc.id, ["comps", "strategy"]).catch(() => {});
+    setEvidenceDocs((prev) => [...prev, { ...doc, modules: ["comps", "strategy"] }]);
     return await extractCompSale(doc.id);
   }
 
@@ -1260,7 +1283,7 @@ function Report() {
             zoning: c.zoning ?? null,
           })),
           uploadedDocs: evidenceDocs
-            .filter((d) => d.documentType?.startsWith("Zoning: "))
+            .filter((d) => d.modules?.includes("zoning") || d.documentType?.startsWith("Zoning: "))
             .map((d) => d.fileName),
         };
       }
@@ -1400,7 +1423,9 @@ function Report() {
       // handling. Capped to the 4 most recent, mirroring the server-side cap.
       const improvementDocs = evidenceDocs.filter(
         (d) =>
-          d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+          d.modules?.includes("improvement") ||
+          d.documentType === EVIDENCE_DOCUMENT_TYPE ||
+          d.documentType?.startsWith("Improvement: "),
       );
       if (id === "improvement" && improvementDocs.length > 0) {
         const recent = improvementDocs.slice(-4);
@@ -6849,7 +6874,9 @@ function IncomeWorkspace({
   onForceReload: () => void;
   onMarkNotApplicable: () => void;
 }) {
-  const incomeDocs = evidenceDocs.filter((d) => d.documentType?.startsWith("Income: "));
+  const incomeDocs = evidenceDocs.filter(
+    (d) => d.modules?.includes("income") || d.documentType?.startsWith("Income: "),
+  );
   const docKinds = [
     ...new Set(
       incomeDocs
@@ -8920,7 +8947,9 @@ function ModulePreviewContent({
       const siteGis = siteGisMap.data;
       const gaps = countDataGaps(d.factors);
       const nextModule = MODULES.find((mm) => mm.id === "improvement");
-      const siteDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Site: "));
+      const siteDocs = evidenceDocs.filter(
+        (doc) => doc.modules?.includes("site") || doc.documentType?.startsWith("Site: "),
+      );
       const siteFactorKinds = d.factors.map((f) => f.factor);
       // One upload -> AI reads each file and tags it to the site factor it
       // documents (Floodplain, Easements, Drainage, …), or leaves it generic
@@ -9151,6 +9180,7 @@ function ModulePreviewContent({
       const d = moduleState.data as ModuleResultMap["improvement"];
       const improvementDocs = evidenceDocs.filter(
         (doc) =>
+          doc.modules?.includes("improvement") ||
           doc.documentType === EVIDENCE_DOCUMENT_TYPE ||
           doc.documentType?.startsWith("Improvement: "),
       );
@@ -9376,7 +9406,9 @@ function ModulePreviewContent({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
-      const zoningDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Zoning: "));
+      const zoningDocs = evidenceDocs.filter(
+        (doc) => doc.modules?.includes("zoning") || doc.documentType?.startsWith("Zoning: "),
+      );
       // One upload -> AI tags each file to the aspect it documents. Mirrors
       // Module 7 / Module 8's bulk categorize-then-upload. Reuses the shared
       // "reading documents" flag (only one module modal is open at a time).
