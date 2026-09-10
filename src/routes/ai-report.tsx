@@ -517,6 +517,16 @@ function Report() {
       setBaseDataBusy(false);
     }
   }
+
+  // "Ask Corvus to Fetch Details" (Module 5) — pull the latest public
+  // property data (CAD record + FEMA/USGS), store it as the property's base
+  // data (tagged to every module), then re-run whichever module is open so
+  // it reflects the fresh facts.
+  async function handleFetchPublicData() {
+    await refreshBaseData();
+    const openId = openModel?.id;
+    if (openId) loadModule(openId, { force: true });
+  }
   // Which tier's checkout is currently redirecting, for the unpaid-property
   // "Subscribe" buttons in the banner below (real, one-click checkout right
   // here — see handleSubscribeToProperty — rather than sending the user off
@@ -2755,6 +2765,8 @@ function Report() {
                 cadFetching={false}
                 onAutoSourceEvidence={() => {}}
                 autoSourcingEvidence={false}
+                onFetchPublicData={() => {}}
+                fetchingPublicData={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
                 onGenerateDataSheet={() => Promise.resolve(null)}
@@ -2838,6 +2850,8 @@ function Report() {
             cadFetching={cadFetching}
             onAutoSourceEvidence={handleAutoSourceEvidence}
             autoSourcingEvidence={autoSourcingEvidence}
+            onFetchPublicData={handleFetchPublicData}
+            fetchingPublicData={baseDataBusy}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
             onGenerateDataSheet={handleGenerateDataSheet}
@@ -8517,6 +8531,8 @@ function ModulePreviewContent({
   cadFetching,
   onAutoSourceEvidence,
   autoSourcingEvidence,
+  onFetchPublicData,
+  fetchingPublicData,
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
@@ -8568,6 +8584,10 @@ function ModulePreviewContent({
   // evidence module so it verifies against real records before asking.
   onAutoSourceEvidence: () => void;
   autoSourcingEvidence: boolean;
+  // Module 5's "Ask Corvus to Fetch Details" — refresh the property's
+  // AI-fetched base data from public sources, then re-run this module.
+  onFetchPublicData: () => void;
+  fetchingPublicData: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
   // "AI fills in the missing data" — drafts a starter data sheet for the
@@ -8640,6 +8660,9 @@ function ModulePreviewContent({
   // uploadingEvidence (the actual upload itself).
   const [expandedEvidenceItem, setExpandedEvidenceItem] = useState<string | null>(null);
   const [categorizingEvidence, setCategorizingEvidence] = useState(false);
+  // Module 5's optional "which component" tag on the single upload — "" means
+  // let AI decide (categorizeEvidenceUploads).
+  const [improvementUploadCat, setImprovementUploadCat] = useState("");
 
   if (m.requiresUserData) {
     if (isModuleNotApplicable(overrides, "income")) {
@@ -9623,6 +9646,19 @@ function ModulePreviewContent({
           setCategorizingEvidence(false);
         }
       }
+      // One upload button. If the user picked a component from the dropdown,
+      // tag straight to it; otherwise let AI read + tag each file.
+      async function handleImprovementUpload(files: File[]) {
+        if (!improvementUploadCat) {
+          await handleImprovementAutoUpload(files);
+          return;
+        }
+        const documentType =
+          improvementUploadCat === "Other"
+            ? EVIDENCE_DOCUMENT_TYPE
+            : `Improvement: ${improvementUploadCat}`;
+        await onUploadEvidence(files, undefined, documentType);
+      }
       const economicLife = getTypicalEconomicLife(state.propertyType);
       const depreciation = computeDepreciation(
         d.effectiveAgeYears,
@@ -9762,7 +9798,8 @@ function ModulePreviewContent({
               <div className="text-sm font-medium">Add Evidence</div>
               <p className="text-xs text-muted-foreground">
                 Property photos, repair estimates, or appraisals — AI will cite specific details
-                from what you upload instead of only general guidance.
+                from what you upload instead of only general guidance. Everything you add is filed
+                in your Documents and shared with every module.
               </p>
               {improvementDocs.length > 0 && (
                 <ul className="mt-2 grid gap-1 text-xs">
@@ -9778,6 +9815,21 @@ function ModulePreviewContent({
                 </ul>
               )}
               <div className="mt-3 flex flex-wrap items-center gap-2">
+                <select
+                  value={improvementUploadCat}
+                  onChange={(e) => setImprovementUploadCat(e.target.value)}
+                  disabled={uploadingEvidence || categorizingEvidence}
+                  className="rounded-md border border-input bg-background px-2 py-1.5 text-sm disabled:opacity-60"
+                  aria-label="Document category"
+                >
+                  <option value="">Category: let AI tag it</option>
+                  {improvementComponentKinds.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                  <option value="Other">Other improvement evidence</option>
+                </select>
                 <label
                   className={`btn-outline text-sm cursor-pointer ${uploadingEvidence || categorizingEvidence ? "pointer-events-none opacity-60" : ""}`}
                 >
@@ -9795,10 +9847,18 @@ function ModulePreviewContent({
                     onChange={(e) => {
                       const selected = e.target.files ? Array.from(e.target.files) : [];
                       e.target.value = "";
-                      if (selected.length > 0) handleImprovementAutoUpload(selected);
+                      if (selected.length > 0) handleImprovementUpload(selected);
                     }}
                   />
                 </label>
+                <button
+                  type="button"
+                  disabled={fetchingPublicData}
+                  onClick={onFetchPublicData}
+                  className="btn-outline text-sm disabled:opacity-60"
+                >
+                  {fetchingPublicData ? "Fetching…" : "Ask Corvus to Fetch Details"}
+                </button>
                 {improvementDocs.length > 0 && (
                   <button
                     disabled={loading}
@@ -9809,6 +9869,10 @@ function ModulePreviewContent({
                   </button>
                 )}
               </div>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                “Fetch Details” pulls the latest public county + federal data for this property and
+                files it in Documents for every module.
+              </p>
             </div>
           )}
         </div>
