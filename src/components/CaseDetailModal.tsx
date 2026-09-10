@@ -67,6 +67,7 @@ import {
   isPreFilingBlocked,
   type PreFilingCheckItem,
 } from "@/lib/pre-filing-check";
+import { verifyCaseReadiness, type CaseReadinessConcern } from "@/lib/case-readiness";
 import {
   uploadDocument,
   getProtestEvidenceDocuments,
@@ -253,6 +254,9 @@ export function CaseDetailView({
         </div>
       ) : needsGuidanceAck ? (
         <CorvusGuidanceGate
+          property={property}
+          protest={current}
+          evidenceCount={evidenceDocuments.length}
           onAcknowledge={handleAcknowledgeGuidance}
           acknowledging={acknowledging}
         />
@@ -387,13 +391,50 @@ export function CaseDetailView({
 // checkbox + button is enough (no signature capture, unlike the real Service
 // Agreement in ProtestAuthorizationFlow.tsx).
 function CorvusGuidanceGate({
+  property,
+  protest,
+  evidenceCount,
   onAcknowledge,
   acknowledging,
 }: {
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceCount: number;
   onAcknowledge: () => void;
   acknowledging: boolean;
 }) {
   const [checked, setChecked] = useState(false);
+  const [concernsReviewed, setConcernsReviewed] = useState(false);
+  const [concerns, setConcerns] = useState<CaseReadinessConcern[] | null>(null);
+  const [verifyState, setVerifyState] = useState<"loading" | "done" | "error">("loading");
+
+  const countyInfo = getCountyProtestInfo(property.cad);
+
+  useEffect(() => {
+    let live = true;
+    setVerifyState("loading");
+    verifyCaseReadiness(property, protest, evidenceCount)
+      .then((c) => {
+        if (!live) return;
+        setConcerns(c);
+        setVerifyState("done");
+      })
+      .catch(() => {
+        if (live) setVerifyState("error");
+      });
+    return () => {
+      live = false;
+    };
+    // Keyed on the case's identity, not the property/protest object refs —
+    // this gate re-renders on unrelated state and `verifyCaseReadiness` is a
+    // real AI call. While this gate is shown, none of the fields it checks
+    // can change (the Pre-Filing fix rows only render after acknowledgment).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [property.id, protest.id, evidenceCount]);
+
+  const hasHigh = (concerns ?? []).some((c) => c.severity === "high");
+  const canContinue = checked && (!hasHigh || concernsReviewed) && !acknowledging;
+
   return (
     <div className="mt-4 grid gap-4">
       <div className="card-elev p-4">
@@ -416,7 +457,79 @@ function CorvusGuidanceGate({
             or comply with county requirements.
           </p>
         </div>
+        <p className="mt-3 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          {countyInfo ? (
+            <>
+              County procedures for {property.cad} were verified {countyInfo.verifiedAt}.{" "}
+              <a
+                href={countyInfo.sourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline underline-offset-2"
+              >
+                Source
+              </a>
+              . Confirm current county requirements before you file.
+            </>
+          ) : (
+            <>
+              No county-specific procedures are on file for {property.cad || "this county"} — the
+              standard Texas Comptroller Form 50-132 process applies. Confirm current county
+              requirements before you file.
+            </>
+          )}
+        </p>
       </div>
+
+      <div className="card-elev p-4">
+        <h4 className="text-sm font-semibold">County Requirements Check</h4>
+        {verifyState === "loading" ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Corvus is verifying this case against {property.cad || "the county"}'s requirements…
+          </p>
+        ) : verifyState === "error" ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Couldn't run the automated check — review the Pre-Filing Check below carefully before
+            filing.
+          </p>
+        ) : (concerns ?? []).length === 0 ? (
+          <p className="mt-2 text-xs text-success">
+            Nothing looks inconsistent with the county's requirements. Still review the Pre-Filing
+            Check below before filing.
+          </p>
+        ) : (
+          <ul className="mt-2 grid gap-2">
+            {(concerns ?? []).map((c, i) => (
+              <li
+                key={i}
+                className={`rounded-md border p-2.5 text-xs ${
+                  c.severity === "high"
+                    ? "border-destructive/30 bg-destructive/5"
+                    : "border-warning/40 bg-warning/10"
+                }`}
+              >
+                <span className="font-semibold">
+                  {c.field}
+                  {c.severity === "high" ? " — needs attention" : ""}:
+                </span>{" "}
+                <span className="text-muted-foreground">{c.concern}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {hasHigh && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={concernsReviewed}
+            onChange={(e) => setConcernsReviewed(e.target.checked)}
+            className="mt-0.5"
+          />
+          I have reviewed the concern(s) above and will confirm or correct them.
+        </label>
+      )}
       <label className="flex items-start gap-2 text-sm">
         <input
           type="checkbox"
@@ -428,7 +541,7 @@ function CorvusGuidanceGate({
       </label>
       <button
         onClick={onAcknowledge}
-        disabled={!checked || acknowledging}
+        disabled={!canContinue}
         className="btn-accent w-fit text-sm disabled:opacity-60"
       >
         {acknowledging ? "Continuing…" : "Continue to Case"}
@@ -671,8 +784,8 @@ function PreFilingGate({
         {blocked && (
           <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
             Corvus AI can't confirm this case is ready to file — please correct or confirm the
-            field(s) marked "Missing" above before filing. Use "Confirm/edit" next to each one.
-            Documents are hidden until this is resolved.
+            field(s) marked "Missing" or "Needs review" above before filing. Use the editor next to
+            each one. Documents are hidden until this is resolved.
           </div>
         )}
       </div>
@@ -738,18 +851,26 @@ function PreFilingCheckList({
       <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
         {items.map((item) => {
           const missing = item.status === "missing";
-          const field = missing ? BLOCKING_FIELD_MAP[item.label] : undefined;
+          const needsReview = item.status === "needs_review";
+          const field = missing || needsReview ? BLOCKING_FIELD_MAP[item.label] : undefined;
           return (
             <div key={item.label} className="grid gap-1 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-muted-foreground">{item.label}</span>
                 <span
-                  className={`truncate ${missing ? "text-destructive" : "text-success"}`}
+                  className={`truncate ${
+                    missing
+                      ? "text-destructive"
+                      : needsReview
+                        ? "text-warning-foreground"
+                        : "text-success"
+                  }`}
                   title={item.value ?? undefined}
                 >
-                  {missing ? "Missing" : (item.value ?? "Confirmed")}
+                  {missing ? "Missing" : needsReview ? "Needs review" : (item.value ?? "Confirmed")}
                 </span>
               </div>
+              {needsReview && item.issue && <p className="text-warning-foreground">{item.issue}</p>}
               {field && (
                 <PreFilingFixRow
                   label={item.label}
