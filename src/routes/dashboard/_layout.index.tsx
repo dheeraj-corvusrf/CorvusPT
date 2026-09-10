@@ -53,6 +53,7 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useFileDrop } from "@/hooks/use-file-drop";
 import { useSpeechInput } from "@/hooks/use-speech-input";
 import { useSpeechOutput } from "@/hooks/use-speech-output";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import { ICON_COLORS } from "@/lib/icon-colors";
 
 export const Route = createFileRoute("/dashboard/_layout/")({
@@ -83,6 +84,11 @@ function Overview() {
   const [uploading, setUploading] = useState(false);
   const [askQuery, setAskQuery] = useState("");
   const [asking, setAsking] = useState(false);
+  // The last question + its answer, shown as a small conversation panel
+  // under Quick Actions (markdown-rendered — not a raw-text toast).
+  const [askAnswer, setAskAnswer] = useState<{ q: string; a: string; dest: string | null } | null>(
+    null,
+  );
   // Read the AI's reply aloud — when the toggle is on, or when the question
   // was just asked by voice (a spoken question gets a spoken answer).
   const askTts = useSpeechOutput();
@@ -289,10 +295,7 @@ function Overview() {
         /^\/(dashboard|ai-report)(\/|$)/.test(routeRes.value.destination)
           ? routeRes.value.destination
           : null;
-      toast.message(answer, {
-        action: dest ? { label: "Open", onClick: () => nav({ to: dest }) } : undefined,
-        duration: 8000,
-      });
+      setAskAnswer({ q, a: answer, dest });
       if (askTts.enabled || askedByVoice.current) askTts.speak(answer);
       setAskQuery("");
     } catch (err) {
@@ -485,6 +488,43 @@ function Overview() {
             )}
           </form>
         </div>
+
+        {(asking || askAnswer) && (
+          <div className="card-elev mt-3 p-4">
+            {askAnswer && (
+              <div className="ml-auto mb-2 w-fit max-w-[85%] rounded-2xl rounded-br-sm bg-accent px-3 py-1.5 text-sm text-accent-foreground">
+                {askAnswer.q}
+              </div>
+            )}
+            <div className="mr-auto max-w-[92%] rounded-2xl rounded-bl-sm bg-secondary/50 px-3 py-2 text-sm">
+              {asking ? (
+                <span className="text-muted-foreground">Thinking…</span>
+              ) : askAnswer ? (
+                <>
+                  <MarkdownLite text={askAnswer.a} />
+                  {askAnswer.dest && (
+                    <button
+                      type="button"
+                      onClick={() => nav({ to: askAnswer.dest as string })}
+                      className="btn-primary btn-primary-hover mt-2 inline-flex text-xs py-1.5"
+                    >
+                      Open
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
+            {askAnswer && !asking && (
+              <button
+                type="button"
+                onClick={() => setAskAnswer(null)}
+                className="mt-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stats */}

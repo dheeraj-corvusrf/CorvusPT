@@ -16,18 +16,44 @@ function ttsSupported(): boolean {
   );
 }
 
-// The answers are MarkdownLite — strip the markup so it isn't read aloud
-// literally ("star star", "dash", pipes, backticks).
+// The answers are MarkdownLite — turn the markup into something that reads
+// aloud like a person talking, not "star star", "colon dash dash dash",
+// "pipe pipe pipe".
 function plainForSpeech(md: string): string {
-  return (md ?? "")
+  const lines = (md ?? "")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/^\s*[-*]\s+/gm, "")
-    .replace(/^\s*\d+\.\s+/gm, "")
-    .replace(/\|/g, " ")
-    .replace(/[#>]/g, "")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^>\s?/gm, "")
+    .split("\n");
+
+  const out: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Markdown table separator row (|---|:--:|) — never spoken.
+    if (/^\|?[\s:|-]+\|?$/.test(line) && line.includes("-")) continue;
+    // A table row: read the cells as a natural phrase, not the pipes.
+    if (line.startsWith("|") || (line.includes(" | ") && line.split("|").length > 2)) {
+      const cells = line
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((c) => c.trim())
+        .filter(Boolean);
+      if (cells.length > 0) out.push(cells.join(", ") + ".");
+      continue;
+    }
+    // Bullet / numbered list markers → just the text.
+    out.push(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ""));
+  }
+  return out
+    .join(" ")
+    .replace(/\s*[|]\s*/g, ", ")
+    .replace(/:--+:?|--+/g, " ")
     .replace(/\s+/g, " ")
+    .replace(/\s+([.,])/g, "$1")
     .trim();
 }
 
