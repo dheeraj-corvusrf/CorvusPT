@@ -38,7 +38,33 @@ import { ImportPropertiesModal } from "@/components/ImportPropertiesModal";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
 import { BulkProtestAuthorizationFlow } from "@/components/BulkProtestAuthorizationFlow";
 import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
-import { ExternalLink, X, Search, LayoutGrid, LayoutList } from "lucide-react";
+import {
+  listDocuments,
+  getDocumentUrl,
+  previewKind,
+  verdictMeta,
+  type DocumentRecord,
+} from "@/lib/documents";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
+import {
+  ExternalLink,
+  X,
+  Search,
+  LayoutGrid,
+  LayoutList,
+  MoreHorizontal,
+  ChevronDown,
+  FileText,
+  Gavel,
+  FilePlus,
+  Trash2,
+} from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
   // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
@@ -127,6 +153,8 @@ function Properties() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  // The property whose "Documents" quick-view popup is open.
+  const [docsProperty, setDocsProperty] = useState<PropertyRecord | null>(null);
   // Toolbar: how the list is shown, ordered, and filtered. View/sort/status
   // are restored from the last visit; search always starts empty.
   const [view, setView] = useState<PropertyView>(() =>
@@ -718,7 +746,7 @@ function Properties() {
         ) : view === "list" ? (
           <div className="grid gap-2">
             {displayProperties.map((p) => {
-              const { existingProtest, canReFile, isPaid } = rowInfo(p);
+              const { existingProtest, canReFile, cad, recordUrl, isPaid } = rowInfo(p);
               return (
                 <div key={p.id} className="card-elev p-3">
                   <div className="flex items-center gap-3">
@@ -761,54 +789,33 @@ function Properties() {
                     >
                       Open AI Report
                     </button>
-                    {existingProtest ? (
-                      isPaid ? (
-                        <Link
-                          to="/dashboard/case"
-                          search={{ propertyId: p.id }}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn-outline px-2.5 py-1 text-xs"
-                        >
-                          View Case
-                        </Link>
-                      ) : null
-                    ) : isPaid ? (
-                      <button
-                        onClick={() => setAuthorizingProperty(p)}
+                    {existingProtest && isPaid && (
+                      <Link
+                        to="/dashboard/case"
+                        search={{ propertyId: p.id }}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="btn-outline px-2.5 py-1 text-xs"
                       >
-                        Request Protest Filing
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setProtestingProperty(p)}
-                        disabled={!!subscribing}
-                        className="btn-outline px-2.5 py-1 text-xs disabled:opacity-60"
-                      >
-                        {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
-                      </button>
+                        View Case
+                      </Link>
                     )}
-                    {canReFile && (
-                      <button
-                        onClick={() => setAuthorizingProperty(p)}
-                        className="btn-primary btn-primary-hover px-2.5 py-1 text-xs"
-                      >
-                        Re-file for {CURRENT_YEAR}
-                      </button>
-                    )}
-                    <button
-                      disabled={deletingId === p.id || isPaid}
-                      onClick={() => handleDelete(p, isPaid)}
-                      className="btn-outline px-2.5 py-1 text-xs text-destructive disabled:opacity-60"
-                      title={
-                        isPaid
-                          ? "Cancel this property's subscription before deleting it."
-                          : undefined
-                      }
-                    >
-                      {deletingId === p.id ? "Removing…" : "Delete"}
-                    </button>
+                    <PropertyActionsMenu
+                      p={p}
+                      info={{ existingProtest, canReFile, cad, recordUrl, isPaid }}
+                      isBeta={isBeta}
+                      deletingId={deletingId}
+                      cancelingId={cancelingId}
+                      resumingId={resumingId}
+                      subscribing={subscribing}
+                      compact
+                      onDocuments={() => setDocsProperty(p)}
+                      onAuthorize={() => setAuthorizingProperty(p)}
+                      onProtest={() => setProtestingProperty(p)}
+                      onResume={() => handleResumeSubscription(p)}
+                      onCancel={() => handleCancelSubscription(p)}
+                      onDelete={() => handleDelete(p, isPaid)}
+                    />
                   </div>
                 </div>
               );
@@ -867,94 +874,31 @@ function Properties() {
                     <button onClick={() => openAiReport(p)} className="btn-outline">
                       Open AI Report
                     </button>
-                    {recordUrl && cad && (
-                      <a
-                        href={recordUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn-outline inline-flex items-center gap-1.5"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        {isDirectCadRecordUrl(cad)
-                          ? "View Official CAD Record"
-                          : `Search on ${cad}`}
-                      </a>
-                    )}
-                    {existingProtest &&
-                      (isPaid ? (
-                        <Link
-                          to="/dashboard/case"
-                          search={{ propertyId: p.id }}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn-outline"
-                        >
-                          View Case
-                        </Link>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled
-                          title="Subscribe to this property to view its case."
-                          className="btn-outline cursor-not-allowed opacity-60"
-                        >
-                          View Case
-                        </button>
-                      ))}
-                    {isPaid ? (
-                      !existingProtest ? (
-                        <button onClick={() => setAuthorizingProperty(p)} className="btn-outline">
-                          Request Protest Filing
-                        </button>
-                      ) : (
-                        canReFile && (
-                          <button
-                            onClick={() => setAuthorizingProperty(p)}
-                            className="btn-primary btn-primary-hover"
-                          >
-                            Re-file for {CURRENT_YEAR}
-                          </button>
-                        )
-                      )
-                    ) : (
+                    {existingProtest && !isPaid && (
                       <button
-                        onClick={() => setProtestingProperty(p)}
-                        disabled={!!subscribing}
-                        className="btn-outline disabled:opacity-60"
+                        type="button"
+                        disabled
+                        title="Subscribe to this property to view its case."
+                        className="btn-outline cursor-not-allowed opacity-60"
                       >
-                        {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
+                        View Case
                       </button>
                     )}
-                    {isPaid && !isBeta && p.cancelAtPeriodEnd && (
-                      <button
-                        disabled={resumingId === p.id}
-                        onClick={() => handleResumeSubscription(p)}
-                        className="btn-outline disabled:opacity-60"
-                      >
-                        {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
-                      </button>
-                    )}
-                    {isPaid && !isBeta && !p.cancelAtPeriodEnd && (
-                      <button
-                        disabled={cancelingId === p.id}
-                        onClick={() => handleCancelSubscription(p)}
-                        className="btn-outline text-warning-foreground disabled:opacity-60"
-                      >
-                        {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
-                      </button>
-                    )}
-                    <button
-                      disabled={deletingId === p.id || isPaid}
-                      onClick={() => handleDelete(p, isPaid)}
-                      className="btn-outline text-destructive disabled:opacity-60"
-                      title={
-                        isPaid
-                          ? "Cancel this property's subscription before deleting it."
-                          : undefined
-                      }
-                    >
-                      {deletingId === p.id ? "Removing…" : "Delete"}
-                    </button>
+                    <PropertyActionsMenu
+                      p={p}
+                      info={{ existingProtest, canReFile, cad, recordUrl, isPaid }}
+                      isBeta={isBeta}
+                      deletingId={deletingId}
+                      cancelingId={cancelingId}
+                      resumingId={resumingId}
+                      subscribing={subscribing}
+                      onDocuments={() => setDocsProperty(p)}
+                      onAuthorize={() => setAuthorizingProperty(p)}
+                      onProtest={() => setProtestingProperty(p)}
+                      onResume={() => handleResumeSubscription(p)}
+                      onCancel={() => handleCancelSubscription(p)}
+                      onDelete={() => handleDelete(p, isPaid)}
+                    />
                   </div>
                 </div>
               );
@@ -962,6 +906,14 @@ function Properties() {
           </div>
         )}
       </div>
+
+      {docsProperty && user && (
+        <PropertyDocsModal
+          userId={user.id}
+          property={docsProperty}
+          onClose={() => setDocsProperty(null)}
+        />
+      )}
 
       {protestingProperty && (
         <Modal onClose={() => setProtestingProperty(null)}>
@@ -1063,6 +1015,303 @@ function Properties() {
         />
       )}
     </div>
+  );
+}
+
+// Every per-property action except "Open AI Report" (kept as its own button)
+// collapsed into one menu, so a card isn't a wall of eight buttons. Same
+// contextual rules as the old inline buttons — nothing new is enabled here,
+// it's only regrouped. Used by both the card and the compact list row.
+function PropertyActionsMenu({
+  p,
+  info,
+  isBeta,
+  deletingId,
+  cancelingId,
+  resumingId,
+  subscribing,
+  compact,
+  onDocuments,
+  onAuthorize,
+  onProtest,
+  onResume,
+  onCancel,
+  onDelete,
+}: {
+  p: PropertyRecord;
+  info: {
+    existingProtest: ProtestRecord | undefined;
+    canReFile: boolean;
+    cad: string | null;
+    recordUrl: string | null;
+    isPaid: boolean;
+  };
+  isBeta: boolean;
+  deletingId: string | null;
+  cancelingId: string | null;
+  resumingId: string | null;
+  subscribing: { propertyId: string; tier: Tier } | null;
+  compact?: boolean;
+  onDocuments: () => void;
+  onAuthorize: () => void;
+  onProtest: () => void;
+  onResume: () => void;
+  onCancel: () => void;
+  onDelete: () => void;
+}) {
+  const { existingProtest, canReFile, cad, recordUrl, isPaid } = info;
+  const showRequestFiling = isPaid && !existingProtest;
+  const showRefile = isPaid && !!existingProtest && canReFile;
+  const showProtest = !isPaid;
+  const showSubMgmt = isPaid && !isBeta;
+  const hasMiddle = showRequestFiling || showRefile || showProtest || showSubMgmt;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label={`Actions for ${p.address}`}
+        className={
+          compact
+            ? "btn-outline inline-flex items-center gap-1 px-2.5 py-1 text-xs"
+            : "btn-outline inline-flex items-center gap-1.5"
+        }
+      >
+        <MoreHorizontal className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
+        Actions
+        <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        {existingProtest && isPaid && (
+          <DropdownMenuItem asChild>
+            <Link
+              to="/dashboard/case"
+              search={{ propertyId: p.id }}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Gavel className="mr-2 h-4 w-4" /> View Case
+            </Link>
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem onClick={onDocuments}>
+          <FileText className="mr-2 h-4 w-4" /> Documents
+        </DropdownMenuItem>
+        {recordUrl && cad && (
+          <DropdownMenuItem asChild>
+            <a href={recordUrl} target="_blank" rel="noopener noreferrer">
+              <ExternalLink className="mr-2 h-4 w-4" />
+              {isDirectCadRecordUrl(cad) ? "View Official CAD Record" : `Search on ${cad}`}
+            </a>
+          </DropdownMenuItem>
+        )}
+
+        {hasMiddle && <DropdownMenuSeparator />}
+        {showRequestFiling && (
+          <DropdownMenuItem onClick={onAuthorize}>
+            <FilePlus className="mr-2 h-4 w-4" /> Request Protest Filing
+          </DropdownMenuItem>
+        )}
+        {showRefile && (
+          <DropdownMenuItem onClick={onAuthorize}>
+            <FilePlus className="mr-2 h-4 w-4" /> Re-file for {CURRENT_YEAR}
+          </DropdownMenuItem>
+        )}
+        {showProtest && (
+          <DropdownMenuItem onClick={onProtest} disabled={!!subscribing}>
+            <Gavel className="mr-2 h-4 w-4" />
+            {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
+          </DropdownMenuItem>
+        )}
+        {showSubMgmt && p.cancelAtPeriodEnd && (
+          <DropdownMenuItem onClick={onResume} disabled={resumingId === p.id}>
+            {resumingId === p.id ? "Resuming…" : "Resume Subscription"}
+          </DropdownMenuItem>
+        )}
+        {showSubMgmt && !p.cancelAtPeriodEnd && (
+          <DropdownMenuItem
+            onClick={onCancel}
+            disabled={cancelingId === p.id}
+            className="text-warning-foreground"
+          >
+            {cancelingId === p.id ? "Canceling…" : "Cancel Subscription"}
+          </DropdownMenuItem>
+        )}
+
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={onDelete}
+          disabled={deletingId === p.id || isPaid}
+          className="text-destructive focus:text-destructive"
+        >
+          <Trash2 className="mr-2 h-4 w-4" />
+          {deletingId === p.id
+            ? "Removing…"
+            : isPaid
+              ? "Delete (cancel subscription first)"
+              : "Delete"}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// Quick, read-only look at a property's documents without leaving this page —
+// the file list plus an inline preview (PDF/image). Anything that changes a
+// document (edit, rename, AI review) still lives in the Documents tab, linked
+// from the header here.
+function PropertyDocsModal({
+  userId,
+  property,
+  onClose,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  onClose: () => void;
+}) {
+  const [docs, setDocs] = useState<DocumentRecord[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [selected, setSelected] = useState<DocumentRecord | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const [urlError, setUrlError] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    listDocuments(userId)
+      .then((all) => {
+        if (!live) return;
+        const mine = all
+          .filter((d) => d.propertyId === property.id)
+          .sort((a, b) => +new Date(b.uploadedAt) - +new Date(a.uploadedAt));
+        setDocs(mine);
+        setSelected(mine[0] ?? null);
+      })
+      .catch(() => {
+        if (live) setLoadError(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [userId, property.id]);
+
+  useEffect(() => {
+    if (!selected) {
+      setUrl(null);
+      setUrlError(false);
+      return;
+    }
+    let live = true;
+    setUrl(null);
+    setUrlError(false);
+    getDocumentUrl(selected.storagePath)
+      .then((u) => live && setUrl(u))
+      .catch(() => live && setUrlError(true));
+    return () => {
+      live = false;
+    };
+  }, [selected]);
+
+  const kind = selected ? previewKind(selected.fileName) : "none";
+
+  return (
+    <Modal onClose={onClose} wide>
+      <div className="p-6">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="font-serif text-xl font-bold">Documents</h2>
+            <p className="mt-0.5 truncate text-sm text-muted-foreground">{property.address}</p>
+          </div>
+          <Link to="/dashboard/documents" className="btn-outline shrink-0 text-xs">
+            Open Documents tab
+          </Link>
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Quick view only — edit, rename, or run an AI review from the Documents tab.
+        </p>
+
+        {loadError ? (
+          <p className="mt-6 text-sm text-destructive">Couldn't load documents.</p>
+        ) : docs === null ? (
+          <p className="mt-6 text-sm text-muted-foreground">Loading…</p>
+        ) : docs.length === 0 ? (
+          <div className="mt-6 rounded-lg border border-border p-8 text-center text-sm text-muted-foreground">
+            No documents for this property yet.
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-4 sm:grid-cols-[15rem_1fr]">
+            <ul className="grid max-h-[60vh] gap-1 overflow-y-auto pr-1">
+              {docs.map((d) => {
+                const v = verdictMeta(d.aiVerdict);
+                const active = selected?.id === d.id;
+                return (
+                  <li key={d.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(d)}
+                      className={`w-full rounded-md border px-2.5 py-2 text-left text-xs ${
+                        active ? "border-accent bg-accent/5" : "border-border hover:bg-secondary"
+                      }`}
+                    >
+                      <div className="truncate font-medium">{d.fileName}</div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
+                        <span className="truncate">
+                          {d.documentType ?? d.category ?? "Document"}
+                        </span>
+                        <span>·</span>
+                        <span className="shrink-0">
+                          {new Date(d.uploadedAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                      {d.aiCheckedAt && (
+                        <div
+                          className={`mt-0.5 text-[10px] font-semibold ${
+                            v.tone === "success"
+                              ? "text-success"
+                              : v.tone === "warning"
+                                ? "text-warning-foreground"
+                                : "text-destructive"
+                          }`}
+                        >
+                          AI: {v.label}
+                        </div>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <div className="grid min-h-[45vh] place-items-center overflow-hidden rounded-lg bg-secondary/40">
+              {!selected ? (
+                <p className="p-6 text-sm text-muted-foreground">Select a document.</p>
+              ) : urlError ? (
+                <p className="p-6 text-sm text-destructive">Couldn't load this document.</p>
+              ) : !url ? (
+                <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+              ) : kind === "pdf" ? (
+                <iframe title={selected.fileName} src={url} className="h-[60vh] w-full" />
+              ) : kind === "image" ? (
+                <img
+                  src={url}
+                  alt={selected.fileName}
+                  className="max-h-[60vh] w-auto object-contain"
+                />
+              ) : (
+                <div className="p-6 text-center text-sm text-muted-foreground">
+                  <p>No inline preview for this file type.</p>
+                  <a
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-outline mt-3 inline-flex text-xs"
+                  >
+                    Open in new tab
+                  </a>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 
