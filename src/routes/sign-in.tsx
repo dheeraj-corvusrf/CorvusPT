@@ -1,7 +1,8 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Clock, Info } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { useAuth } from "@/lib/auth";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import type { CadRecord } from "@/lib/cad-lookup";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
@@ -88,6 +89,7 @@ function ReasonBanner({ reason }: { reason: string }) {
 
 function SignIn() {
   const nav = useNavigate();
+  const { user, loading: authLoading } = useAuth();
   const searchParams = Route.useSearch();
   const { redirect } = searchParams;
   // `redirect` must be an app-relative path. Also heal a stale value that
@@ -96,7 +98,13 @@ function SignIn() {
   const base = import.meta.env.BASE_URL.replace(/\/$/, ""); // "" locally, "/corvuspt" in prod
   let cleaned = redirect ?? "";
   if (base && cleaned.startsWith(`${base}/`)) cleaned = cleaned.slice(base.length);
-  const returnTo = cleaned && cleaned.startsWith("/") && !cleaned.startsWith("//") ? cleaned : "/";
+  // Never bounce back to /sign-in itself — the header's "Sign In" link carries
+  // `redirect: pathname`, so clicking it while already on /sign-in would make
+  // returnTo "/sign-in" and every post-sign-in nav() a no-op ("nothing
+  // happens when I click Sign In").
+  const isSelf = cleaned === "/sign-in" || cleaned.startsWith("/sign-in?");
+  const returnTo =
+    cleaned && cleaned.startsWith("/") && !cleaned.startsWith("//") && !isSelf ? cleaned : "/";
   const [mode, setMode] = useState<"signin" | "signup">(
     searchParams.mode === "signup" ? "signup" : "signin",
   );
@@ -117,6 +125,20 @@ function SignIn() {
     companyName: string;
     matches: CadRecord[];
   } | null>(null);
+
+  // Leave the sign-in page as soon as auth resolves to a signed-in user —
+  // driven by the settled auth state, not only the imperative nav() at the end
+  // of onSubmit. Supabase fires its SIGNED_IN event (which re-renders the whole
+  // tree via AuthProvider) in the same tick that signInWithPassword() resolves,
+  // and that re-render can swallow the post-await nav() call — the reported
+  // "I click Sign In and nothing happens, then the second click works" race.
+  // This effect responds to `user` becoming truthy on any later render, so a
+  // swallowed nav() is always recovered. Held back while the post-signup owner-
+  // match modal is open (it runs its own nav on close) or in check-email state.
+  useEffect(() => {
+    if (authLoading || !user || ownerMatches || checkEmail) return;
+    nav({ to: returnTo, replace: true });
+  }, [authLoading, user, ownerMatches, checkEmail, nav, returnTo]);
 
   function switchMode(next: "signin" | "signup") {
     setMode(next);
