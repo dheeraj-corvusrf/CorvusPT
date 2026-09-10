@@ -602,6 +602,17 @@ alter table public.protests add constraint protests_informal_status_check
 -- informal_status = 'scheduled'.
 alter table public.protests add column if not exists informal_review_date date;
 
+-- Time-of-day and mode the owner scheduled the informal review for, once
+-- they have one — the same treatment hearing_time/hearing_mode get above,
+-- read by the calendar-event builders (tax-calendar.ts + its two
+-- server-side mirrors) to put a real time in the informal-review event.
+-- Nullable: an informal review with only a date agreed never has these.
+alter table public.protests add column if not exists informal_review_time text;
+alter table public.protests add column if not exists informal_review_mode text;
+alter table public.protests drop constraint if exists protests_informal_review_mode_check;
+alter table public.protests add constraint protests_informal_review_mode_check
+  check (informal_review_mode is null or informal_review_mode in ('In Person', 'Phone', 'Videoconference', 'Affidavit', 'Unknown'));
+
 -- AI's own read of which appraiser specialty this property's informal
 -- review would route to (see informal-review-guidance edge function) —
 -- internal/supporting detail only, used to address a drafted email
@@ -1539,6 +1550,26 @@ create table if not exists public.settlement_agreements (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- The informal-settlement outcome flow (see SettlementSignatureSection in
+-- CaseDetailModal.tsx): whether the owner has already accepted/rejected the
+-- county's proposed value outside the app, an optional "I signed it in
+-- person" copy for AI to verify, and the owner's confirmed Satisfied /
+-- Not Satisfied read that drives whether the case resolves at the settled
+-- value or proceeds to a formal hearing.
+alter table public.settlement_agreements add column if not exists response_status text;
+alter table public.settlement_agreements drop constraint if exists settlement_agreements_response_status_check;
+alter table public.settlement_agreements add constraint settlement_agreements_response_status_check
+  check (response_status is null or response_status in ('not_yet', 'accepted', 'rejected'));
+alter table public.settlement_agreements add column if not exists response_recorded_at timestamptz;
+alter table public.settlement_agreements add column if not exists signed_in_person boolean not null default false;
+alter table public.settlement_agreements add column if not exists signed_copy_document_id uuid references public.documents (id) on delete set null;
+alter table public.settlement_agreements add column if not exists signed_copy_verified_at timestamptz;
+alter table public.settlement_agreements add column if not exists outcome text;
+alter table public.settlement_agreements drop constraint if exists settlement_agreements_outcome_check;
+alter table public.settlement_agreements add constraint settlement_agreements_outcome_check
+  check (outcome is null or outcome in ('satisfied', 'not_satisfied'));
+alter table public.settlement_agreements add column if not exists outcome_confirmed_at timestamptz;
 
 alter table public.settlement_agreements enable row level security;
 

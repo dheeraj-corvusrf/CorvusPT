@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { askAboutDocument } from "@/lib/document-ai";
+import { MarkdownLite } from "@/components/MarkdownLite";
 import {
   updatePropertyIdentity,
   buildAiReportIntakePatch,
@@ -28,6 +31,7 @@ import {
   getCaseResults,
   updateInformalStatus,
   scheduleInformalReview,
+  resolveInformalSettlement,
   saveInformalAppraiserCategory,
   saveAttendanceType,
   type ProtestCase,
@@ -81,6 +85,7 @@ import {
   getLatestHearingNotice,
   type HearingNoticeRecord,
   type HearingNoticeExtraction,
+  type HearingMode,
 } from "@/lib/hearing-notice";
 import {
   getInformalReviewGuidance,
@@ -102,6 +107,9 @@ import {
   getLatestSettlementAgreement,
   confirmSettlementAgreement,
   signSettlementAgreement,
+  recordSettlementResponse,
+  verifySignedSettlementCopy,
+  confirmSettlementOutcome,
   type SettlementAgreementRecord,
 } from "@/lib/settlement-agreement";
 import { getEffectiveTaxRate } from "@/lib/texas-tax-rates";
@@ -172,6 +180,12 @@ export function CaseDetailView({
   // evidence-aware feature here (Corvus's guidance, Pre-Filing Check,
   // Generate Suggested Reason) reads from.
   const [evidenceDocuments, setEvidenceDocuments] = useState<DocumentRecord[]>([]);
+  // Lifted (not local to SettlementSignatureSection) so the top-of-case
+  // "informal outcome unconfirmed" banner and HearingPrepSection's inline
+  // warning read the same record the settlement section writes.
+  const [settlementAgreement, setSettlementAgreement] = useState<SettlementAgreementRecord | null>(
+    null,
+  );
 
   function load() {
     setLoading(true);
@@ -185,6 +199,9 @@ export function CaseDetailView({
     getProtestEvidenceDocuments(userId, property.id)
       .then(setEvidenceDocuments)
       .catch((err) => console.error("Could not load this case's evidence documents:", err));
+    getLatestSettlementAgreement(protest.id)
+      .then(setSettlementAgreement)
+      .catch((err) => console.error("Could not load this case's settlement agreement:", err));
   }
 
   useEffect(load, [protest.id]);
@@ -248,6 +265,8 @@ export function CaseDetailView({
             noticeSignedAt={noticeSignedAt}
           />
 
+          <InformalOutcomeBanner protest={current} agreement={settlementAgreement} />
+
           <CasePlanSection
             userId={userId}
             property={property}
@@ -286,6 +305,7 @@ export function CaseDetailView({
               protest={current}
               property={property}
               strategyRecommendation={caseData?.strategyRecommendation ?? null}
+              evidenceDocuments={evidenceDocuments}
               onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
             />
           )}
@@ -304,11 +324,19 @@ export function CaseDetailView({
             property={property}
             caseData={caseData}
             evidenceDocuments={evidenceDocuments}
+            settlementAgreement={settlementAgreement}
             onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
           />
 
           {current.status !== "requested" && (
-            <SettlementSignatureSection userId={userId} protest={current} property={property} />
+            <SettlementSignatureSection
+              userId={userId}
+              protest={current}
+              property={property}
+              agreement={settlementAgreement}
+              onAgreementChange={setSettlementAgreement}
+              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+            />
           )}
 
           <DecisionNoticeSection
@@ -1726,25 +1754,88 @@ const INFORMAL_STATUS_OPTIONS: { value: InformalStatus; label: string }[] = [
   { value: "no_informal_available", label: "No Informal Available" },
 ];
 
+// "14:30" (the value an <input type="time"> yields) → "2:30 PM", the same
+// human display string the hearing-notice extraction stores, so the informal
+// review's time reads the same everywhere (calendar title included).
+function formatInputTime(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h)) return hhmm;
+  const period = h < 12 ? "AM" : "PM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m ?? 0).padStart(2, "0")} ${period}`;
+}
+
+// The reverse — a stored "2:30 PM" back to "14:30" so it can seed the
+// <input type="time"> when the section re-opens. Returns "" for anything
+// that doesn't parse.
+function parseTimeToInput(display: string | null | undefined): string {
+  if (!display) return "";
+  const m = display.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!m) return "";
+  let h = Number(m[1]);
+  const period = m[3]?.toUpperCase();
+  if (period === "PM" && h < 12) h += 12;
+  if (period === "AM" && h === 12) h = 0;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+const INFORMAL_REVIEW_MODES: HearingMode[] = [
+  "In Person",
+  "Phone",
+  "Videoconference",
+  "Affidavit",
+  "Unknown",
+];
+
 function InformalReviewSection({
   protest,
   property,
   strategyRecommendation,
+  evidenceDocuments,
   onUpdate,
 }: {
   protest: ProtestRecord;
   property: PropertyRecord;
   strategyRecommendation: string | null;
+  evidenceDocuments: DocumentRecord[];
   onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [dateInput, setDateInput] = useState(protest.informalReviewDate ?? "");
-  const [savingDate, setSavingDate] = useState(false);
+  const [timeInput, setTimeInput] = useState(parseTimeToInput(protest.informalReviewTime));
+  const [modeInput, setModeInput] = useState<HearingMode>(
+    protest.informalReviewMode ?? "In Person",
+  );
+  const [savingSchedule, setSavingSchedule] = useState(false);
   const [guidance, setGuidance] = useState<InformalReviewGuidance | null>(null);
   const [loadingGuidance, setLoadingGuidance] = useState(false);
   const [guidanceError, setGuidanceError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<HearingNoticeRecord | null>(null);
+
+  // Inline Q&A — stateless, same engine as the site-wide Ask AI widget
+  // (ask-about-document). Only the latest question/answer is kept on screen.
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [qaError, setQaError] = useState<string | null>(null);
 
   const countyInfo = getCountyProtestInfo(property.cad);
+
+  // The latest hearing/county notice already read for this case — grounds the
+  // guidance below (see getInformalReviewGuidance's noticeContext arg). Same
+  // call HearingNoticeSection and HearingPrepSection already make.
+  useEffect(() => {
+    getLatestHearingNotice(protest.id)
+      .then((n) => {
+        setNotice(n);
+        // Seed the date only from a notice that's actually about an informal
+        // review — never the formal ARB hearing date.
+        if (n?.hearingDate && /informal/i.test(n.hearingType ?? "")) {
+          setDateInput((prev) => prev || n.hearingDate!);
+        }
+      })
+      .catch((err) => console.error("Could not load hearing notice:", err));
+  }, [protest.id]);
 
   async function handleStatusChange(status: InformalStatus) {
     setUpdatingStatus(true);
@@ -1758,18 +1849,24 @@ function InformalReviewSection({
     }
   }
 
-  async function handleSaveDate(e: FormEvent) {
+  async function handleSaveSchedule(e: FormEvent) {
     e.preventDefault();
     if (!dateInput) return;
-    setSavingDate(true);
+    setSavingSchedule(true);
     try {
-      await scheduleInformalReview(protest.id, dateInput);
-      onUpdate({ informalStatus: "scheduled", informalReviewDate: dateInput });
-      toast.success("Informal review date saved.");
+      const displayTime = timeInput ? formatInputTime(timeInput) : null;
+      await scheduleInformalReview(protest.id, dateInput, { time: displayTime, mode: modeInput });
+      onUpdate({
+        informalStatus: "scheduled",
+        informalReviewDate: dateInput,
+        informalReviewTime: displayTime,
+        informalReviewMode: modeInput,
+      });
+      toast.success("Informal review scheduled — added to your calendar.");
     } catch (err) {
-      toast.error(getErrorMessage(err, "Could not save this date."));
+      toast.error(getErrorMessage(err, "Could not save this schedule."));
     } finally {
-      setSavingDate(false);
+      setSavingSchedule(false);
     }
   }
 
@@ -1782,7 +1879,8 @@ function InformalReviewSection({
         countyInfo,
         strategyRecommendation,
         property.estimatedSavings,
-        [],
+        evidenceDocuments.map((d) => d.fileName),
+        notice,
       );
       setGuidance(result);
       // Saved quietly — never its own prominent field, see the schema
@@ -1798,7 +1896,53 @@ function InformalReviewSection({
     }
   }
 
+  async function handleAsk(e: FormEvent) {
+    e.preventDefault();
+    const q = question.trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setQaError(null);
+    setAnswer(null);
+    try {
+      const context = [
+        `Property: ${property.address}${property.cad ? `, ${property.cad}` : ""}`,
+        property.accountNumber ? `Account: ${property.accountNumber}` : null,
+        property.taxYear ? `Tax year: ${property.taxYear}` : null,
+        strategyRecommendation ? `Case strategy: ${strategyRecommendation}` : null,
+        countyInfo?.informalReview?.howToRequest
+          ? `County informal-review process: ${countyInfo.informalReview.howToRequest}`
+          : null,
+        notice
+          ? `Uploaded notice — hearing date ${notice.hearingDate ?? "n/a"}, evidence deadline ${
+              notice.evidenceSubmissionDeadline ?? "n/a"
+            }, county contact ${notice.countyContact ?? "n/a"}, informal review available: ${
+              notice.informalReviewAvailable
+            }. Instructions: ${notice.submissionInstructions ?? "none stated"}`
+          : "No county notice uploaded for this case yet.",
+        guidance
+          ? `Guidance already shown to the user — steps: ${guidance.steps.join(
+              " | ",
+            )}; where to schedule: ${guidance.whereToSchedule || "unknown"}; deadlines: ${
+              guidance.applicableDeadlines.join(" | ") || "none"
+            }.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const { answer: a } = await askAboutDocument({
+        question: `About the informal review for this Texas property tax protest: ${q}`,
+        context,
+      });
+      setAnswer(a);
+    } catch (err) {
+      setQaError(getErrorMessage(err, "Could not answer that. Please try again."));
+    } finally {
+      setAsking(false);
+    }
+  }
+
   const mailto = guidance ? buildInformalReviewMailto(guidance) : null;
+  const scheduled = protest.informalStatus === "scheduled" && !!protest.informalReviewDate;
 
   return (
     <div id="case-informal-review" className="mt-5 border-t border-border pt-5">
@@ -1820,10 +1964,18 @@ function InformalReviewSection({
         </select>
       </div>
 
-      {protest.informalStatus === "scheduled" && (
-        <form onSubmit={handleSaveDate} className="mt-2 flex flex-wrap items-end gap-2">
+      {/* Schedule — always available, not gated behind the status dropdown.
+          Saving it sets the status to "scheduled" and feeds the in-platform
+          calendar + Google/ICS sync (see scheduleInformalReview). */}
+      <form onSubmit={handleSaveSchedule} className="mt-3 rounded-md border border-border p-3">
+        <div className="text-xs font-semibold text-foreground">Schedule the informal review</div>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          Enter the date, time, and mode you arranged with the appraisal district — it goes straight
+          onto your calendar.
+        </p>
+        <div className="mt-2 flex flex-wrap items-end gap-2">
           <label className="grid gap-1 text-xs">
-            Agreed date
+            Date
             <input
               type="date"
               value={dateInput}
@@ -1831,20 +1983,48 @@ function InformalReviewSection({
               className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             />
           </label>
+          <label className="grid gap-1 text-xs">
+            Time
+            <input
+              type="time"
+              value={timeInput}
+              onChange={(e) => setTimeInput(e.target.value)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="grid gap-1 text-xs">
+            Mode
+            <select
+              value={modeInput}
+              onChange={(e) => setModeInput(e.target.value as HearingMode)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            >
+              {INFORMAL_REVIEW_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="submit"
-            disabled={savingDate || !dateInput}
-            className="btn-outline text-xs py-1.5 disabled:opacity-60"
+            disabled={savingSchedule || !dateInput}
+            className="btn-accent text-xs py-1.5 disabled:opacity-60"
           >
-            {savingDate ? "Saving…" : "Save & Add to Calendar"}
+            {savingSchedule ? "Saving…" : "Save & add to calendar"}
           </button>
-          {protest.informalReviewDate && (
-            <span className="text-xs text-muted-foreground">
-              On file: {protest.informalReviewDate}
-            </span>
-          )}
-        </form>
-      )}
+        </div>
+        {scheduled && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            On file: {protest.informalReviewDate}
+            {protest.informalReviewTime ? ` at ${protest.informalReviewTime}` : ""}
+            {protest.informalReviewMode ? ` · ${protest.informalReviewMode}` : ""} ·{" "}
+            <Link to="/dashboard/calendar" className="text-accent hover:underline">
+              View on calendar
+            </Link>
+          </p>
+        )}
+      </form>
 
       <div className="mt-3">
         <button
@@ -1868,7 +2048,25 @@ function InformalReviewSection({
             <span className="font-semibold">Available: </span>
             <span className="text-muted-foreground">{guidance.available}</span>
           </div>
+
+          {guidance.steps.length > 0 && (
+            <div className="text-xs">
+              <div className="font-semibold text-foreground">
+                Steps to schedule &amp; complete it
+              </div>
+              <ol className="mt-1 grid list-decimal gap-1 pl-4 text-muted-foreground">
+                {guidance.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+
           <div className="grid gap-2 sm:grid-cols-2 text-xs">
+            <div>
+              <div className="font-semibold text-foreground">Where to Schedule</div>
+              <p className="text-muted-foreground">{guidance.whereToSchedule || "Not stated."}</p>
+            </div>
             <div>
               <div className="font-semibold text-foreground">Who to Contact</div>
               <p className="text-muted-foreground">{guidance.whoToContact || "Not confirmed."}</p>
@@ -1898,6 +2096,17 @@ function InformalReviewSection({
               <p className="text-muted-foreground">{guidance.acceptingEndsCase}</p>
             </div>
           </div>
+
+          {guidance.applicableDeadlines.length > 0 && (
+            <div className="text-xs">
+              <div className="font-semibold text-foreground">Applicable Deadlines</div>
+              <ul className="mt-0.5 grid gap-0.5 text-muted-foreground">
+                {guidance.applicableDeadlines.map((d, i) => (
+                  <li key={i}>• {d}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {guidance.documentsToProvide.length > 0 && (
             <div className="text-xs">
               <div className="font-semibold text-foreground">Documents to Provide</div>
@@ -1918,6 +2127,34 @@ function InformalReviewSection({
               </ul>
             </div>
           )}
+
+          {(guidance.missingInfo.length > 0 || guidance.nextSteps.length > 0) && (
+            <div className="rounded-md bg-accent/5 border border-accent/30 p-2 text-xs">
+              {guidance.missingInfo.length > 0 && (
+                <>
+                  <div className="font-semibold text-foreground">
+                    Missing from your notice — do this to fill the gap
+                  </div>
+                  <ul className="mt-0.5 grid gap-0.5 text-muted-foreground">
+                    {guidance.missingInfo.map((d, i) => (
+                      <li key={i}>• {d}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {guidance.nextSteps.length > 0 && (
+                <div className={guidance.missingInfo.length > 0 ? "mt-2" : ""}>
+                  <div className="font-semibold text-foreground">Next steps</div>
+                  <ol className="mt-0.5 grid list-decimal gap-0.5 pl-4 text-muted-foreground">
+                    {guidance.nextSteps.map((d, i) => (
+                      <li key={i}>{d}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </div>
+          )}
+
           {mailto ? (
             <div>
               <a href={mailto} className="btn-accent text-xs py-1.5 inline-flex">
@@ -1936,6 +2173,34 @@ function InformalReviewSection({
           )}
         </div>
       )}
+
+      {/* Ask the AI a follow-up about the informal review / preparation. */}
+      <form onSubmit={handleAsk} className="mt-3">
+        <div className="text-xs font-semibold text-foreground">Ask about the informal review</div>
+        <div className="mt-1 flex flex-wrap items-end gap-2">
+          <textarea
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            rows={2}
+            aria-label="Ask about the informal review"
+            placeholder="e.g. Can I bring new comps to the informal that weren't in my protest?"
+            className="min-w-[16rem] flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+          />
+          <button
+            type="submit"
+            disabled={asking || !question.trim()}
+            className="btn-outline text-xs py-1.5 disabled:opacity-60"
+          >
+            {asking ? "Asking…" : "Ask"}
+          </button>
+        </div>
+        {qaError && <p className="mt-1 text-xs text-destructive">{qaError}</p>}
+        {answer && (
+          <div className="mt-2 rounded-md border border-border bg-secondary/30 p-2 text-xs">
+            <MarkdownLite text={answer} />
+          </div>
+        )}
+      </form>
     </div>
   );
 }
@@ -2264,12 +2529,14 @@ function HearingPrepSection({
   property,
   caseData,
   evidenceDocuments,
+  settlementAgreement,
   onUpdate,
 }: {
   protest: ProtestRecord;
   property: PropertyRecord;
   caseData: ProtestCase | null;
   evidenceDocuments: DocumentRecord[];
+  settlementAgreement: SettlementAgreementRecord | null;
   onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
   const [notice, setNotice] = useState<HearingNoticeRecord | null>(null);
@@ -2337,6 +2604,8 @@ function HearingPrepSection({
           {hearingStatus}
         </span>
       </div>
+
+      <InformalOutcomeBanner protest={protest} agreement={settlementAgreement} inline />
 
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <span className="text-muted-foreground">Who&apos;s attending:</span>
@@ -2711,25 +2980,73 @@ function DecisionNoticeSection({
   );
 }
 
-// A real settlement offer document awaiting the user's signature — upload,
-// AI reads the real settled value/terms, the user must explicitly confirm
-// it looks correct before signing is even offered, then a real signature,
-// then download + a reminder that submitting it is still on the user (no
-// county has an e-filing integration with this app). See
-// settlement-agreement.ts for the actual read/verify/sign/download
-// mechanics.
+// Amber, non-blocking notice at the top of the case (and inline in
+// HearingPrepSection) whenever the county's informal proposed value is on
+// the table but the owner hasn't recorded what came of it. Product asked
+// for a warning, not a hard gate — the case still works, this just keeps
+// the history honest.
+function InformalOutcomeBanner({
+  protest,
+  agreement,
+  inline = false,
+}: {
+  protest: ProtestRecord;
+  agreement: SettlementAgreementRecord | null;
+  inline?: boolean;
+}) {
+  const unresolved =
+    protest.status !== "resolved" &&
+    (protest.informalStatus === "proposed_value_received" ||
+      (!!agreement && !agreement.outcomeConfirmedAt));
+  if (!unresolved) return null;
+  return (
+    <div
+      className={`${inline ? "mt-3" : "mt-4"} rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs`}
+    >
+      <div className="font-semibold text-amber-700">Informal outcome not confirmed yet</div>
+      <p className="mt-1 text-muted-foreground">
+        The county&apos;s informal proposed value hasn&apos;t been resolved. Record whether you
+        accepted or rejected it, and whether you&apos;re satisfied, before working the formal
+        hearing — otherwise the case history and savings won&apos;t be right.
+      </p>
+      <button
+        type="button"
+        onClick={() =>
+          document
+            .getElementById("case-settlement-signature")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }
+        className="btn-outline mt-2 text-xs py-1"
+      >
+        Go to the settlement section
+      </button>
+    </div>
+  );
+}
+
+// The county's proposed value / settlement offer, end to end: AI reads the
+// real settled value/terms off the uploaded document, the owner says
+// whether they've already accepted/rejected it, otherwise they confirm it
+// looks right and sign here (or upload the copy they signed in person for
+// AI to verify), and finally they confirm Satisfied / Not Satisfied — which
+// resolves the case at the settled value or unlocks formal-hearing prep.
+// See settlement-agreement.ts for the read/verify/sign/outcome mechanics.
 function SettlementSignatureSection({
   userId,
   protest,
   property,
+  agreement,
+  onAgreementChange,
+  onUpdate,
 }: {
   userId: string;
   protest: ProtestRecord;
   property: PropertyRecord;
+  agreement: SettlementAgreementRecord | null;
+  onAgreementChange: (a: SettlementAgreementRecord | null) => void;
+  onUpdate: (patch: Partial<ProtestRecord>) => void;
 }) {
-  const [agreement, setAgreement] = useState<SettlementAgreementRecord | null>(null);
   const [originalDoc, setOriginalDoc] = useState<DocumentRecord | null>(null);
-  const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pending, setPending] = useState<DecisionExtraction | null>(null);
@@ -2740,20 +3057,18 @@ function SettlementSignatureSection({
   const [signerName, setSignerName] = useState("");
   const [signing, setSigning] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [recordingResponse, setRecordingResponse] = useState(false);
+  const [verifyingCopy, setVerifyingCopy] = useState(false);
+  const [signedCopyExtraction, setSignedCopyExtraction] = useState<DecisionExtraction | null>(null);
+  const [confirmingOutcome, setConfirmingOutcome] = useState(false);
 
   useEffect(() => {
-    getLatestSettlementAgreement(protest.id)
-      .then((a) => {
-        setAgreement(a);
-        if (a?.documentId) {
-          getDocumentById(userId, a.documentId)
-            .then(setOriginalDoc)
-            .catch(() => {});
-        }
-      })
-      .catch((err) => console.error("Could not load settlement agreement:", err))
-      .finally(() => setLoading(false));
-  }, [protest.id, userId]);
+    if (agreement?.documentId) {
+      getDocumentById(userId, agreement.documentId)
+        .then(setOriginalDoc)
+        .catch(() => {});
+    }
+  }, [agreement?.documentId, userId]);
 
   async function handleUpload(file: File) {
     setUploading(true);
@@ -2776,14 +3091,31 @@ function SettlementSignatureSection({
       const doc = await uploadDocument(userId, property.id, pendingFile, SETTLEMENT_DOCUMENT_TYPE);
       setOriginalDoc(doc);
       const saved = await saveSettlementAgreement(userId, protest.id, doc.id, pending);
-      setAgreement(saved);
+      onAgreementChange(saved);
       setPending(null);
       setPendingFile(null);
-      toast.success("Settlement document saved — review it below before signing.");
+      toast.success("Settlement document saved — tell us what came of it below.");
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not save this document."));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleResponse(status: "not_yet" | "accepted" | "rejected") {
+    if (!agreement) return;
+    setRecordingResponse(true);
+    try {
+      await recordSettlementResponse(protest.id, agreement.id, status);
+      onAgreementChange({
+        ...agreement,
+        responseStatus: status,
+        responseRecordedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save your response."));
+    } finally {
+      setRecordingResponse(false);
     }
   }
 
@@ -2792,7 +3124,7 @@ function SettlementSignatureSection({
     setConfirming(true);
     try {
       await confirmSettlementAgreement(agreement.id);
-      setAgreement({ ...agreement, userConfirmedAt: new Date().toISOString() });
+      onAgreementChange({ ...agreement, userConfirmedAt: new Date().toISOString() });
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not save your confirmation."));
     } finally {
@@ -2812,14 +3144,39 @@ function SettlementSignatureSection({
         signature,
         signerName.trim(),
       );
-      setAgreement(record);
+      onAgreementChange(record);
       toast.success(
-        "Signed. Download the completed settlement below and submit it to your county.",
+        "Signed. Download the completed settlement below, then confirm whether you're satisfied.",
       );
     } catch (err) {
       toast.error(getErrorMessage(err, "Could not sign this document."));
     } finally {
       setSigning(false);
+    }
+  }
+
+  async function handleVerifySignedCopy(file: File) {
+    if (!agreement) return;
+    setVerifyingCopy(true);
+    try {
+      const { record, extraction } = await verifySignedSettlementCopy(
+        userId,
+        agreement,
+        property,
+        protest,
+        file,
+      );
+      onAgreementChange(record);
+      setSignedCopyExtraction(extraction);
+      toast.success(
+        extraction.signaturePresent === "No"
+          ? "Uploaded, but AI couldn't find a completed signature on it — double-check the copy."
+          : "Signed copy verified.",
+      );
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not verify this signed copy."));
+    } finally {
+      setVerifyingCopy(false);
     }
   }
 
@@ -2840,13 +3197,50 @@ function SettlementSignatureSection({
     }
   }
 
+  async function handleOutcome(outcome: "satisfied" | "not_satisfied") {
+    if (!agreement) return;
+    const accepted = agreement.responseStatus === "accepted" || !!agreement.signedAt;
+    if (accepted && outcome === "satisfied" && agreement.settledValue == null) {
+      toast.error("No settled value on file yet — upload the settlement document above first.");
+      return;
+    }
+    setConfirmingOutcome(true);
+    try {
+      await confirmSettlementOutcome(protest.id, agreement.id, outcome);
+      onAgreementChange({
+        ...agreement,
+        outcome,
+        outcomeConfirmedAt: new Date().toISOString(),
+      });
+      if (accepted && outcome === "satisfied") {
+        const settledValue = agreement.settledValue as number;
+        await resolveInformalSettlement(protest.id, settledValue);
+        onUpdate({
+          status: "resolved",
+          finalValue: settledValue,
+          escalationPath: "accept",
+          closedAt: new Date().toISOString(),
+          informalStatus: "accepted",
+        });
+        toast.success(`Settlement accepted — case resolved at ${currency(settledValue)}.`);
+      } else {
+        await updateInformalStatus(protest.id, "rejected");
+        onUpdate({ informalStatus: "rejected" });
+        toast.success("Outcome recorded — formal-hearing prep is now unlocked.");
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not record this outcome."));
+    } finally {
+      setConfirmingOutcome(false);
+    }
+  }
+
   function handleDiscard() {
     setPending(null);
     setPendingFile(null);
     setUploadError(null);
   }
 
-  if (loading) return null;
   if (protest.status === "requested" || protest.status === "resolved") return null;
 
   const uploadButton = (
@@ -2872,13 +3266,32 @@ function SettlementSignatureSection({
     </label>
   );
 
+  const notResponded = agreement != null && agreement.responseStatus == null && !agreement.signedAt;
+  const signHerePath =
+    agreement != null &&
+    !agreement.signedAt &&
+    (agreement.responseStatus === "not_yet" || agreement.responseStatus == null);
+  const canOfferSignedCopy =
+    agreement != null &&
+    !agreement.signedAt &&
+    !agreement.signedCopyVerifiedAt &&
+    agreement.responseStatus !== "rejected";
+  const readyForOutcome =
+    agreement != null &&
+    !agreement.outcomeConfirmedAt &&
+    (agreement.responseStatus === "accepted" ||
+      agreement.responseStatus === "rejected" ||
+      !!agreement.signedAt ||
+      !!agreement.signedCopyVerifiedAt);
+
   return (
     <div id="case-settlement-signature" className="mt-5 border-t border-border pt-5">
-      <h4 className="text-sm font-semibold">Settlement Offer Signature</h4>
+      <h4 className="text-sm font-semibold">Settlement / Proposed Value</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        If your county sends a settlement offer that needs your signature, upload it here. AI reads
-        the real settled value and terms, you confirm it looks right, then sign and download the
-        completed copy to submit yourself.
+        When the county proposes a value or sends a settlement, upload it here. AI reads the real
+        settled value and terms; you tell us whether you&apos;ve already accepted or rejected it, or
+        sign it here (or upload the copy you signed in person), then confirm whether you&apos;re
+        satisfied with the outcome.
       </p>
 
       {!agreement && !pending && (
@@ -2970,7 +3383,36 @@ function SettlementSignatureSection({
             </div>
           )}
 
-          {!agreement.userConfirmedAt && !agreement.signedAt && (
+          {notResponded && (
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="text-xs font-semibold">Have you already responded to this offer?</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={() => handleResponse("accepted")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  I&apos;ve accepted it
+                </button>
+                <button
+                  onClick={() => handleResponse("rejected")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  I&apos;ve rejected it
+                </button>
+                <button
+                  onClick={() => handleResponse("not_yet")}
+                  disabled={recordingResponse}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  Not yet
+                </button>
+              </div>
+            </div>
+          )}
+
+          {signHerePath && !agreement.userConfirmedAt && (
             <div className="mt-3 border-t border-border pt-3">
               <button
                 onClick={handleConfirmLooksCorrect}
@@ -2982,7 +3424,7 @@ function SettlementSignatureSection({
             </div>
           )}
 
-          {agreement.userConfirmedAt && !agreement.signedAt && (
+          {signHerePath && agreement.userConfirmedAt && (
             <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
               <div className="text-xs font-semibold">Sign to accept this settlement</div>
               <label className="mt-2 grid gap-1 text-xs">
@@ -3012,6 +3454,77 @@ function SettlementSignatureSection({
             </div>
           )}
 
+          {canOfferSignedCopy && (
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="text-xs font-semibold">Signed it in person at the CAD office?</div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Upload the copy you signed — AI verifies the value, date, tax year, terms, and that
+                it&apos;s actually signed.
+              </p>
+              <label
+                className={`mt-2 inline-flex btn-outline cursor-pointer text-xs py-1.5 ${
+                  verifyingCopy ? "pointer-events-none opacity-60" : ""
+                }`}
+              >
+                {verifyingCopy ? "Verifying…" : "Upload Signed Copy"}
+                <input
+                  type="file"
+                  accept="image/*,.pdf"
+                  className="hidden"
+                  disabled={verifyingCopy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (file) handleVerifySignedCopy(file);
+                  }}
+                />
+              </label>
+            </div>
+          )}
+
+          {agreement.signedCopyVerifiedAt && (
+            <div className="mt-3 rounded-md bg-secondary/40 p-2 text-xs">
+              <div className="font-semibold text-foreground">
+                Signed copy verified {new Date(agreement.signedCopyVerifiedAt).toLocaleDateString()}
+              </div>
+              <div className="mt-1 grid gap-1 sm:grid-cols-2">
+                <Field
+                  label="Value on signed copy"
+                  value={
+                    signedCopyExtraction?.finalValue != null
+                      ? currency(signedCopyExtraction.finalValue)
+                      : agreement.settledValue != null
+                        ? currency(agreement.settledValue)
+                        : "Not stated"
+                  }
+                />
+                <Field
+                  label="Signed date"
+                  value={signedCopyExtraction?.signedDate ?? "Not stated"}
+                />
+                <Field
+                  label="Tax year on copy"
+                  value={signedCopyExtraction?.taxYear ?? agreement.taxYear ?? "Not stated"}
+                />
+                <Field
+                  label="Signature present"
+                  value={signedCopyExtraction?.signaturePresent ?? "Unclear"}
+                />
+              </div>
+              {signedCopyExtraction?.discrepancies &&
+                signedCopyExtraction.discrepancies.length > 0 && (
+                  <div className="mt-2 rounded-md bg-destructive/10 p-2 text-destructive">
+                    <span className="font-semibold">Discrepancies on the signed copy:</span>
+                    <ul className="mt-1 grid gap-0.5">
+                      {signedCopyExtraction.discrepancies.map((d, i) => (
+                        <li key={i}>• {d}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+            </div>
+          )}
+
           {agreement.signedAt && (
             <div className="mt-3 rounded-md bg-secondary/40 p-3 text-xs">
               <div className="font-semibold text-foreground">
@@ -3030,6 +3543,53 @@ function SettlementSignatureSection({
               </button>
             </div>
           )}
+
+          {readyForOutcome && (
+            <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
+              <div className="text-xs font-semibold">Are you satisfied with this outcome?</div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                This is what moves the case forward. Satisfied with an accepted value closes the
+                case at that value. Not satisfied — or a rejected offer — unlocks formal-hearing
+                prep.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={() => handleOutcome("satisfied")}
+                  disabled={confirmingOutcome || agreement.responseStatus === "rejected"}
+                  className="btn-accent text-xs py-1.5 disabled:opacity-60"
+                >
+                  Satisfied
+                </button>
+                <button
+                  onClick={() => handleOutcome("not_satisfied")}
+                  disabled={confirmingOutcome}
+                  className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                >
+                  Not satisfied
+                </button>
+              </div>
+            </div>
+          )}
+
+          {agreement.outcomeConfirmedAt && (
+            <div className="mt-3 rounded-md bg-secondary/40 p-3 text-xs">
+              <div className="font-semibold text-foreground">
+                Outcome recorded:{" "}
+                {agreement.outcome === "satisfied" ? "Satisfied" : "Not satisfied"}
+              </div>
+              <p className="mt-1 text-muted-foreground">
+                {agreement.outcome === "satisfied" &&
+                (agreement.responseStatus === "accepted" || agreement.signedAt)
+                  ? "Case resolved at the settled value."
+                  : "Proceeding to the formal hearing — prep is unlocked below."}
+              </p>
+            </div>
+          )}
+
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Your county&apos;s CAD website usually reflects an accepted value within a few business
+            days — check there to confirm it took effect.
+          </p>
         </div>
       )}
     </div>

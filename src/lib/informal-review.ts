@@ -2,6 +2,7 @@ import { invokeEdgeFunction } from "./edge-functions";
 import type { PropertyRecord } from "./properties";
 import type { CountyProtestInfo } from "./county-protest-info";
 import type { AppraiserCategory } from "./protests";
+import type { HearingNoticeExtraction } from "./hearing-notice";
 
 // Real, grounded informal-review guidance — see
 // informal-review-guidance/index.ts for the prompt/discipline.
@@ -20,6 +21,15 @@ export type InformalReviewGuidance = {
   whatNotToSay: string;
   respondingToProposedValue: string;
   acceptingEndsCase: string;
+  // County-specific how-to for getting the informal review scheduled and
+  // done, grounded in the uploaded notice + county reference. steps is the
+  // ordered walkthrough; missingInfo/nextSteps call out what the notice
+  // didn't provide and what to do right now.
+  steps: string[];
+  whereToSchedule: string;
+  applicableDeadlines: string[];
+  missingInfo: string[];
+  nextSteps: string[];
   draftEmailSubject: string;
   draftEmailBody: string;
   contactEmail: string | null;
@@ -31,6 +41,11 @@ export async function getInformalReviewGuidance(
   strategyRecommendation: string | null,
   estimatedReduction: number | null,
   evidenceFileNames: string[],
+  // The latest hearing/county notice already read for this case, when there
+  // is one (see getLatestHearingNotice / extract-hearing-notice) — grounds
+  // the guidance's steps / whereToSchedule / applicableDeadlines /
+  // missingInfo in the real document, not just the county reference.
+  noticeContext: HearingNoticeExtraction | null = null,
 ): Promise<InformalReviewGuidance> {
   return invokeEdgeFunction<InformalReviewGuidance>("informal-review-guidance", {
     caseContext: {
@@ -46,6 +61,19 @@ export async function getInformalReviewGuidance(
     },
     countyReference: countyInfo
       ? { informalReview: countyInfo.informalReview, arbContact: countyInfo.arbContact }
+      : null,
+    noticeContext: noticeContext
+      ? {
+          hearingDate: noticeContext.hearingDate,
+          evidenceSubmissionDeadline: noticeContext.evidenceSubmissionDeadline,
+          appealDeadline: noticeContext.appealDeadline,
+          countyContact: noticeContext.countyContact,
+          appraiserContact: noticeContext.appraiserContact,
+          submissionInstructions: noticeContext.submissionInstructions,
+          requiredDocuments: noticeContext.requiredDocuments,
+          informalReviewAvailable: noticeContext.informalReviewAvailable,
+          proceduralDifferences: noticeContext.proceduralDifferences,
+        }
       : null,
   });
 }

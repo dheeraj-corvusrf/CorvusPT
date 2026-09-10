@@ -31,6 +31,11 @@ export type DecisionExtraction = {
   refundIndicator: string | null;
   otherConditions: string | null;
   discrepancies: string[];
+  // Only meaningful when the caller asked for a signed copy to be verified
+  // (extractDecisionDocument's { expectSigned } option) — the post-hearing
+  // decision path never reads these. "Unclear" / null otherwise.
+  signaturePresent?: "Yes" | "No" | "Unclear";
+  signedDate?: string | null;
 };
 
 export type DecisionNoticeRecord = DecisionExtraction & {
@@ -50,6 +55,10 @@ export async function extractDecisionDocument(
   property: PropertyRecord,
   protest: ProtestRecord,
   file: File,
+  // Set when the upload is a signed copy the owner wants AI to verify — see
+  // verifySignedSettlementCopy in settlement-agreement.ts. Makes the edge
+  // function report signaturePresent / signedDate.
+  opts?: { expectSigned?: boolean },
 ): Promise<DecisionExtraction> {
   const dataUrl = await fileToDataUrl(file);
   return invokeEdgeFunction<DecisionExtraction>("extract-decision-document", {
@@ -59,6 +68,7 @@ export async function extractDecisionDocument(
       accountNumber: property.accountNumber,
       taxYear: property.taxYear ?? protest.taxYear,
       originalValue: protest.originalValue,
+      expectSigned: opts?.expectSigned ?? false,
     },
     documents: [
       { fileName: file.name, mimeType: file.type || "application/octet-stream", dataUrl },

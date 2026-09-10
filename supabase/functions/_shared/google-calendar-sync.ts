@@ -58,7 +58,7 @@ export async function buildUserEvents(
       adminClient
         .from("protests")
         .select(
-          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date, tax_year",
+          "id, property_id, status, hearing_date, hearing_time, hearing_location, arb_decision_date, informal_status, informal_review_date, informal_review_time, tax_year",
         )
         .eq("user_id", userId),
       adminClient
@@ -112,10 +112,15 @@ export async function buildUserEvents(
     const address =
       (propertyById.get(pr.property_id as string)?.address as string) ?? "your property";
     if (pr.informal_status === "scheduled" && pr.informal_review_date) {
+      // Real time-of-day the owner scheduled it for — mirrors
+      // informalReviewEventTitle() in src/lib/tax-calendar.ts by hand,
+      // since this Deno function can't import that browser module.
+      const informalParts = [`${EVENT_TYPE_LABEL.informal_review} — ${address}`];
+      if (pr.informal_review_time) informalParts.push(`at ${pr.informal_review_time as string}`);
       events.push({
         iCalUID: uid(`informal-review:${id}`),
         date: toIsoDate(pr.informal_review_date as string),
-        title: `${EVENT_TYPE_LABEL.informal_review} — ${address}`,
+        title: informalParts.join(" "),
         amount: null,
       });
     }

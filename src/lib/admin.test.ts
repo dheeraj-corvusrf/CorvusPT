@@ -53,6 +53,8 @@ describe("toProtestRecord", () => {
       hearingMode: null,
       informalStatus: "not_requested",
       informalReviewDate: null,
+      informalReviewTime: null,
+      informalReviewMode: null,
       informalAppraiserCategory: null,
       attendanceType: null,
       arbDecision: null,

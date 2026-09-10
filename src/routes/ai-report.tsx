@@ -122,7 +122,15 @@ import {
   applyValueTrendAdjustment,
 } from "@/lib/texas-tax-rates";
 import { CompsMap, useLeaflet } from "@/components/CompsMap";
-import { findExistingProperty, addProperty, type PropertyRecord } from "@/lib/properties";
+import {
+  findExistingProperty,
+  addProperty,
+  listProperties,
+  buildAiReportIntakePatch,
+  updatePropertyIdentity,
+  type PropertyRecord,
+} from "@/lib/properties";
+import { cadLookup, cadLookupByAccount, type CadRecord } from "@/lib/cad-lookup";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
 import {
@@ -208,11 +216,17 @@ export const Route = createFileRoute("/ai-report")({
       },
     ],
   }),
-  // Lets a deep link (CaseDetailModal's "Upload Evidence — Go to Module 8"
-  // button) auto-open a specific module's modal on load, same
-  // validateSearch pattern sign-in.tsx already uses for its own `redirect`.
-  validateSearch: (search: Record<string, unknown>): { openModule?: string } => ({
+  // openModule: a deep link (CaseDetailModal's "Upload Evidence — Go to
+  // Module 8" button) auto-opens a specific module's modal on load.
+  // propertyId: opens the report for one specific saved property regardless
+  // of what's in intake — the Properties page's bulk "Run AI Report" opens
+  // one tab per selected property this way, so each tab is self-contained
+  // rather than racing a shared sessionStorage write.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { openModule?: string; propertyId?: string } => ({
     openModule: typeof search.openModule === "string" ? search.openModule : undefined,
+    propertyId: typeof search.propertyId === "string" ? search.propertyId : undefined,
   }),
   component: Report,
 });
@@ -254,7 +268,7 @@ function buildValueTrend(valueHistory: IntakeState["valueHistory"]) {
 function Report() {
   const nav = useNavigate();
   const { user } = useAuth();
-  const { openModule: deepLinkModuleId } = Route.useSearch();
+  const { openModule: deepLinkModuleId, propertyId: deepLinkPropertyId } = Route.useSearch();
   const [state, setState] = useState<IntakeState>({ previewsUsed: [] });
   const [analyzing, setAnalyzing] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -329,6 +343,48 @@ function Report() {
   const [resolvedProperty, setResolvedProperty] = useState<PropertyRecord | null>(null);
   const [existingProtest, setExistingProtest] = useState<ProtestRecord | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
+  const [cadFetching, setCadFetching] = useState(false);
+
+  // "Fetch details" (Module 6) — re-pull this property's CAD record from the
+  // live county source and update the classification-relevant field
+  // (property type / CAD class). Only 6 counties expose a real API (see the
+  // texas_cad_vendor_landscape memory); the rest just report "no live
+  // source". Never touches assessed values or history — only the field the
+  // zoning module actually reads — so it can't silently change the numbers
+  // shown elsewhere.
+  async function handleFetchCadDetails() {
+    setCadFetching(true);
+    try {
+      let record: CadRecord | null = null;
+      if (state.cad && state.accountNumber) {
+        record = await cadLookupByAccount(state.cad, state.accountNumber).catch(() => null);
+      }
+      if (!record && state.address) {
+        const res = await cadLookup(state.address).catch(() => null);
+        if (res && res.matched === true) record = res.record;
+      }
+      if (!record) {
+        toast.error("No live CAD source returned details for this property's county.");
+        return;
+      }
+      const freshType = record.propertyType?.trim() || null;
+      if (!freshType || freshType === (state.propertyType ?? "").trim()) {
+        toast.info("CAD classification is already current.");
+        return;
+      }
+      setState((s) => ({ ...s, propertyType: freshType }));
+      updateIntake({ propertyType: freshType });
+      if (resolvedProperty?.id) {
+        updatePropertyIdentity(resolvedProperty.id, { propertyType: freshType })
+          .then((p) => setResolvedProperty(p))
+          .catch((err) => console.error("Could not persist the fetched CAD class:", err));
+      }
+      toast.success(`Updated CAD classification to "${freshType}".`);
+      loadModule("zoning", { force: true });
+    } finally {
+      setCadFetching(false);
+    }
+  }
   // Which tier's checkout is currently redirecting, for the unpaid-property
   // "Subscribe" buttons in the banner below (real, one-click checkout right
   // here — see handleSubscribeToProperty — rather than sending the user off
@@ -374,7 +430,31 @@ function Report() {
   const [incomeAnalysisLoaded, setIncomeAnalysisLoaded] = useState(false);
   const auxDataLoaded = overridesLoaded && compSelectionsLoaded && incomeAnalysisLoaded;
 
+  // ?propertyId — open this exact saved property's report, whatever intake
+  // currently holds. Used by the Properties page's bulk "Run AI Report" so
+  // each tab is self-contained. Resolves once, seeds intake from the real
+  // row, then the normal readIntake() flow below takes over on the next tick.
+  const [propertyIdApplied, setPropertyIdApplied] = useState(!deepLinkPropertyId);
   useEffect(() => {
+    if (!deepLinkPropertyId || !user || propertyIdApplied) return;
+    let live = true;
+    listProperties(user.id)
+      .then((props) => {
+        if (!live) return;
+        const match = props.find((p) => p.id === deepLinkPropertyId);
+        if (match) updateIntake({ ...buildAiReportIntakePatch(match), confirmed: true });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (live) setPropertyIdApplied(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [deepLinkPropertyId, user, propertyIdApplied]);
+
+  useEffect(() => {
+    if (!propertyIdApplied) return; // wait for ?propertyId to seed intake first
     const s = readIntake();
     if (!s.confirmed) {
       setState(s);
@@ -388,7 +468,7 @@ function Report() {
     setState(s.aiReviewReached ? s : updateIntake({ aiReviewReached: true }));
     const t = setTimeout(() => setAnalyzing(false), 1800);
     return () => clearTimeout(t);
-  }, [nav]);
+  }, [nav, propertyIdApplied]);
 
   useEffect(() => {
     if (!user || !state.address) return;
@@ -441,6 +521,8 @@ function Report() {
                 d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE ||
                 d.documentType?.startsWith("Strategy Evidence: ") ||
                 d.documentType?.startsWith("Zoning: ") ||
+                d.documentType?.startsWith("Improvement: ") ||
+                d.documentType?.startsWith("Site: ") ||
                 d.documentType?.startsWith("Income: ")),
           ),
         );
@@ -575,10 +657,11 @@ function Report() {
   }, [strategyEvidenceCount]);
 
   // Same, for Module 5 (Improvement Condition) — a photo uploaded from the
-  // card's per-component control (tagged EVIDENCE_DOCUMENT_TYPE) re-runs the
+  // card's per-component control (EVIDENCE_DOCUMENT_TYPE) or the modal's
+  // single upload (AI-tagged "Improvement: <component>") re-runs the
   // condition assessment + its dependents.
   const improvementEvidenceCount = evidenceDocs.filter(
-    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE,
+    (d) => d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
   ).length;
   const improvementEvidenceSeenRef = useRef<number | null>(null);
   useEffect(() => {
@@ -1037,6 +1120,11 @@ function Report() {
     if (id === "site") {
       const na = itemsNotApplicable(overrides, "site");
       if (na.length > 0) input.notApplicableFactors = na;
+      // Site-tagged uploads re-run this module via the totalEvidenceCount
+      // digest; they're not folded into the input/cache hash (that raced the
+      // evidence-docs fetch on reload, and the site edge function has no
+      // per-factor document handling anyway — its gating is siteGis +
+      // notApplicableFactors).
     }
     if (id === "improvement") {
       const na = itemsNotApplicable(overrides, "improvement");
@@ -1309,7 +1397,10 @@ function Report() {
       // guidance in what's actually shown rather than only general advice — see
       // handleUploadEvidence() above and ai-report-modules/index.ts's evidence
       // handling. Capped to the 4 most recent, mirroring the server-side cap.
-      const improvementDocs = evidenceDocs.filter((d) => d.documentType === EVIDENCE_DOCUMENT_TYPE);
+      const improvementDocs = evidenceDocs.filter(
+        (d) =>
+          d.documentType === EVIDENCE_DOCUMENT_TYPE || d.documentType?.startsWith("Improvement: "),
+      );
       if (id === "improvement" && improvementDocs.length > 0) {
         const recent = improvementDocs.slice(-4);
         const evidenceImages = await Promise.all(
@@ -1502,6 +1593,27 @@ function Report() {
     getSiteGis({ lat, lng })
       .then((data) => setSiteGisMap({ data, loading: false, attempted: true }))
       .catch(() => setSiteGisMap({ data: null, loading: false, attempted: true }));
+  }
+
+  // Module 4 "Fetch details" — re-pull the FEMA flood zone + USGS elevation
+  // for the property's coordinates, ignoring the once-only `attempted` guard
+  // above, then re-run the module. No-op without coordinates.
+  const [siteGisRefreshing, setSiteGisRefreshing] = useState(false);
+  async function handleRefreshSiteGis() {
+    if (!siteCoords) {
+      toast.error("No coordinates on file for this property — can't fetch site data.");
+      return;
+    }
+    setSiteGisRefreshing(true);
+    setSiteGisMap({ data: null, loading: true, attempted: true });
+    try {
+      const data = await getSiteGis({ lat: siteCoords.lat, lng: siteCoords.lng }).catch(() => null);
+      setSiteGisMap({ data, loading: false, attempted: true });
+      toast.success(data ? "Site data refreshed." : "No live FEMA/USGS data for this location.");
+      loadModule("site", { force: true });
+    } finally {
+      setSiteGisRefreshing(false);
+    }
   }
 
   useEffect(() => {
@@ -2240,6 +2352,10 @@ function Report() {
                 uploadingEvidence={false}
                 onUploadEvidence={() => {}}
                 onForceReload={() => {}}
+                onFetchCadDetails={() => {}}
+                onRefreshSiteGis={() => {}}
+                siteGisRefreshing={false}
+                cadFetching={false}
                 onAnswerStrategy={() => {}}
                 onAskQuestion={() => Promise.resolve("")}
                 existingProtest={null}
@@ -2316,6 +2432,10 @@ function Report() {
             uploadingEvidence={uploadingEvidence}
             onUploadEvidence={handleUploadEvidence}
             onForceReload={() => loadModule(openModel.id, { force: true })}
+            onFetchCadDetails={handleFetchCadDetails}
+            onRefreshSiteGis={handleRefreshSiteGis}
+            siteGisRefreshing={siteGisRefreshing}
+            cadFetching={cadFetching}
             onAnswerStrategy={answerStrategy}
             onAskQuestion={askQuestion}
             existingProtest={existingProtest}
@@ -3058,7 +3178,7 @@ function ModuleVisual({
           uploading={uploadingEvidence}
           onUpload={
             hasFullAccess
-              ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
+              ? (files) => onUploadEvidence(files, undefined, "Zoning: General")
               : undefined
           }
         />
@@ -4689,44 +4809,47 @@ function ImprovementCardVisual({
               className="flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1"
             >
               <span className="text-xs font-medium">{c.component}</span>
-              <span className="flex items-center gap-1.5">
-                <span
-                  className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
-                    na
-                      ? "bg-secondary/60 text-muted-foreground"
-                      : BUILDING_CONDITION_TONE[c.condition]
-                  }`}
-                >
-                  {label}
-                </span>
-                {!c.hasPhoto && !na && onUpload && (
-                  <label
-                    title={`Upload a photo of the ${c.component.toLowerCase()}`}
-                    className={`inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-1.5 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
-                      uploading ? "pointer-events-none opacity-60" : ""
-                    }`}
-                  >
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        e.target.value = "";
-                        if (sel.length > 0) onUpload(sel);
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "…" : "Photo"}
-                  </label>
-                )}
+              <span
+                className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                  na
+                    ? "bg-secondary/60 text-muted-foreground"
+                    : BUILDING_CONDITION_TONE[c.condition]
+                }`}
+              >
+                {label}
               </span>
             </div>
           );
         })}
       </div>
+
+      {/* One upload for the whole card — the AI reads each photo/doc and
+          matches it to the right building component (Roof / HVAC / Exterior /
+          Interior); the modal is where a file can be tagged to a component by
+          hand. */}
+      {onUpload && missing > 0 && (
+        <label
+          onClick={(e) => e.stopPropagation()}
+          className={`mx-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-accent/40 px-3 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10 ${
+            uploading ? "pointer-events-none opacity-60" : ""
+          }`}
+        >
+          <input
+            type="file"
+            accept="image/*,.pdf"
+            multiple
+            disabled={uploading}
+            className="hidden"
+            onChange={(e) => {
+              const sel = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (sel.length > 0) onUpload(sel);
+            }}
+          />
+          <Upload className="h-3 w-3" />
+          {uploading ? "Uploading…" : "Upload photos"}
+        </label>
+      )}
 
       {depreciation.conditionAdjustedValue != null ? (
         <div className="grid grid-cols-2 gap-1.5">
@@ -5653,83 +5776,145 @@ const ZONING_ASPECT_ICON: Record<string, LucideIcon> = {
 // The 4-column classification line-up from the spec's screenshot: the four
 // aspects are the columns, one value row, then a muted source / upload row.
 // The Permitted Use column also carries the overall consistent/mismatch mark.
+const ZONING_ASPECT_KINDS = [
+  "CAD Classification",
+  "Actual Use",
+  "Zoning District",
+  "Permitted Use",
+] as const;
+
 function ZoningClassificationTable({
   aspects,
   matches,
+  zoningDocs,
   onUpload,
+  onFetchDetails,
   uploading,
+  categorizing,
+  fetching,
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
-  onUpload?: (aspectLabel: string, files: File[]) => void;
+  zoningDocs: DocumentRecord[];
+  // One upload -> the AI reads each file and tags it to the aspect it
+  // documents (see the zoning case's handleAutoUpload). Absent for a
+  // signed-out / no-access viewer.
+  onUpload?: (files: File[]) => void;
+  // Re-pull this property's CAD record and update its classification-
+  // relevant fields, then re-run the module.
+  onFetchDetails?: () => void;
   uploading?: boolean;
+  categorizing?: boolean;
+  fetching?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full min-w-[560px] table-fixed text-left text-sm">
-        <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
-          <tr>
-            {aspects.map((a) => (
-              <th key={a.label} className="px-4 py-2.5 font-semibold">
-                {a.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <tr className="border-t border-border/60 align-top">
-            {aspects.map((a) => {
-              const st = ZONING_ASPECT_STATUS[a.status];
-              const isPermitted = a.label === "Permitted Use";
-              const showMismatch = isPermitted && matches === "inconsistent";
-              const showMatch = isPermitted && matches === "consistent";
-              return (
+    <div className="rounded-lg border border-border">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+          <thead className="bg-secondary/60 text-xs uppercase tracking-wide text-muted-foreground">
+            <tr>
+              {aspects.map((a) => (
+                <th key={a.label} className="px-4 py-2.5 font-semibold">
+                  {a.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-border/60 align-top">
+              {aspects.map((a) => {
+                const st = ZONING_ASPECT_STATUS[a.status];
+                const isPermitted = a.label === "Permitted Use";
+                const showMismatch = isPermitted && matches === "inconsistent";
+                const showMatch = isPermitted && matches === "consistent";
+                return (
+                  <td key={a.label} className="px-4 py-3">
+                    <div className="flex items-start gap-1.5">
+                      {showMismatch ? (
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                      ) : showMatch ? (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                      ) : (
+                        <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
+                      )}
+                      <span
+                        className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
+                      >
+                        {a.value || "—"}
+                      </span>
+                    </div>
+                  </td>
+                );
+              })}
+            </tr>
+            <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
+              {aspects.map((a) => (
                 <td key={a.label} className="px-4 py-3">
-                  <div className="flex items-start gap-1.5">
-                    {showMismatch ? (
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-                    ) : showMatch ? (
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-                    ) : (
-                      <st.Icon className={`mt-0.5 h-4 w-4 shrink-0 ${st.iconCls}`} />
-                    )}
-                    <span
-                      className={`font-medium ${showMismatch ? "text-destructive" : "text-foreground"}`}
-                    >
-                      {a.value || "—"}
-                    </span>
-                  </div>
+                  {a.source || "—"}
                 </td>
-              );
-            })}
-          </tr>
-          <tr className="border-t border-border/40 align-top text-xs text-muted-foreground">
-            {aspects.map((a) => (
-              <td key={a.label} className="px-4 py-3">
-                <div>{a.source || "—"}</div>
-                {onUpload && a.status === "Additional Data Needed" && (
-                  <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 font-semibold text-accent hover:bg-accent/10">
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        if (sel.length > 0) onUpload(a.label, sel);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : "Upload"}
-                  </label>
-                )}
-              </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {zoningDocs.length > 0 && (
+        <div className="border-t border-border/60 px-4 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Documents in this section
+          </div>
+          <ul className="mt-1 grid gap-1">
+            {zoningDocs.map((doc) => (
+              <li key={doc.id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate">{doc.fileName}</span>
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  {doc.documentType?.replace(/^Zoning:\s*/, "") || "Zoning"}
+                </span>
+              </li>
             ))}
-          </tr>
-        </tbody>
-      </table>
+          </ul>
+        </div>
+      )}
+
+      {(onUpload || onFetchDetails) && (
+        <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 px-4 py-3">
+          {onUpload && (
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                multiple
+                disabled={uploading || categorizing}
+                className="hidden"
+                onChange={(e) => {
+                  const sel = Array.from(e.target.files ?? []);
+                  if (sel.length > 0) onUpload(sel);
+                  e.target.value = "";
+                }}
+              />
+              <Upload className="h-3.5 w-3.5" />
+              {categorizing ? "Reading documents…" : uploading ? "Uploading…" : "Upload documents"}
+            </label>
+          )}
+          {onFetchDetails && (
+            <button
+              type="button"
+              onClick={onFetchDetails}
+              disabled={fetching}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${fetching ? "animate-spin" : ""}`} />
+              {fetching ? "Fetching…" : "Fetch details"}
+            </button>
+          )}
+        </div>
+      )}
+      {(onUpload || onFetchDetails) && (
+        <p className="px-4 pb-3 text-center text-[10px] text-muted-foreground">
+          Upload a zoning letter, plat, deed, or use permit — the AI tags each to the right aspect.
+          Fetch details re-pulls the county's classification for this property.
+        </p>
+      )}
     </div>
   );
 }
@@ -5745,18 +5930,20 @@ function ZoningAspectTiles({
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
-  onUpload?: (aspectLabel: string, files: File[]) => void;
+  // One upload for the whole card — tagged "Zoning: General"; the modal's
+  // upload is where the AI sorts a file to a specific aspect.
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
 }) {
   const consistent = matches === "consistent";
   const uncertain = matches === "uncertain";
+  const needsAny = aspects.some((a) => a.status === "Additional Data Needed");
   return (
     <div>
       <div className="grid grid-cols-4 gap-1.5">
         {aspects.map((a) => {
           const st = ZONING_ASPECT_STATUS[a.status];
           const Icon = ZONING_ASPECT_ICON[a.label] ?? FileText;
-          const needsData = a.status === "Additional Data Needed";
           return (
             <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
               <Icon className="mx-auto h-4 w-4 text-muted-foreground" />
@@ -5768,31 +5955,33 @@ function ZoningAspectTiles({
               >
                 {st.label}
               </span>
-              {onUpload && needsData && (
-                <label
-                  className="mt-1 flex cursor-pointer items-center justify-center gap-0.5 rounded-full border border-accent/40 px-1.5 py-0.5 text-[8px] font-semibold text-accent hover:bg-accent/10"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <input
-                    type="file"
-                    accept="image/*,.pdf"
-                    multiple
-                    disabled={uploading}
-                    className="hidden"
-                    onChange={(e) => {
-                      const sel = Array.from(e.target.files ?? []);
-                      if (sel.length > 0) onUpload(a.label, sel);
-                      e.target.value = "";
-                    }}
-                  />
-                  <Upload className="h-2.5 w-2.5" />
-                  {uploading ? "Uploading…" : "Upload"}
-                </label>
-              )}
             </div>
           );
         })}
       </div>
+
+      {onUpload && needsAny && (
+        <label
+          className="mt-2 flex cursor-pointer items-center justify-center gap-1 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="file"
+            accept="image/*,.pdf"
+            multiple
+            disabled={uploading}
+            className="hidden"
+            onChange={(e) => {
+              const sel = Array.from(e.target.files ?? []);
+              if (sel.length > 0) onUpload(sel);
+              e.target.value = "";
+            }}
+          />
+          <Upload className="h-3 w-3" />
+          {uploading ? "Uploading…" : "Upload"}
+        </label>
+      )}
+
       <div className="mx-auto my-1.5 h-3 w-px bg-border" />
       <div className="grid grid-cols-2 gap-2 text-center">
         <div
@@ -6338,17 +6527,23 @@ function IncomeApproachTable({ c }: { c: IncomeApproach }) {
   );
 }
 
-// Data Availability panel — which source documents the owner has provided,
-// with a per-kind upload control. Mirrors ZoningClassificationTable's
-// per-row upload.
+// Data Availability panel — which income source documents the owner has
+// provided. One "Upload documents" control at the bottom; the AI reads each
+// file and tags it to the right kind (see IncomeWorkspace.handleAutoUpload),
+// so the owner never has to pick a category. Documents already tagged to
+// this section are listed underneath the four kind rows.
 function IncomeDataAvailability({
   docKinds,
+  incomeDocs,
   onUpload,
   uploading,
+  categorizing,
 }: {
   docKinds: string[];
-  onUpload?: (kind: string, files: File[]) => void;
+  incomeDocs: DocumentRecord[];
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
+  categorizing?: boolean;
 }) {
   return (
     <div className="rounded-lg border border-border">
@@ -6376,35 +6571,57 @@ function IncomeDataAvailability({
                   )}
                 </span>
               </span>
-              <span className="flex shrink-0 items-center gap-2">
-                <span
-                  className={`hidden text-xs font-semibold sm:inline ${has ? "text-success" : "text-muted-foreground"}`}
-                >
-                  {has ? "Provided" : "Not provided"}
-                </span>
-                {onUpload && (
-                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
-                    <input
-                      type="file"
-                      accept="image/*,.pdf,.csv,.xlsx,.xls"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        if (sel.length > 0) onUpload(kind, sel);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : has ? "Replace" : "Upload"}
-                  </label>
-                )}
+              <span
+                className={`shrink-0 text-xs font-semibold ${has ? "text-success" : "text-muted-foreground"}`}
+              >
+                {has ? "Provided" : "Not provided"}
               </span>
             </li>
           );
         })}
       </ul>
+
+      {incomeDocs.length > 0 && (
+        <div className="border-t border-border/60 px-3 py-2.5 sm:px-4">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Documents in this section
+          </div>
+          <ul className="mt-1 grid gap-1">
+            {incomeDocs.map((doc) => (
+              <li key={doc.id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate">{doc.fileName}</span>
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  {doc.documentType?.replace(/^Income:\s*/, "") || "Income"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {onUpload && (
+        <div className="border-t border-border/60 px-3 py-3 text-center sm:px-4">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+            <input
+              type="file"
+              accept="image/*,.pdf,.csv,.xlsx,.xls"
+              multiple
+              disabled={uploading || categorizing}
+              className="hidden"
+              onChange={(e) => {
+                const sel = Array.from(e.target.files ?? []);
+                if (sel.length > 0) onUpload(sel);
+                e.target.value = "";
+              }}
+            />
+            <Upload className="h-3.5 w-3.5" />
+            {categorizing ? "Reading documents…" : uploading ? "Uploading…" : "Upload documents"}
+          </label>
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            The AI reads each file and tags it (P&amp;L, rent roll, operating statement, appraisal).
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -6640,6 +6857,33 @@ function IncomeWorkspace({
     ),
   ];
   const d = moduleState?.data as ModuleResultMap["income"] | undefined;
+
+  // One upload -> the AI reads each file and tags it to the right income
+  // kind, so the four per-row upload buttons collapse to one. Mirrors
+  // Module 8's handleBulkUploadEvidence: categorize, group, upload per
+  // group; a failed categorization just tags everything "Income: Other"
+  // and the upload still happens.
+  const [categorizingIncomeDocs, setCategorizingIncomeDocs] = useState(false);
+  async function handleAutoUpload(files: File[]) {
+    setCategorizingIncomeDocs(true);
+    try {
+      const categorized = await categorizeEvidenceUploads([...INCOME_DOC_KINDS], files);
+      const groups = new Map<string, File[]>();
+      for (const file of files) {
+        const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+        const key =
+          matched && (INCOME_DOC_KINDS as readonly string[]).includes(matched) ? matched : "Other";
+        const g = groups.get(key);
+        if (g) g.push(file);
+        else groups.set(key, [file]);
+      }
+      for (const [kind, groupFiles] of groups) {
+        await onUploadEvidence(groupFiles, undefined, `Income: ${kind}`);
+      }
+    } finally {
+      setCategorizingIncomeDocs(false);
+    }
+  }
   const supports = d?.supportsCadValue ?? incomeSupportsCad(computed);
   const cs = computeComparableStats(
     compsMap.data?.subject ?? null,
@@ -6667,12 +6911,10 @@ function IncomeWorkspace({
 
       <IncomeDataAvailability
         docKinds={docKinds}
-        onUpload={
-          allowEvidenceUpload
-            ? (kind, files) => onUploadEvidence(files, undefined, `Income: ${kind}`)
-            : undefined
-        }
+        incomeDocs={incomeDocs}
+        onUpload={allowEvidenceUpload ? handleAutoUpload : undefined}
         uploading={uploadingEvidence}
+        categorizing={categorizingIncomeDocs}
       />
 
       <IncomeFiguresForm
@@ -7599,10 +7841,10 @@ type DataRequirementRow = {
   source: string;
   usedFor: string;
   status: "Available" | "Partial" | "Not integrated";
-  // Rows where a document the owner already has would genuinely move this
-  // analysis forward — the AI can't fetch these anywhere, so surface an
-  // upload control right on the row. `documentType` tags the file so
-  // ai-report-modules picks it up for the right module.
+  // Retained for reference only — the per-row upload controls were replaced
+  // by one "Upload supporting documents" button at the bottom of the list
+  // (the AI sorts each file to the categories it helps), so `hint` no longer
+  // renders. Left in place as documentation of what each row wants.
   userUpload?: { hint: string; documentType: string };
 };
 
@@ -7740,10 +7982,12 @@ function DataRequirementsTable({
   onUpload,
   uploading,
 }: {
-  // When present, rows whose data the owner could supply get an Upload
-  // control. Absent for a signed-out / no-access viewer — they still see
-  // what's needed, just can't act on it here.
-  onUpload?: (files: File[], documentType: string) => void;
+  // One upload control at the bottom (not per row). Files go into the
+  // property's evidence pool and the AI re-runs the analysis on its own,
+  // sorting each document to the categories it actually helps — the owner
+  // doesn't have to match a file to a row. Absent for a signed-out / no-
+  // access viewer: they still see what's needed, just can't act on it here.
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -7751,55 +7995,25 @@ function DataRequirementsTable({
     <div className="grid gap-1.5">
       {DATA_REQUIREMENTS.map((r) => {
         const isOpen = expanded === r.category;
-        const canUpload = !!(onUpload && r.userUpload);
         return (
           <div key={r.category} className="rounded-lg border border-border">
-            <div className="flex w-full items-center justify-between gap-2 px-3 py-2">
-              <button
-                type="button"
-                onClick={() => setExpanded(isOpen ? null : r.category)}
-                className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              >
-                <span className="truncate text-xs font-medium">{r.category}</span>
-              </button>
+            <button
+              type="button"
+              onClick={() => setExpanded(isOpen ? null : r.category)}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
+            >
+              <span className="truncate text-xs font-medium">{r.category}</span>
               <span className="flex shrink-0 items-center gap-2">
-                {canUpload && (
-                  <label
-                    className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/10"
-                    title={r.userUpload!.hint}
-                  >
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const selected = Array.from(e.target.files ?? []);
-                        if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
-                        e.target.value = "";
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "Uploading…" : "Upload"}
-                  </label>
-                )}
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${DATA_STATUS_STYLE[r.status]}`}
                 >
                   {r.status}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setExpanded(isOpen ? null : r.category)}
-                  aria-label={isOpen ? "Collapse" : "Expand"}
-                >
-                  <ArrowRight
-                    className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
-                  />
-                </button>
+                <ArrowRight
+                  className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                />
               </span>
-            </div>
+            </button>
             {isOpen && (
               <div className="grid gap-2 border-t border-border/60 px-3 py-2 text-xs">
                 <div>
@@ -7820,35 +8034,37 @@ function DataRequirementsTable({
                   </div>
                   <p className="text-muted-foreground">{r.usedFor}</p>
                 </div>
-                {canUpload && (
-                  <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
-                      Provide This Data
-                    </div>
-                    <p className="text-muted-foreground">{r.userUpload!.hint}</p>
-                    <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10">
-                      <input
-                        type="file"
-                        accept="image/*,.pdf"
-                        multiple
-                        disabled={uploading}
-                        className="hidden"
-                        onChange={(e) => {
-                          const selected = Array.from(e.target.files ?? []);
-                          if (selected.length > 0) onUpload!(selected, r.userUpload!.documentType);
-                          e.target.value = "";
-                        }}
-                      />
-                      <Upload className="h-3.5 w-3.5" />
-                      {uploading ? "Uploading…" : "Upload document"}
-                    </label>
-                  </div>
-                )}
               </div>
             )}
           </div>
         );
       })}
+
+      {onUpload && (
+        <div className="mt-1 rounded-lg border border-dashed border-accent/40 bg-accent/5 px-3 py-3 text-center">
+          <p className="text-xs text-muted-foreground">
+            Have documents that fill any of these gaps — an appraisal, survey, rent roll, photos,
+            prior protest results? Upload them and the AI re-runs its analysis, sorting each file to
+            where it helps.
+          </p>
+          <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              multiple
+              disabled={uploading}
+              className="hidden"
+              onChange={(e) => {
+                const selected = Array.from(e.target.files ?? []);
+                if (selected.length > 0) onUpload(selected);
+                e.target.value = "";
+              }}
+            />
+            <Upload className="h-3.5 w-3.5" />
+            {uploading ? "Uploading…" : "Upload supporting documents"}
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -7871,6 +8087,10 @@ function ModulePreviewContent({
   uploadingEvidence,
   onUploadEvidence,
   onForceReload,
+  onFetchCadDetails,
+  onRefreshSiteGis,
+  siteGisRefreshing,
+  cadFetching,
   onAnswerStrategy,
   existingProtest,
   resolvedProperty,
@@ -7913,6 +8133,11 @@ function ModulePreviewContent({
   uploadingEvidence: boolean;
   onUploadEvidence: (files: File[], strategyId?: string, documentTypeOverride?: string) => void;
   onForceReload: () => void;
+  // Module 6 only — re-pull the CAD record and update the classification.
+  onFetchCadDetails: () => void;
+  onRefreshSiteGis: () => void;
+  siteGisRefreshing: boolean;
+  cadFetching: boolean;
   onAnswerStrategy: (strategyId: string, answer: string) => void;
   onAskQuestion: (moduleId: string, question: string) => Promise<string>;
   // Module 10 only — real case state + navigation, so it can show real
@@ -8476,7 +8701,7 @@ function ModulePreviewContent({
           <DataRequirementsTable
             onUpload={
               allowEvidenceUpload
-                ? (files, documentType) => onUploadEvidence(files, undefined, documentType)
+                ? (files) => onUploadEvidence(files, undefined, PROTEST_EVIDENCE_DOCUMENT_TYPE)
                 : undefined
             }
             uploading={uploadingEvidence}
@@ -8691,6 +8916,33 @@ function ModulePreviewContent({
       const siteGis = siteGisMap.data;
       const gaps = countDataGaps(d.factors);
       const nextModule = MODULES.find((mm) => mm.id === "improvement");
+      const siteDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Site: "));
+      const siteFactorKinds = d.factors.map((f) => f.factor);
+      // One upload -> AI reads each file and tags it to the site factor it
+      // documents (Floodplain, Easements, Drainage, …), or leaves it generic
+      // when it can't tell. Mirrors Module 5/6/7/8.
+      async function handleSiteAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads(siteFactorKinds, files);
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && siteFactorKinds.includes(matched as (typeof siteFactorKinds)[number])
+                ? `Site: ${matched}`
+                : PROTEST_EVIDENCE_DOCUMENT_TYPE;
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [documentType, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, documentType);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       return (
         <div className="mt-4 grid gap-4">
           <div>
@@ -8823,6 +9075,61 @@ function ModulePreviewContent({
             </div>
           )}
 
+          {allowEvidenceUpload && (
+            <div className="rounded-lg border border-border">
+              <div className="bg-secondary/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Data &amp; Evidence
+              </div>
+              {siteDocs.length > 0 && (
+                <ul className="grid gap-1 px-4 py-2.5 text-xs">
+                  {siteDocs.map((doc) => (
+                    <li key={doc.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-muted-foreground">{doc.fileName}</span>
+                      <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                        {doc.documentType?.replace(/^Site:\s*/, "") ?? "Site"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 px-4 py-3">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 bg-background px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/10">
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    multiple
+                    disabled={uploadingEvidence || categorizingEvidence}
+                    className="hidden"
+                    onChange={(e) => {
+                      const sel = Array.from(e.target.files ?? []);
+                      e.target.value = "";
+                      if (sel.length > 0) handleSiteAutoUpload(sel);
+                    }}
+                  />
+                  <Upload className="h-3.5 w-3.5" />
+                  {categorizingEvidence
+                    ? "Reading documents…"
+                    : uploadingEvidence
+                      ? "Uploading…"
+                      : "Upload documents"}
+                </label>
+                <button
+                  type="button"
+                  onClick={onRefreshSiteGis}
+                  disabled={siteGisRefreshing}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${siteGisRefreshing ? "animate-spin" : ""}`} />
+                  {siteGisRefreshing ? "Fetching…" : "Fetch details"}
+                </button>
+              </div>
+              <p className="px-4 pb-3 text-center text-[10px] text-muted-foreground">
+                Upload a survey, plat, flood determination, or site photos — the AI tags each to the
+                right factor. Fetch details re-pulls the FEMA flood zone and USGS elevation.
+              </p>
+            </div>
+          )}
+
           {nextModule && (
             <button
               type="button"
@@ -8839,8 +9146,39 @@ function ModulePreviewContent({
     case "improvement": {
       const d = moduleState.data as ModuleResultMap["improvement"];
       const improvementDocs = evidenceDocs.filter(
-        (doc) => doc.documentType === EVIDENCE_DOCUMENT_TYPE,
+        (doc) =>
+          doc.documentType === EVIDENCE_DOCUMENT_TYPE ||
+          doc.documentType?.startsWith("Improvement: "),
       );
+      const improvementComponentKinds = ["Roof", "HVAC", "Exterior", "Interior"] as const;
+      // One upload -> AI reads each file and tags it to the component it
+      // shows (Roof / HVAC / Exterior / Interior), or leaves it generic
+      // Improvement Evidence when it can't tell. Mirrors Module 6/7/8.
+      async function handleImprovementAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads(
+            [...improvementComponentKinds],
+            files,
+          );
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && (improvementComponentKinds as readonly string[]).includes(matched)
+                ? `Improvement: ${matched}`
+                : EVIDENCE_DOCUMENT_TYPE;
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [documentType, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, documentType);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       const economicLife = getTypicalEconomicLife(state.propertyType);
       const depreciation = computeDepreciation(
         d.effectiveAgeYears,
@@ -8983,27 +9321,37 @@ function ModulePreviewContent({
                 from what you upload instead of only general guidance.
               </p>
               {improvementDocs.length > 0 && (
-                <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                <ul className="mt-2 grid gap-1 text-xs">
                   {improvementDocs.map((doc) => (
-                    <li key={doc.id}>{doc.fileName}</li>
+                    <li key={doc.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate text-muted-foreground">{doc.fileName}</span>
+                      <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                        {doc.documentType?.replace(/^Improvement:\s*/, "") ??
+                          "Improvement Evidence"}
+                      </span>
+                    </li>
                   ))}
                 </ul>
               )}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label
-                  className={`btn-outline text-sm cursor-pointer ${uploadingEvidence ? "pointer-events-none opacity-60" : ""}`}
+                  className={`btn-outline text-sm cursor-pointer ${uploadingEvidence || categorizingEvidence ? "pointer-events-none opacity-60" : ""}`}
                 >
-                  {uploadingEvidence ? "Uploading…" : "Upload Evidence"}
+                  {categorizingEvidence
+                    ? "Reading documents…"
+                    : uploadingEvidence
+                      ? "Uploading…"
+                      : "Upload Evidence"}
                   <input
                     type="file"
                     accept="image/*,.pdf"
                     multiple
                     className="hidden"
-                    disabled={uploadingEvidence}
+                    disabled={uploadingEvidence || categorizingEvidence}
                     onChange={(e) => {
                       const selected = e.target.files ? Array.from(e.target.files) : [];
                       e.target.value = "";
-                      if (selected.length > 0) onUploadEvidence(selected);
+                      if (selected.length > 0) handleImprovementAutoUpload(selected);
                     }}
                   />
                 </label>
@@ -9024,6 +9372,32 @@ function ModulePreviewContent({
     }
     case "zoning": {
       const d = moduleState.data as ModuleResultMap["zoning"];
+      const zoningDocs = evidenceDocs.filter((doc) => doc.documentType?.startsWith("Zoning: "));
+      // One upload -> AI tags each file to the aspect it documents. Mirrors
+      // Module 7 / Module 8's bulk categorize-then-upload. Reuses the shared
+      // "reading documents" flag (only one module modal is open at a time).
+      async function handleZoningAutoUpload(files: File[]) {
+        setCategorizingEvidence(true);
+        try {
+          const categorized = await categorizeEvidenceUploads([...ZONING_ASPECT_KINDS], files);
+          const groups = new Map<string, File[]>();
+          for (const file of files) {
+            const matched = categorized.find((c) => c.fileName === file.name)?.matchedItem ?? null;
+            const key =
+              matched && (ZONING_ASPECT_KINDS as readonly string[]).includes(matched)
+                ? matched
+                : "General";
+            const g = groups.get(key);
+            if (g) g.push(file);
+            else groups.set(key, [file]);
+          }
+          for (const [kind, groupFiles] of groups) {
+            await onUploadEvidence(groupFiles, undefined, `Zoning: ${kind}`);
+          }
+        } finally {
+          setCategorizingEvidence(false);
+        }
+      }
       return (
         <div className="mt-4 grid gap-4">
           <p className="-mb-1 text-sm text-muted-foreground">
@@ -9057,12 +9431,12 @@ function ModulePreviewContent({
           <ZoningClassificationTable
             aspects={d.aspects}
             matches={d.matches}
-            onUpload={
-              allowEvidenceUpload
-                ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
-                : undefined
-            }
+            zoningDocs={zoningDocs}
+            onUpload={allowEvidenceUpload ? handleZoningAutoUpload : undefined}
+            onFetchDetails={allowEvidenceUpload ? onFetchCadDetails : undefined}
             uploading={uploadingEvidence}
+            categorizing={categorizingEvidence}
+            fetching={cadFetching}
           />
 
           {d.discrepancies.length > 0 && (

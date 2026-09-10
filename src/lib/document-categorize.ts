@@ -51,6 +51,11 @@ export type CategorizedUpload = {
   matchedProperty: PropertyRecord | null;
   document: DocumentRecord | null;
   error: string | null;
+  // Set once a file classified as a hearing notice has been auto-attached to
+  // this property's open protest (see attachHearingNoticeToCase). The
+  // Documents page turns this into a "filed to your open case" line with a
+  // link into the case.
+  attachedToCaseId?: string;
 };
 
 // Reads and classifies one file, then either uploads it straight to its

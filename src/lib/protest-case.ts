@@ -289,6 +289,33 @@ export async function acceptSettlement(protestId: string, offerValue: number): P
   );
 }
 
+// The "Accepted + Satisfied" path from SettlementSignatureSection — same
+// terminal update as acceptSettlement, but also lands the informal
+// sub-tracker on "accepted" so the case history reads correctly (the offer
+// came from the informal review, not a post-hearing decision).
+export async function resolveInformalSettlement(
+  protestId: string,
+  settledValue: number,
+): Promise<void> {
+  const { error } = await supabase
+    .from("protests")
+    .update({
+      final_value: settledValue,
+      escalation_path: "accept",
+      closed_at: new Date().toISOString(),
+      status: "resolved",
+      informal_status: "accepted",
+    })
+    .eq("id", protestId);
+  if (error) throw error;
+  void logCaseEvent(
+    protestId,
+    "status_change",
+    `Informal settlement accepted at ${currencyText(settledValue)} — case resolved.`,
+    { finalValue: settledValue },
+  );
+}
+
 export async function scheduleHearing(
   protestId: string,
   date: string,
@@ -340,19 +367,38 @@ export async function updateInformalStatus(
   });
 }
 
-// The real, self-reported date once the county and owner have actually
-// agreed on one — this app has no live scheduling API for any county, so
-// there's no "available dates" to offer beyond what the user tells us they
-// were given. Feeds the calendar the same way scheduleHearing() does for
-// the formal hearing.
-export async function scheduleInformalReview(protestId: string, date: string): Promise<void> {
+// The real, self-reported date/time/mode once the county and owner have
+// actually agreed on one — this app has no live scheduling API for any
+// county, so there's no "available dates" to offer beyond what the user
+// tells us they were given. Feeds the calendar the same way
+// scheduleHearing() does for the formal hearing; the detail shape mirrors
+// scheduleHearing's (no location — an informal review is a call or a visit
+// to the CAD office, not a booked room).
+export async function scheduleInformalReview(
+  protestId: string,
+  date: string,
+  detail?: {
+    time?: string | null;
+    mode?: "In Person" | "Phone" | "Videoconference" | "Affidavit" | "Unknown" | null;
+  },
+): Promise<void> {
   const { error } = await supabase
     .from("protests")
-    .update({ informal_status: "scheduled", informal_review_date: date })
+    .update({
+      informal_status: "scheduled",
+      informal_review_date: date,
+      ...(detail
+        ? {
+            informal_review_time: detail.time ?? null,
+            informal_review_mode: detail.mode ?? null,
+          }
+        : {}),
+    })
     .eq("id", protestId);
   if (error) throw error;
   void logCaseEvent(protestId, "deadline_set", `Informal review scheduled for ${date}.`, {
     informalReviewDate: date,
+    ...(detail ?? {}),
   });
 }
 

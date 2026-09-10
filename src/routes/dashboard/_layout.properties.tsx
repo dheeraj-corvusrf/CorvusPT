@@ -38,7 +38,7 @@ import { ImportPropertiesModal } from "@/components/ImportPropertiesModal";
 import { AddOwnershipsModal } from "@/components/AddOwnershipsModal";
 import { BulkProtestAuthorizationFlow } from "@/components/BulkProtestAuthorizationFlow";
 import { getCadRecordUrl, isDirectCadRecordUrl } from "@/lib/cad-record-url";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, X } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
   // Set by startPropertyCheckout's successPath (see billing.ts) — lets this
@@ -355,7 +355,42 @@ function Properties() {
           )}
           <PaymentsModeChip />
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Bulk actions for a multi-selection — shown inline here beside the
+              page actions (not a floating bar) once one or more property
+              checkboxes are ticked. */}
+          {selectedIds.size > 0 && (
+            <div className="mr-1 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 py-1 pl-3 pr-1">
+              <span className="text-sm font-medium">{selectedIds.size} selected</span>
+              <button
+                type="button"
+                disabled={bulkDeleting}
+                onClick={handleDeleteSelected}
+                className="btn-outline text-destructive text-sm disabled:opacity-60"
+              >
+                {bulkDeleting ? "Deleting…" : "Delete"}
+              </button>
+              {stripeConfigured && subscribableSelected.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setBulkOpen(true)}
+                  className="btn-primary btn-primary-hover text-sm"
+                >
+                  Protest
+                  {subscribableSelected.length !== selectedIds.size &&
+                    ` (${subscribableSelected.length})`}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                aria-label="Clear selection"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
           <button type="button" onClick={() => setImportOpen(true)} className="btn-outline">
             Bulk Upload
           </button>
@@ -393,42 +428,6 @@ function Properties() {
           }}
           onClose={() => setOwnershipsOpen(false)}
         />
-      )}
-
-      {selectedIds.size > 0 && (
-        <div className="card-elev mt-4 flex flex-wrap items-center justify-between gap-3 p-3">
-          <span className="text-sm font-medium">
-            {selectedIds.size} propert{selectedIds.size === 1 ? "y" : "ies"} selected
-          </span>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setSelectedIds(new Set())}
-              className="btn-outline text-sm"
-            >
-              Clear
-            </button>
-            <button
-              type="button"
-              disabled={bulkDeleting}
-              onClick={handleDeleteSelected}
-              className="btn-outline text-destructive text-sm disabled:opacity-60"
-            >
-              {bulkDeleting ? "Deleting…" : "Delete selected"}
-            </button>
-            {stripeConfigured && subscribableSelected.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setBulkOpen(true)}
-                className="btn-accent text-sm"
-              >
-                Subscribe selected
-                {subscribableSelected.length !== selectedIds.size &&
-                  ` (${subscribableSelected.length})`}
-              </button>
-            )}
-          </div>
-        </div>
       )}
 
       <BulkSubscribeModal
@@ -565,7 +564,7 @@ function Properties() {
                       <button
                         onClick={() => setProtestingProperty(p)}
                         disabled={!!subscribing}
-                        className="btn-primary btn-primary-hover disabled:opacity-60"
+                        className="btn-outline disabled:opacity-60"
                       >
                         {subscribing?.propertyId === p.id ? "Redirecting…" : "Protest Property"}
                       </button>

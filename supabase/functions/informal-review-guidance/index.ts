@@ -45,8 +45,13 @@ Rules:
 - whatToSay/whatNotToSay: 2-3 concrete, practical sentences each, specific to informal conversations with a county appraiser (facts and comps, not procedural arguments — those belong at the formal hearing).
 - respondingToProposedValue: how to evaluate whether a proposed value is a reasonable outcome vs. worth continuing to a formal hearing.
 - acceptingEndsCase: state plainly whether accepting an informal proposed value ends the case (in Texas, accepting an informal settlement typically withdraws the formal protest) or requires an additional step.
+- steps: the ordered, concrete actions THIS owner takes to get their informal review scheduled and done — request it, schedule it, where/how, who to confirm with, what to bring on the day. 3-7 items, each a single imperative action grounded in the real notice or county reference; no generic "prepare your evidence" filler.
+- whereToSchedule: the actual place/channel to schedule it — a portal URL, an office address, a phone number, or an email — taken from the real notice or county reference. Empty string if genuinely not stated anywhere in what you were given.
+- applicableDeadlines: real, dated deadlines that apply to this informal review, copied from the notice or county reference (evidence-submission cutoff, informal-request cutoff, appeal/escalation deadline). Each item is "<label>: <date or timeframe>". Empty array if none are actually stated.
+- missingInfo: things the owner needs in order to act but that the notice and case record given below do NOT provide (e.g. no informal-review contact stated, no scheduling channel, no evidence deadline). For each, say what to do to get it (which office/number to call). Empty array if nothing important is missing.
+- nextSteps: 1-3 imperative actions the owner should take right now, most important first.
 - Plain prose only — no markdown, no bullet characters inside string fields (use the array fields for lists).
-- Return ONLY a JSON object matching this exact shape: {"available":"<Yes|No|Unclear>","appraiserCategory":"<one of: Land Appraiser | Improvement Appraiser | Commercial Appraiser | Retail Appraiser | Office Appraiser | Daycare/School Appraiser | Other>","whoToContact":"<string>","howToRequest":"<string>","documentsToProvide":[<string>, ...],"requestedValueGuidance":"<string>","evidenceToUse":[<string>, ...],"whatToSay":"<string>","whatNotToSay":"<string>","respondingToProposedValue":"<string>","acceptingEndsCase":"<string>","draftEmailSubject":"<string, only if an email address was given below — otherwise empty string>","draftEmailBody":"<string, only if an email address was given below — otherwise empty string, written in the property owner's own voice, referencing the real address/account number/tax year/requested value given below>"}
+- Return ONLY a JSON object matching this exact shape: {"available":"<Yes|No|Unclear>","appraiserCategory":"<one of: Land Appraiser | Improvement Appraiser | Commercial Appraiser | Retail Appraiser | Office Appraiser | Daycare/School Appraiser | Other>","whoToContact":"<string>","howToRequest":"<string>","documentsToProvide":[<string>, ...],"requestedValueGuidance":"<string>","evidenceToUse":[<string>, ...],"whatToSay":"<string>","whatNotToSay":"<string>","respondingToProposedValue":"<string>","acceptingEndsCase":"<string>","steps":[<string>, ...],"whereToSchedule":"<string>","applicableDeadlines":[<string>, ...],"missingInfo":[<string>, ...],"nextSteps":[<string>, ...],"draftEmailSubject":"<string, only if an email address was given below — otherwise empty string>","draftEmailBody":"<string, only if an email address was given below — otherwise empty string, written in the property owner's own voice, referencing the real address/account number/tax year/requested value given below>"}
 
 ${PROSE_STYLE}`;
 
@@ -54,7 +59,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { caseContext, countyReference } = await req.json();
+    const { caseContext, countyReference, noticeContext } = await req.json();
 
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
@@ -98,6 +103,41 @@ Deno.serve(async (req: Request) => {
       contactEmail
         ? `A real, verified contact email IS on file (${contactEmail}) — draftEmailSubject/draftEmailBody should be filled in.`
         : "No real, verified contact email is on file for this county — leave draftEmailSubject/draftEmailBody as empty strings rather than inventing an address.",
+      // Real fields the user's actual uploaded hearing/county notice, if any
+      // (see extract-hearing-notice) — ground steps / whereToSchedule /
+      // applicableDeadlines / missingInfo in these, not just the county
+      // reference. A null field here means the notice didn't state it (or no
+      // notice was uploaded) — that's exactly what missingInfo is for.
+      noticeContext
+        ? "A hearing/county notice HAS been uploaded and read for this case. Its extracted fields:"
+        : "No county notice has been uploaded for this case yet — say so in missingInfo and nextSteps (the owner should upload the notice they received).",
+      noticeContext?.informalReviewAvailable
+        ? `Notice — informal review available: ${noticeContext.informalReviewAvailable}`
+        : null,
+      noticeContext?.hearingDate
+        ? `Notice — hearing date stated: ${noticeContext.hearingDate}`
+        : null,
+      noticeContext?.evidenceSubmissionDeadline
+        ? `Notice — evidence submission deadline: ${noticeContext.evidenceSubmissionDeadline}`
+        : null,
+      noticeContext?.appealDeadline
+        ? `Notice — appeal/escalation deadline: ${noticeContext.appealDeadline}`
+        : null,
+      noticeContext?.countyContact
+        ? `Notice — county contact: ${noticeContext.countyContact}`
+        : null,
+      noticeContext?.appraiserContact
+        ? `Notice — appraiser contact: ${noticeContext.appraiserContact}`
+        : null,
+      noticeContext?.submissionInstructions
+        ? `Notice — submission instructions (verbatim): ${noticeContext.submissionInstructions}`
+        : null,
+      noticeContext?.requiredDocuments?.length
+        ? `Notice — required documents: ${noticeContext.requiredDocuments.join("; ")}`
+        : null,
+      noticeContext?.proceduralDifferences
+        ? `Notice — procedural notes on informal review: ${noticeContext.proceduralDifferences}`
+        : null,
     ].filter(Boolean);
 
     const body = {
@@ -175,6 +215,11 @@ Deno.serve(async (req: Request) => {
       whatNotToSay: str(parsed.whatNotToSay, 400),
       respondingToProposedValue: str(parsed.respondingToProposedValue, 400),
       acceptingEndsCase: str(parsed.acceptingEndsCase, 400),
+      steps: arr(parsed.steps, 8, 240),
+      whereToSchedule: str(parsed.whereToSchedule, 300),
+      applicableDeadlines: arr(parsed.applicableDeadlines, 6, 160),
+      missingInfo: arr(parsed.missingInfo, 6, 240),
+      nextSteps: arr(parsed.nextSteps, 4, 240),
       // Hard gate — the model is told not to fill these in without a real
       // email on file, but this is enforced here too, not just trusted.
       draftEmailSubject: contactEmail ? str(parsed.draftEmailSubject, 150) : "",
