@@ -3178,7 +3178,7 @@ function ModuleVisual({
           uploading={uploadingEvidence}
           onUpload={
             hasFullAccess
-              ? (label, files) => onUploadEvidence(files, undefined, `Zoning: ${label}`)
+              ? (files) => onUploadEvidence(files, undefined, "Zoning: General")
               : undefined
           }
         />
@@ -4809,44 +4809,47 @@ function ImprovementCardVisual({
               className="flex items-center justify-between gap-2 rounded-md bg-secondary/40 px-2 py-1"
             >
               <span className="text-xs font-medium">{c.component}</span>
-              <span className="flex items-center gap-1.5">
-                <span
-                  className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
-                    na
-                      ? "bg-secondary/60 text-muted-foreground"
-                      : BUILDING_CONDITION_TONE[c.condition]
-                  }`}
-                >
-                  {label}
-                </span>
-                {!c.hasPhoto && !na && onUpload && (
-                  <label
-                    title={`Upload a photo of the ${c.component.toLowerCase()}`}
-                    className={`inline-flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 px-1.5 py-0.5 text-[9px] font-semibold text-accent hover:bg-accent/10 ${
-                      uploading ? "pointer-events-none opacity-60" : ""
-                    }`}
-                  >
-                    <input
-                      type="file"
-                      accept="image/*,.pdf"
-                      multiple
-                      disabled={uploading}
-                      className="hidden"
-                      onChange={(e) => {
-                        const sel = Array.from(e.target.files ?? []);
-                        e.target.value = "";
-                        if (sel.length > 0) onUpload(sel);
-                      }}
-                    />
-                    <Upload className="h-3 w-3" />
-                    {uploading ? "…" : "Photo"}
-                  </label>
-                )}
+              <span
+                className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                  na
+                    ? "bg-secondary/60 text-muted-foreground"
+                    : BUILDING_CONDITION_TONE[c.condition]
+                }`}
+              >
+                {label}
               </span>
             </div>
           );
         })}
       </div>
+
+      {/* One upload for the whole card — the AI reads each photo/doc and
+          matches it to the right building component (Roof / HVAC / Exterior /
+          Interior); the modal is where a file can be tagged to a component by
+          hand. */}
+      {onUpload && missing > 0 && (
+        <label
+          onClick={(e) => e.stopPropagation()}
+          className={`mx-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-accent/40 px-3 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10 ${
+            uploading ? "pointer-events-none opacity-60" : ""
+          }`}
+        >
+          <input
+            type="file"
+            accept="image/*,.pdf"
+            multiple
+            disabled={uploading}
+            className="hidden"
+            onChange={(e) => {
+              const sel = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (sel.length > 0) onUpload(sel);
+            }}
+          />
+          <Upload className="h-3 w-3" />
+          {uploading ? "Uploading…" : "Upload photos"}
+        </label>
+      )}
 
       {depreciation.conditionAdjustedValue != null ? (
         <div className="grid grid-cols-2 gap-1.5">
@@ -5927,18 +5930,20 @@ function ZoningAspectTiles({
 }: {
   aspects: ModuleResultMap["zoning"]["aspects"];
   matches: keyof typeof ZONING_STATUS;
-  onUpload?: (aspectLabel: string, files: File[]) => void;
+  // One upload for the whole card — tagged "Zoning: General"; the modal's
+  // upload is where the AI sorts a file to a specific aspect.
+  onUpload?: (files: File[]) => void;
   uploading?: boolean;
 }) {
   const consistent = matches === "consistent";
   const uncertain = matches === "uncertain";
+  const needsAny = aspects.some((a) => a.status === "Additional Data Needed");
   return (
     <div>
       <div className="grid grid-cols-4 gap-1.5">
         {aspects.map((a) => {
           const st = ZONING_ASPECT_STATUS[a.status];
           const Icon = ZONING_ASPECT_ICON[a.label] ?? FileText;
-          const needsData = a.status === "Additional Data Needed";
           return (
             <div key={a.label} className="rounded-lg bg-secondary/50 p-2 text-center">
               <Icon className="mx-auto h-4 w-4 text-muted-foreground" />
@@ -5950,31 +5955,33 @@ function ZoningAspectTiles({
               >
                 {st.label}
               </span>
-              {onUpload && needsData && (
-                <label
-                  className="mt-1 flex cursor-pointer items-center justify-center gap-0.5 rounded-full border border-accent/40 px-1.5 py-0.5 text-[8px] font-semibold text-accent hover:bg-accent/10"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <input
-                    type="file"
-                    accept="image/*,.pdf"
-                    multiple
-                    disabled={uploading}
-                    className="hidden"
-                    onChange={(e) => {
-                      const sel = Array.from(e.target.files ?? []);
-                      if (sel.length > 0) onUpload(a.label, sel);
-                      e.target.value = "";
-                    }}
-                  />
-                  <Upload className="h-2.5 w-2.5" />
-                  {uploading ? "Uploading…" : "Upload"}
-                </label>
-              )}
             </div>
           );
         })}
       </div>
+
+      {onUpload && needsAny && (
+        <label
+          className="mt-2 flex cursor-pointer items-center justify-center gap-1 rounded-md border border-accent/40 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/10"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="file"
+            accept="image/*,.pdf"
+            multiple
+            disabled={uploading}
+            className="hidden"
+            onChange={(e) => {
+              const sel = Array.from(e.target.files ?? []);
+              if (sel.length > 0) onUpload(sel);
+              e.target.value = "";
+            }}
+          />
+          <Upload className="h-3 w-3" />
+          {uploading ? "Uploading…" : "Upload"}
+        </label>
+      )}
+
       <div className="mx-auto my-1.5 h-3 w-px bg-border" />
       <div className="grid grid-cols-2 gap-2 text-center">
         <div
