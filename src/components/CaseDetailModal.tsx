@@ -143,6 +143,93 @@ import { FilingMethodsList } from "@/components/FilingMethodsList";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SignaturePad, type SignatureValue } from "@/components/SignaturePad";
 
+// --- Tabbed filing workflow -------------------------------------------------
+// The case work is grouped into 5 phase tabs, all shown as a roadmap; a phase
+// the case hasn't reached yet is visible but locked. The tab set and lock
+// rules are derived purely from the protest's real status/fields — no schema,
+// no new state beyond which tab is open.
+type CaseTabId = "overview" | "file" | "informal" | "hearing" | "decision";
+
+const CASE_TABS: { id: CaseTabId; label: string; lockedHint: string }[] = [
+  { id: "overview", label: "Overview", lockedHint: "" },
+  {
+    id: "file",
+    label: "Prepare & File",
+    lockedHint: "Read and accept the filing notice on Overview first.",
+  },
+  { id: "informal", label: "Informal Review", lockedHint: "Unlocks once your protest is filed." },
+  { id: "hearing", label: "Hearing", lockedHint: "Unlocks once your protest is filed." },
+  {
+    id: "decision",
+    label: "Decision & Appeal",
+    lockedHint: "Unlocks after your hearing or a decision is recorded.",
+  },
+];
+
+// The anchor ids the deterministic guidance (case-guidance.ts) links to, and
+// which tab each one lives in now — so a "Go to Documents" link can switch
+// tabs before scrolling.
+const ANCHOR_TAB: Record<string, CaseTabId> = {
+  "case-progress": "overview",
+  "case-record": "overview",
+  "case-audit-trail": "overview",
+  "case-documents": "file",
+  "case-upload-evidence": "file",
+  "case-informal-review": "informal",
+  "case-settlement-signature": "informal",
+  "case-hearing-notice": "hearing",
+  "case-hearing-prep": "hearing",
+  "case-decision-notice": "decision",
+  "case-escalation": "decision",
+};
+
+function caseTabUnlocked(
+  id: CaseTabId,
+  protest: ProtestRecord,
+  needsGuidanceAck: boolean,
+): boolean {
+  const s = protest.status;
+  const filed = s !== "requested";
+  switch (id) {
+    case "overview":
+      return true;
+    case "file":
+      return filed || !needsGuidanceAck;
+    case "informal":
+    case "hearing":
+      return filed;
+    case "decision":
+      return (
+        ["decision_received", "appealing", "arbitrating", "resolved"].includes(s) ||
+        protest.hearingDate != null ||
+        protest.arbDecision != null
+      );
+  }
+}
+
+// The tab the case should open on given where it is now — used for the
+// initial render and to auto-advance when the status moves to a new phase.
+function defaultCaseTab(protest: ProtestRecord, needsGuidanceAck: boolean): CaseTabId {
+  switch (protest.status) {
+    case "requested":
+      return needsGuidanceAck ? "overview" : "file";
+    case "filed":
+    case "under_review":
+    case "offer_received":
+      return "informal";
+    case "hearing_scheduled":
+      return "hearing";
+    case "decision_received":
+    case "appealing":
+    case "arbitrating":
+      return "decision";
+    case "resolved":
+      return "overview";
+    default:
+      return "overview";
+  }
+}
+
 // Renders as a full page (see routes/dashboard/_layout.case.tsx), not an
 // overlay — previously this was a <Modal>; per product direction, View Case
 // now navigates to its own URL instead of opening on top of whatever page
@@ -237,6 +324,50 @@ export function CaseDetailView({
   // this case — reopening View Case, switching tabs, or a new session.
   const needsGuidanceAck = current.status === "requested" && !current.corvusGuidanceAckAt;
 
+  // Which phase tab is open. Starts on the case's current phase; auto-advances
+  // when the status moves to a new phase (recording a hearing jumps to the
+  // Hearing tab), but manual navigation between unlocked tabs is otherwise free.
+  const phaseDefault = defaultCaseTab(current, needsGuidanceAck);
+  const [activeTab, setActiveTab] = useState<CaseTabId>(phaseDefault);
+  // Re-runs only when the derived phase-tab string actually changes, so
+  // recording a hearing (etc.) advances the open tab; unrelated re-renders
+  // don't disturb manual navigation.
+  useEffect(() => {
+    setActiveTab(phaseDefault);
+  }, [phaseDefault]);
+
+  // A guidance "Go to X" link: switch to the tab that holds the anchor, then
+  // scroll to it once the panel has mounted.
+  function navigateTo(anchor: string) {
+    if (anchor.startsWith("http") || anchor.startsWith("tel:") || anchor.startsWith("mailto:")) {
+      goToGuidanceAnchor(anchor);
+      return;
+    }
+    const targetTab = ANCHOR_TAB[anchor];
+    if (targetTab && targetTab !== activeTab) setActiveTab(targetTab);
+    // Give the newly-mounted panel a couple of frames to appear.
+    let tries = 0;
+    const tryScroll = () => {
+      const el = document.getElementById(anchor);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      if (tries++ < 6) requestAnimationFrame(tryScroll);
+    };
+    requestAnimationFrame(tryScroll);
+  }
+
+  function handleTabClick(id: CaseTabId) {
+    if (caseTabUnlocked(id, current, needsGuidanceAck)) {
+      setActiveTab(id);
+    } else {
+      toast.info(
+        CASE_TABS.find((t) => t.id === id)?.lockedHint ?? "This phase isn't available yet.",
+      );
+    }
+  }
+
   return (
     <div>
       <button onClick={onBack} className="btn-outline text-sm mb-4">
@@ -252,135 +383,261 @@ export function CaseDetailView({
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : needsGuidanceAck ? (
-        <CorvusGuidanceGate
-          property={property}
-          protest={current}
-          evidenceCount={evidenceDocuments.length}
-          onAcknowledge={handleAcknowledgeGuidance}
-          acknowledging={acknowledging}
-        />
       ) : (
         <>
-          <CorvusGuidancePanel
-            property={property}
-            protest={current}
-            evidenceDocumentCount={evidenceDocuments.length}
-            noticeSignedAt={noticeSignedAt}
+          <CaseTabBar
+            activeTab={activeTab}
+            unlocked={(id) => caseTabUnlocked(id, current, needsGuidanceAck)}
+            onSelect={handleTabClick}
           />
 
-          <InformalOutcomeBanner protest={current} agreement={settlementAgreement} />
+          {/* --- Overview --- */}
+          {activeTab === "overview" &&
+            (needsGuidanceAck ? (
+              <CorvusGuidanceGate
+                property={property}
+                protest={current}
+                evidenceCount={evidenceDocuments.length}
+                onAcknowledge={handleAcknowledgeGuidance}
+                acknowledging={acknowledging}
+              />
+            ) : (
+              <div className="grid gap-1">
+                <CaseRoadmap
+                  protest={current}
+                  needsGuidanceAck={needsGuidanceAck}
+                  onSelect={handleTabClick}
+                />
+                <CorvusGuidancePanel
+                  property={property}
+                  protest={current}
+                  evidenceDocumentCount={evidenceDocuments.length}
+                  noticeSignedAt={noticeSignedAt}
+                  onNavigate={navigateTo}
+                />
+                <InformalOutcomeBanner
+                  protest={current}
+                  agreement={settlementAgreement}
+                  onNavigate={navigateTo}
+                />
+                <CaseProgress
+                  protest={current}
+                  property={property}
+                  caseData={caseData}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                />
+                <CaseRecordSection
+                  userId={userId}
+                  protest={current}
+                  property={property}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                />
+                <CaseAuditTrailSection protestId={protest.id} />
+                <NextStepFooter
+                  property={property}
+                  protest={current}
+                  evidenceDocumentCount={evidenceDocuments.length}
+                  noticeSignedAt={noticeSignedAt}
+                  onNavigate={navigateTo}
+                />
+              </div>
+            ))}
 
-          <CasePlanSection
-            userId={userId}
-            property={property}
-            protestId={protest.id}
-            caseData={caseData}
-            onReload={load}
-          />
-
-          {current.status === "requested" ? (
-            <PreFilingGate
-              userId={userId}
-              property={property}
-              protest={current}
-              caseData={caseData}
-              evidenceDocuments={evidenceDocuments}
-              noticeSignedAt={noticeSignedAt}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-              onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
-              onNoticeSigned={setNoticeSignedAt}
-            />
-          ) : (
-            <DocumentsSection
-              userId={userId}
-              protest={current}
-              property={property}
-              strategyRecommendation={caseData?.strategyRecommendation ?? null}
-              noticeSignedAt={noticeSignedAt}
-              evidenceDocuments={evidenceDocuments}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-              onNoticeSigned={setNoticeSignedAt}
-            />
+          {/* --- Prepare & File --- */}
+          {activeTab === "file" && (
+            <div>
+              <CasePlanSection
+                userId={userId}
+                property={property}
+                protestId={protest.id}
+                caseData={caseData}
+                onReload={load}
+              />
+              {current.status === "requested" ? (
+                <PreFilingGate
+                  userId={userId}
+                  property={property}
+                  protest={current}
+                  caseData={caseData}
+                  evidenceDocuments={evidenceDocuments}
+                  noticeSignedAt={noticeSignedAt}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                  onPropertyUpdate={(patch) => setProperty((prev) => ({ ...prev, ...patch }))}
+                  onNoticeSigned={setNoticeSignedAt}
+                />
+              ) : (
+                <DocumentsSection
+                  userId={userId}
+                  protest={current}
+                  property={property}
+                  strategyRecommendation={caseData?.strategyRecommendation ?? null}
+                  noticeSignedAt={noticeSignedAt}
+                  evidenceDocuments={evidenceDocuments}
+                  onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+                  onNoticeSigned={setNoticeSignedAt}
+                />
+              )}
+            </div>
           )}
 
-          {current.status !== "requested" && (
-            <InformalReviewSection
-              protest={current}
-              property={property}
-              strategyRecommendation={caseData?.strategyRecommendation ?? null}
-              evidenceDocuments={evidenceDocuments}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {/* --- Informal Review --- */}
+          {activeTab === "informal" && current.status !== "requested" && (
+            <div>
+              <InformalReviewSection
+                protest={current}
+                property={property}
+                strategyRecommendation={caseData?.strategyRecommendation ?? null}
+                evidenceDocuments={evidenceDocuments}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <SettlementSignatureSection
+                userId={userId}
+                protest={current}
+                property={property}
+                agreement={settlementAgreement}
+                onAgreementChange={setSettlementAgreement}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
           )}
 
-          {current.status !== "requested" && (
-            <HearingNoticeSection
-              userId={userId}
-              protest={current}
-              property={property}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {/* --- Hearing --- */}
+          {activeTab === "hearing" && current.status !== "requested" && (
+            <div>
+              <HearingNoticeSection
+                userId={userId}
+                protest={current}
+                property={property}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <HearingPrepSection
+                protest={current}
+                property={property}
+                caseData={caseData}
+                evidenceDocuments={evidenceDocuments}
+                settlementAgreement={settlementAgreement}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
           )}
 
-          <HearingPrepSection
-            protest={current}
-            property={property}
-            caseData={caseData}
-            evidenceDocuments={evidenceDocuments}
-            settlementAgreement={settlementAgreement}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          {current.status !== "requested" && (
-            <SettlementSignatureSection
-              userId={userId}
-              protest={current}
-              property={property}
-              agreement={settlementAgreement}
-              onAgreementChange={setSettlementAgreement}
-              onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-            />
+          {/* --- Decision & Appeal --- */}
+          {activeTab === "decision" && (
+            <div>
+              <DecisionNoticeSection
+                userId={userId}
+                protest={current}
+                property={property}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+              <EscalationEvaluationSection
+                protest={current}
+                property={property}
+                evidenceDocumentCount={evidenceDocuments.length}
+                onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
+              />
+            </div>
           )}
-
-          <DecisionNoticeSection
-            userId={userId}
-            protest={current}
-            property={property}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <EscalationEvaluationSection
-            protest={current}
-            property={property}
-            evidenceDocumentCount={evidenceDocuments.length}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseProgress
-            protest={current}
-            property={property}
-            caseData={caseData}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseRecordSection
-            userId={userId}
-            protest={current}
-            property={property}
-            onUpdate={(patch) => setCurrent((prev) => ({ ...prev, ...patch }))}
-          />
-
-          <CaseAuditTrailSection protestId={protest.id} />
-
-          <NextStepFooter
-            property={property}
-            protest={current}
-            evidenceDocumentCount={evidenceDocuments.length}
-            noticeSignedAt={noticeSignedAt}
-          />
         </>
       )}
+    </div>
+  );
+}
+
+// The phase-tab bar. All 5 always show — a phase the case hasn't reached is a
+// disabled button with a lock glyph + a `title` hint (clicking it toasts the
+// hint, handled by onSelect).
+function CaseTabBar({
+  activeTab,
+  unlocked,
+  onSelect,
+}: {
+  activeTab: CaseTabId;
+  unlocked: (id: CaseTabId) => boolean;
+  onSelect: (id: CaseTabId) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Case phases"
+      className="mt-4 flex gap-1 overflow-x-auto border-b border-border pb-px"
+    >
+      {CASE_TABS.map((t) => {
+        const isOpen = t.id === activeTab;
+        const locked = !unlocked(t.id);
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={isOpen}
+            title={locked ? t.lockedHint : undefined}
+            onClick={() => onSelect(t.id)}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-3 py-2 text-sm font-medium transition-colors ${
+              isOpen
+                ? "border-b-2 border-accent text-foreground"
+                : locked
+                  ? "text-muted-foreground/50"
+                  : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {locked && <span aria-hidden>🔒 </span>}
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Compact "where are we in the journey" strip shown at the top of the Overview
+// tab once the case is underway — the same 5 phases as the tabs, marking the
+// current one and letting the user jump to any unlocked phase.
+function CaseRoadmap({
+  protest,
+  needsGuidanceAck,
+  onSelect,
+}: {
+  protest: ProtestRecord;
+  needsGuidanceAck: boolean;
+  onSelect: (id: CaseTabId) => void;
+}) {
+  const currentPhase = defaultCaseTab(protest, needsGuidanceAck);
+  const currentIdx = CASE_TABS.findIndex((t) => t.id === currentPhase);
+  return (
+    <div className="mt-4 card-elev p-4">
+      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Your protest, step by step
+      </span>
+      <ol className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-xs">
+        {CASE_TABS.map((t, i) => {
+          const done = i < currentIdx;
+          const here = i === currentIdx;
+          const unlocked = caseTabUnlocked(t.id, protest, needsGuidanceAck);
+          return (
+            <li key={t.id} className="flex items-center gap-2">
+              {i > 0 && <span className="text-muted-foreground/40">→</span>}
+              <button
+                type="button"
+                onClick={() => onSelect(t.id)}
+                disabled={!unlocked}
+                className={`rounded-full px-2 py-0.5 font-medium ${
+                  here
+                    ? "bg-accent/15 text-accent"
+                    : done
+                      ? "text-success"
+                      : unlocked
+                        ? "text-muted-foreground hover:text-foreground"
+                        : "text-muted-foreground/40"
+                }`}
+              >
+                {done ? "✓ " : ""}
+                {t.label}
+              </button>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -590,11 +847,14 @@ function CorvusGuidancePanel({
   protest,
   evidenceDocumentCount,
   noticeSignedAt,
+  onNavigate,
 }: {
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceDocumentCount: number;
   noticeSignedAt: string | null;
+  // Switch to the tab holding this anchor, then scroll to it.
+  onNavigate: (anchor: string) => void;
 }) {
   const [countyOpen, setCountyOpen] = useState(false);
   const countyInfo = getCountyProtestInfo(property.cad);
@@ -628,7 +888,7 @@ function CorvusGuidancePanel({
                 {step.detail && <span className="text-muted-foreground"> — {step.detail}</span>}
                 {step.action && (
                   <button
-                    onClick={() => goToGuidanceAnchor(step.action!.anchor)}
+                    onClick={() => onNavigate(step.action!.anchor)}
                     className="ml-2 text-xs text-accent hover:underline"
                   >
                     {step.action.label} →
@@ -701,11 +961,13 @@ function NextStepFooter({
   protest,
   evidenceDocumentCount,
   noticeSignedAt,
+  onNavigate,
 }: {
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceDocumentCount: number;
   noticeSignedAt: string | null;
+  onNavigate: (anchor: string) => void;
 }) {
   const countyInfo = getCountyProtestInfo(property.cad);
   const guidance = getCaseGuidance(
@@ -724,7 +986,7 @@ function NextStepFooter({
       {next.detail && <span className="text-muted-foreground"> {next.detail}</span>}
       {next.action && (
         <button
-          onClick={() => goToGuidanceAnchor(next.action!.anchor)}
+          onClick={() => onNavigate(next.action!.anchor)}
           className="ml-2 text-xs text-accent hover:underline"
         >
           {next.action.label} →
@@ -3126,10 +3388,15 @@ function InformalOutcomeBanner({
   protest,
   agreement,
   inline = false,
+  onNavigate,
 }: {
   protest: ProtestRecord;
   agreement: SettlementAgreementRecord | null;
   inline?: boolean;
+  // Optional — jump to the Informal Review tab + settlement section. When
+  // absent (the inline copy inside HearingPrepSection), falls back to a plain
+  // same-page scroll.
+  onNavigate?: (anchor: string) => void;
 }) {
   const unresolved =
     protest.status !== "resolved" &&
@@ -3149,9 +3416,11 @@ function InformalOutcomeBanner({
       <button
         type="button"
         onClick={() =>
-          document
-            .getElementById("case-settlement-signature")
-            ?.scrollIntoView({ behavior: "smooth", block: "start" })
+          onNavigate
+            ? onNavigate("case-settlement-signature")
+            : document
+                .getElementById("case-settlement-signature")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
         }
         className="btn-outline mt-2 text-xs py-1"
       >
