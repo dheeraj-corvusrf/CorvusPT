@@ -129,6 +129,10 @@ jobs:
           # CorvusDP's OWN supabase/schema.sql (a separate project from CorvusPT).
           VITE_SUPABASE_URL: https://xzhilwwlfajxhklkiteb.supabase.co
           VITE_SUPABASE_ANON_KEY: sb_publishable_zR_OjbkQ3Nto25iGKdX9mg_jRbUDWVF
+          # Shared CorvusRE Google key (referrer-restricted to corvusre.com).
+          # CorvusDP's AddressAutocomplete uses it for suggestions and silently
+          # falls back to keyless Nominatim if Places API (New) isn't enabled.
+          VITE_GOOGLE_MAPS_API_KEY: AIzaSyCxz6Q6Wit9Sq_qR6cciWs1K8zPjdM0sAI
 
       # The CorvusRE hub (hub/) is a handful of plain static pages with no app
       # logic — see hub/hub.css's own comment for why that's a deliberate
