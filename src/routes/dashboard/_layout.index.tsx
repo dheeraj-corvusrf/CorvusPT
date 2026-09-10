@@ -81,13 +81,20 @@ function Overview() {
   const [uploading, setUploading] = useState(false);
   const [askQuery, setAskQuery] = useState("");
   const [asking, setAsking] = useState(false);
-  // Voice input for the "Ask AI" quick action — fills the box as you speak;
-  // you still hit Enter. Same on-device Web Speech hook as the Ask AI widget.
-  const askSpeech = useSpeechInput(setAskQuery);
   // Read the AI's reply aloud — when the toggle is on, or when the question
   // was just asked by voice (a spoken question gets a spoken answer).
   const askTts = useSpeechOutput();
   const askedByVoice = useRef(false);
+  // Voice input for the "Ask AI" quick action. Fills the box as you speak,
+  // then auto-submits when you stop talking so a spoken question is fully
+  // hands-free.
+  const askSpeech = useSpeechInput(setAskQuery, {
+    onFinal: (text) => {
+      askedByVoice.current = true;
+      setAskQuery(text);
+      void runAsk(text);
+    },
+  });
   const [nudge, setNudge] = useState<string | null>(null);
   const nudgedPropertyId = useRef<string | null>(null);
   const [hearingNudge, setHearingNudge] = useState<string | null>(null);
@@ -256,12 +263,12 @@ function Overview() {
     uploading,
   );
 
-  async function submitAsk(e: React.FormEvent) {
-    e.preventDefault();
-    if (!askQuery.trim()) return;
+  async function runAsk(text: string) {
+    const q = text.trim();
+    if (!q || asking) return;
     setAsking(true);
     try {
-      const result = await askRouter(askQuery.trim());
+      const result = await askRouter(q);
       if (result.message) {
         toast.message(result.message);
         if (askTts.enabled || askedByVoice.current) askTts.speak(result.message);
@@ -273,6 +280,11 @@ function Overview() {
       setAsking(false);
       askedByVoice.current = false;
     }
+  }
+
+  function submitAsk(e: React.FormEvent) {
+    e.preventDefault();
+    void runAsk(askQuery);
   }
 
   const firstName = user?.user_metadata?.first_name as string | undefined;

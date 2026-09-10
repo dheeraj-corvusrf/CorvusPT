@@ -32,8 +32,6 @@ export function AskAiWidget() {
   const [asking, setAsking] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Voice input — fills the box as you speak; you still press Send.
-  const speech = useSpeechInput(setQuery);
   // Read the answer aloud. On when the toggle is on, or (either way) when
   // the question was just asked by voice — so a spoken question gets a
   // spoken answer without a separate opt-in.
@@ -42,6 +40,14 @@ export function AskAiWidget() {
   function maybeSpeak(text: string) {
     if (tts.enabled || askedByVoice.current) tts.speak(text);
   }
+  // Voice input — fills the box as you speak, then auto-sends when you stop
+  // talking so a spoken question is fully hands-free.
+  const speech = useSpeechInput(setQuery, {
+    onFinal: (text) => {
+      askedByVoice.current = true;
+      void runSubmit(text);
+    },
+  });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -59,9 +65,13 @@ export function AskAiWidget() {
     tts.cancel();
   }
 
-  async function submit(e: React.FormEvent) {
+  function submit(e: React.FormEvent) {
     e.preventDefault();
-    const q = query.trim();
+    void runSubmit(query);
+  }
+
+  async function runSubmit(raw: string) {
+    const q = raw.trim();
     if (!q || asking) return;
     setQuery("");
     setMessages((prev) => [...prev, { role: "user", text: q }]);
