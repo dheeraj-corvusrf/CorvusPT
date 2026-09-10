@@ -3034,6 +3034,16 @@ function cardDataGap(
       return (data as HealthScoreResult).dataSufficient === false
         ? { label: "Add property records or photos to firm up this score", docType: GENERIC }
         : null;
+    case "strategy":
+      // One upload for the whole card (same as modules 1/3/…): the AI re-runs
+      // and sorts each file to whichever strategy it strengthens — no need to
+      // match a file to a row.
+      return (data as ModuleResultMap["strategy"]).strategies.some((s) => !s.dataSufficient)
+        ? {
+            label: "Upload photos or documents to strengthen the strategy analysis",
+            docType: GENERIC,
+          }
+        : null;
     case "comps":
       return (compsMap.data?.comps?.length ?? 0) < 5
         ? { label: "Upload a recent sale or appraisal to widen the comp set", docType: GENERIC }
@@ -3572,15 +3582,10 @@ function ModuleVisual({
     case "strategy": {
       const d = moduleState.data as ModuleResultMap["strategy"];
       if (d.strategies.length === 0) return null;
-      return (
-        <StrategyRankList
-          strategies={d.strategies}
-          color={m.color}
-          max={5}
-          uploading={uploadingEvidence}
-          onUploadFor={(s, files) => onUploadEvidence(files, strategySlug(s.name))}
-        />
-      );
+      // No per-row upload chips — the card shows one "Upload data" control at
+      // the bottom (see cardDataGap's "strategy" case). Rows that still need
+      // evidence show a plain "Data Needed" pill instead.
+      return <StrategyRankList strategies={d.strategies} color={m.color} max={5} />;
     }
     case "comps": {
       const d = moduleState.data as ModuleResultMap["comps"];
