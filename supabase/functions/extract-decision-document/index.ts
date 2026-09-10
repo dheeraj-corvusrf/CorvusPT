@@ -44,8 +44,10 @@ Rules:
 - settlementTerms: 1-3 sentences summarizing any real stated terms/conditions of the agreement or decision — "Not specified" if none are stated.
 - refundIndicator: a short real statement of what the document says about a refund (e.g. "Refund of $X stated" or "No refund mentioned") — null if refunds aren't mentioned at all.
 - otherConditions: any other real condition stated (e.g. required future actions, expiration) — null if none.
+- signaturePresent: "Yes" only if the document actually shows a completed/filled signature block (a handwritten or typed signature on a signature line), "No" if there is a signature line but it is blank, "Unclear" if you genuinely can't tell or there is no signature area at all.
+- signedDate: the date printed next to the signature (as printed, MM/DD/YYYY if a real date), or null if there is no signature date.
 - Plain prose only in free-text fields — no markdown.
-- Return ONLY a JSON object matching this exact shape: {"documentCategory":"<one of: ARB Order | Hearing Decision | Settlement | Revised Value Notice | County Decision | Other>","originalValue":<number|null>,"finalValue":<number|null>,"decisionDate":<string|null>,"taxYear":<string|null>,"accountNumber":<string|null>,"propertyAddress":<string|null>,"settlementTerms":<string|null>,"appealDeadline":<string|null>,"refundIndicator":<string|null>,"otherConditions":<string|null>}`;
+- Return ONLY a JSON object matching this exact shape: {"documentCategory":"<one of: ARB Order | Hearing Decision | Settlement | Revised Value Notice | County Decision | Other>","originalValue":<number|null>,"finalValue":<number|null>,"decisionDate":<string|null>,"taxYear":<string|null>,"accountNumber":<string|null>,"propertyAddress":<string|null>,"settlementTerms":<string|null>,"appealDeadline":<string|null>,"refundIndicator":<string|null>,"otherConditions":<string|null>,"signaturePresent":"<Yes|No|Unclear>","signedDate":<string|null>}`;
 
 function normalize(v: string | null | undefined): string {
   return (v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -73,6 +75,9 @@ Deno.serve(async (req: Request) => {
       caseContext?.taxYear ? `Tax year on file: ${caseContext.taxYear}` : null,
       caseContext?.originalValue != null
         ? `Original assessed value on file: $${caseContext.originalValue}`
+        : null,
+      caseContext?.expectSigned
+        ? "This upload is expected to be a SIGNED copy of a settlement the owner signed in person — look carefully for a completed signature block and report signaturePresent and signedDate accordingly."
         : null,
     ].filter(Boolean);
 
@@ -158,6 +163,12 @@ Deno.serve(async (req: Request) => {
       appealDeadline: str(parsed.appealDeadline, 20),
       refundIndicator: str(parsed.refundIndicator, 200),
       otherConditions: str(parsed.otherConditions, 300),
+      signaturePresent: (["Yes", "No", "Unclear"] as const).includes(
+        parsed.signaturePresent as "Yes" | "No" | "Unclear",
+      )
+        ? (parsed.signaturePresent as "Yes" | "No" | "Unclear")
+        : "Unclear",
+      signedDate: str(parsed.signedDate, 20),
     };
 
     // Real, deterministic comparison against the case's own known facts —
