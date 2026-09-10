@@ -1176,6 +1176,14 @@ function DocRow({
                 <VerdictBadge doc={doc} />
               )}
               {isEvidenceDoc(doc) && <span className="badge-soft">Evidence</span>}
+              {doc.documentType?.startsWith("AI Data Sheet — ") && (
+                <span
+                  className="badge-soft-warning"
+                  title="Drafted by AI from typical values — verify before relying on it"
+                >
+                  AI-generated
+                </span>
+              )}
               {(doc.modules ?? []).map((m) => (
                 <span
                   key={m}
