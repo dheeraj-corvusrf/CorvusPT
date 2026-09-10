@@ -45,6 +45,8 @@ import { listDocuments, type DocumentRecord } from "@/lib/documents";
 import { listProtests, type ProtestRecord, type ProtestStatus } from "@/lib/protests";
 import { getPropertyProtestStatus } from "@/lib/portfolio-status";
 import { askRouter } from "@/lib/ask-router";
+import { askAboutDocument } from "@/lib/document-ai";
+import { buildUserContext } from "@/lib/ai-context";
 import { getDeadlineNudge } from "@/lib/deadline-nudge";
 import { getHearingNudge } from "@/lib/hearing-nudge";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
@@ -268,12 +270,31 @@ function Overview() {
     if (!q || asking) return;
     setAsking(true);
     try {
-      const result = await askRouter(q);
-      if (result.message) {
-        toast.message(result.message);
-        if (askTts.enabled || askedByVoice.current) askTts.speak(result.message);
-      }
-      nav({ to: result.destination });
+      // Actually answer the question with the user's own data (same engine
+      // as the Ask AI widget) — not the guest route-classifier, which would
+      // send a signed-in dashboard user to /sign-in. route-intent still runs
+      // in parallel, but only as a "continue to…" hint when it lands on a
+      // real in-app page.
+      const context = user ? await buildUserContext(user.id).catch(() => "") : "";
+      const [ansRes, routeRes] = await Promise.allSettled([
+        askAboutDocument({ question: q, context: context || undefined }),
+        askRouter(q),
+      ]);
+      const answer =
+        ansRes.status === "fulfilled"
+          ? ansRes.value.answer
+          : "Sorry — I couldn't answer that. Please try again.";
+      const dest =
+        routeRes.status === "fulfilled" &&
+        /^\/(dashboard|ai-report)(\/|$)/.test(routeRes.value.destination)
+          ? routeRes.value.destination
+          : null;
+      toast.message(answer, {
+        action: dest ? { label: "Open", onClick: () => nav({ to: dest }) } : undefined,
+        duration: 8000,
+      });
+      if (askTts.enabled || askedByVoice.current) askTts.speak(answer);
+      setAskQuery("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not process that. Please try again.");
     } finally {
