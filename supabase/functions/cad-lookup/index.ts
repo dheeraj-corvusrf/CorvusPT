@@ -71,9 +71,14 @@ type CadRecord = {
     buyer: string | null;
     instrumentNum: string | null;
   }>;
-  // Structure / lot detail — only populated for the counties whose parcel layer
-  // actually publishes it (see STRUCTURE_FIELDS_BY_CAD / applyStructureDetail
-  // below). Null everywhere else; never fabricated.
+  // Structure / lot detail — populated wherever a real source has it:
+  //  - building SF + year built + class: Denton, Collin, Tarrant, Fort Bend,
+  //    Williamson (ArcGIS); Dallas (dallascad.org detail page, see enrichDallas)
+  //  - building SF + year built only: Montgomery (ArcGIS)
+  //  - lot size only: Harris, Travis, Grayson, Kaufman (ArcGIS field or the
+  //    acreage stated in the legal description, see acresFromLegalText)
+  //  - nothing: Bexar (no field on its layer, second source 403-blocked)
+  // Null wherever the source didn't have it; never fabricated.
   buildingSqft?: number | null;
   yearBuilt?: number | null;
   buildingClass?: string | null;
@@ -124,8 +129,13 @@ const STRUCTURE_FIELDS_BY_CAD: Record<
     klass: "STRCLASS",
     lotAcres: "TotAcreDeed",
   },
+  "Montgomery Central Appraisal District": {
+    sqft: "imprvMainArea",
+    year: "imprvActualYearBuilt",
+  },
   "Harris Central Appraisal District": { lotSqft: "land_sqft", lotAcres: "acreage_1" },
   "Travis Central Appraisal District": { lotAcres: "tcad_acres" },
+  "Grayson Central Appraisal District": { lotAcres: "LegalAcreage" },
 };
 
 // The extra comma-separated outFields each county needs, derived from the map
@@ -823,7 +833,8 @@ async function queryCollin(address: string, mode: QueryMode = "exact"): Promise<
 
 const MONTGOMERY_URL =
   "https://services1.arcgis.com/PRoAPGnMSUqvTrzq/arcgis/rest/services/Tax_Parcel_view/FeatureServer/0/query";
-const MONTGOMERY_OUT_FIELDS = "ownerName,situs,legalDescription,PIN";
+const MONTGOMERY_OUT_FIELDS =
+  "ownerName,situs,legalDescription,PIN,imprvMainArea,imprvActualYearBuilt";
 
 async function queryMontgomery(address: string, mode: QueryMode = "exact"): Promise<CadRecord[]> {
   const parsed = parseAddressForQuery(address, mode);
@@ -842,23 +853,44 @@ async function queryMontgomery(address: string, mode: QueryMode = "exact"): Prom
           `${MONTGOMERY_URL}?where=${encodeURIComponent(singleFieldWhere("situs", parsed.house, core))}` +
             `&outFields=${MONTGOMERY_OUT_FIELDS}&resultRecordCount=${MULTI_CANDIDATE_LIMIT}&returnGeometry=false&f=json`,
         );
-  return features.map(({ attributes: attrs }) => ({
-    ownerName: (attrs.ownerName as string) ?? null,
-    propertyAddress: (attrs.situs as string) ?? address,
-    cad: "Montgomery Central Appraisal District",
-    accountNumber: attrs.PIN != null ? String(attrs.PIN) : null,
-    propertyType: "Not published by county",
-    landValue: null,
-    improvementValue: null,
-    totalValue: null,
-    taxYear: null,
-  }));
+  return features.map(({ attributes: attrs }) =>
+    applyStructureDetail(
+      {
+        ownerName: (attrs.ownerName as string) ?? null,
+        propertyAddress: (attrs.situs as string) ?? address,
+        cad: "Montgomery Central Appraisal District",
+        accountNumber: attrs.PIN != null ? String(attrs.PIN) : null,
+        propertyType: "Not published by county",
+        landValue: null,
+        improvementValue: null,
+        totalValue: null,
+        taxYear: null,
+      },
+      attrs,
+    ),
+  );
 }
 
 function parseMoneyField(v: string | number | null): number | null {
   if (v == null) return null;
   const n = typeof v === "number" ? v : parseInt(v.trim(), 10);
   return Number.isFinite(n) ? n : null;
+}
+
+// Pulls a parcel acreage out of a CAD legal-description string when there is no
+// dedicated acreage field to read — e.g. Dallas "... ACS 1.671 ...", the BIS
+// counties' "ACRES 1.024", "12.5 AC". Deliberately narrow: a number immediately
+// beside the token AC/ACS/ACRE(S), 0 < n < 100000, first hit wins. "\bAC" never
+// fires inside "VAC"/"VACANT" (the V is a word char, so there's no boundary
+// before "AC"), which keeps "VAC ST"/"VAC ALLEY" fragments from matching.
+function acresFromLegalText(legal: string | null | undefined): number | null {
+  if (!legal) return null;
+  const m =
+    legal.match(/\bAC(?:RE)?S?\.?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)/i) ??
+    legal.match(/([0-9]+(?:\.[0-9]+)?)\s*AC(?:RE)?S?\b/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  return Number.isFinite(n) && n > 0 && n < 100000 ? n : null;
 }
 
 const DENTON_URL = "https://gis.dentoncounty.gov/arcgis/rest/services/Parcels_FC/MapServer/0/query";
@@ -1179,7 +1211,7 @@ async function queryGrayson(address: string, mode: QueryMode = "exact"): Promise
   const url =
     "https://services1.arcgis.com/EVxyUkKpll765a5X/arcgis/rest/services/Grayson_Appraisal_Parcel_Map_WFL1/FeatureServer/13/query" +
     `?where=${encodeURIComponent(where)}` +
-    "&outFields=OwnerName,SitusNumber,SitusStreetPrefix,SitusStreet,SitusStreetSufix,SitusCity,LandValue,ImprovementValue,MarketValue,PropertyNumber,Year" +
+    "&outFields=OwnerName,SitusNumber,SitusStreetPrefix,SitusStreet,SitusStreetSufix,SitusCity,LandValue,ImprovementValue,MarketValue,PropertyNumber,Year,LegalAcreage" +
     `&resultRecordCount=${mode === "nearby" ? NEARBY_LIMIT : MULTI_CANDIDATE_LIMIT}` +
     "&returnGeometry=false&f=json";
 
@@ -1204,21 +1236,24 @@ async function queryGrayson(address: string, mode: QueryMode = "exact"): Promise
     // the user's own typed city when SitusCity is null made an unrelated real
     // Grayson parcel (confirmed: two Sherman-area lots, ~90 miles from the
     // Forney address that surfaced this) falsely look like a match.
-    return {
-      ownerName: (attrs.OwnerName as string) ?? null,
-      propertyAddress: streetParts
-        ? attrs.SitusCity
-          ? `${streetParts}, ${attrs.SitusCity}`
-          : streetParts
-        : address,
-      cad: "Grayson Central Appraisal District",
-      accountNumber: attrs.PropertyNumber != null ? String(attrs.PropertyNumber) : null,
-      propertyType: null,
-      landValue: parseMoneyField(attrs.LandValue),
-      improvementValue: parseMoneyField(attrs.ImprovementValue),
-      totalValue: parseMoneyField(attrs.MarketValue),
-      taxYear: attrs.Year != null ? parseInt(String(attrs.Year), 10) : null,
-    };
+    return applyStructureDetail(
+      {
+        ownerName: (attrs.OwnerName as string) ?? null,
+        propertyAddress: streetParts
+          ? attrs.SitusCity
+            ? `${streetParts}, ${attrs.SitusCity}`
+            : streetParts
+          : address,
+        cad: "Grayson Central Appraisal District",
+        accountNumber: attrs.PropertyNumber != null ? String(attrs.PropertyNumber) : null,
+        propertyType: null,
+        landValue: parseMoneyField(attrs.LandValue),
+        improvementValue: parseMoneyField(attrs.ImprovementValue),
+        totalValue: parseMoneyField(attrs.MarketValue),
+        taxYear: attrs.Year != null ? parseInt(String(attrs.Year), 10) : null,
+      },
+      attrs,
+    );
   });
 }
 
@@ -1812,6 +1847,10 @@ async function queryKaufmanByAccount(accountNumber: string): Promise<CadRecord |
     const propertyTypeCode = (r.propertyTypeCode as string)?.trim();
     const percentOwnership =
       typeof r.percentOwnership === "string" ? r.percentOwnership.replace("%", "") : null;
+    const legalDescription = (r.legalDescription as string)?.trim() || null;
+    // BIS carries no building detail — its results only sometimes state the
+    // acreage in the legal-description text (see acresFromLegalText).
+    const lotSizeAcres = acresFromLegalText(legalDescription);
     return {
       ownerName: (r.ownerName as string)?.trim() || null,
       propertyAddress: (r.address as string)?.trim() || "",
@@ -1822,10 +1861,11 @@ async function queryKaufmanByAccount(accountNumber: string): Promise<CadRecord |
       improvementValue: null,
       totalValue: typeof r.appraisedValue === "number" ? r.appraisedValue : null,
       taxYear: typeof r.year === "number" ? r.year : null,
-      legalDescription: (r.legalDescription as string)?.trim() || null,
+      legalDescription,
       subdivision: (r.subdivision as string)?.trim() || null,
       geoId: (r.geoId as string)?.trim() || null,
       ownershipPct: percentOwnership ? parseFloat(percentOwnership) : null,
+      ...(lotSizeAcres != null ? { lotSizeAcres } : {}),
     };
   } catch {
     return null;
@@ -1973,22 +2013,17 @@ async function enrichTrueProdigy(
       ? `${mailingLine}${latest.addrZip ? " " + latest.addrZip : ""}`
       : null;
 
-    // Best-effort structure detail — TrueProdigy's property rows sometimes carry
-    // an improvement area / year built (the main additional value here is
-    // Montgomery + Travis, whose primary ArcGIS layers have neither). Guarded so
-    // a key that isn't there just yields null rather than a bad number; the
-    // ArcGIS path already covers Denton/Collin/Tarrant.
-    const tpNum = (...keys: string[]): number | null => {
-      for (const k of keys) {
-        const v = latest[k];
-        const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
-        if (Number.isFinite(n) && n > 0) return n;
-      }
-      return null;
-    };
-    const tpSqft = tpNum("imprvMainArea", "mainAreaSqft", "livingArea", "sqft", "buildingArea");
-    const tpYearRaw = tpNum("imprvActualYearBuilt", "actualYearBuilt", "yearBuilt");
-    const nowYear = new Date().getFullYear();
+    // TrueProdigy's public property rows carry no building SF / year built /
+    // class (confirmed live 2026-09-10 — no such keys, and no improvements
+    // sub-endpoint), but they DO carry a real lot acreage, which Montgomery's
+    // and Travis's primary ArcGIS layers are missing. Never overwrites a real
+    // ArcGIS acreage (enrichRecord's spread only fills gaps that matter).
+    const tpAcresRaw =
+      latest.legalAcreage ?? latest.effectiveSizeAcres ?? latest.legalAcres ?? null;
+    const tpAcres =
+      tpAcresRaw != null && Number.isFinite(parseFloat(String(tpAcresRaw)))
+        ? parseFloat(String(tpAcresRaw))
+        : null;
 
     return {
       legalDescription: (latest.legalDescription as string) || null,
@@ -1997,10 +2032,7 @@ async function enrichTrueProdigy(
       ownershipPct: latest.ownerPct != null ? parseFloat(String(latest.ownerPct)) : null,
       valueHistory,
       deeds,
-      ...(tpSqft != null ? { buildingSqft: tpSqft } : {}),
-      ...(tpYearRaw != null && tpYearRaw >= 1700 && tpYearRaw <= nowYear + 1
-        ? { yearBuilt: Math.round(tpYearRaw) }
-        : {}),
+      ...(tpAcres != null && tpAcres > 0 ? { lotSizeAcres: tpAcres } : {}),
     };
   } catch {
     return null;
@@ -2182,6 +2214,42 @@ async function enrichWilliamson(
 // enrichRecord()'s existing spread-merge already applies them correctly.
 const DALLAS_DETAIL_PATHS = ["AcctDetailRes.aspx", "AcctDetailCom.aspx", "AcctDetailBPP.aspx"];
 
+// Improvement detail off a DCAD account-detail page. The residential page
+// (AcctDetailRes.aspx) exposes clean span ids; the commercial page
+// (AcctDetailCom.aspx) has none and uses "<b>Total Area:</b> N sqft" /
+// "<b>Year Built:</b> YYYY" label pairs plus a "Quality: GOOD" cell (confirmed
+// live 2026-09-10). The MAIN improvement is always the first one listed, so a
+// non-global regex naturally takes it.
+function parseDallasImprovement(html: string): {
+  buildingSqft: number | null;
+  yearBuilt: number | null;
+  buildingClass: string | null;
+} {
+  const digits = (s: string | null): number | null => {
+    if (!s || !/\d/.test(s)) return null;
+    const n = Number(s.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  };
+  const nowYear = new Date().getFullYear();
+  const sqft =
+    digits(extractSpan(html, "MainImpRes1_lblLivingArea")) ??
+    digits(
+      html.match(/Total Area:<\/b>\s*(?:&nbsp;|\s)*([\d,]+)\s*(?:&nbsp;|\s)*sqft/i)?.[1] ?? null,
+    );
+  const yb =
+    digits(extractSpan(html, "MainImpRes1_lblYearBuilt")) ??
+    digits(html.match(/Year Built:<\/b>\s*(?:&nbsp;|\s)*(\d{4})/i)?.[1] ?? null);
+  const cls =
+    extractSpan(html, "MainImpRes1_lblBuildClass") ||
+    html.match(/Quality:<\/TH>\s*<TD[^>]*>\s*([A-Za-z][A-Za-z /-]*?)\s*<\/TD>/i)?.[1]?.trim() ||
+    null;
+  return {
+    buildingSqft: sqft,
+    yearBuilt: yb != null && yb >= 1700 && yb <= nowYear + 1 ? yb : null,
+    buildingClass: cls,
+  };
+}
+
 function extractSpan(html: string, id: string): string | null {
   const m = html.match(new RegExp(`id="${id}"[^>]*>([^<]*)`, "i"));
   const text = m?.[1]?.replace(/&nbsp;/g, " ").trim();
@@ -2250,12 +2318,37 @@ async function enrichDallas(accountNumber: string): Promise<Partial<CadRecord> |
       const saleDate =
         legalMatch?.match(/id="LegalDesc1_lblSaleDate"[^>]*>([^<]*)/i)?.[1]?.trim() || null;
 
+      // DCAD serves a (near-empty) AcctDetailRes.aspx even for commercial
+      // accounts, and this loop stops at the first page with an owner block —
+      // so a commercial parcel's real building data (only on AcctDetailCom.aspx)
+      // is missed. When the matched page had no improvement SF, fetch the
+      // commercial page once and read it from there. Value/legal/mailing above
+      // still come from the page that actually matched.
+      let imp = parseDallasImprovement(html);
+      if (imp.buildingSqft == null && path !== "AcctDetailCom.aspx") {
+        try {
+          const comRes = await fetch(
+            `https://www.dallascad.org/AcctDetailCom.aspx?ID=${encodeURIComponent(accountNumber)}`,
+          );
+          if (comRes.ok) {
+            const comHtml = await comRes.text();
+            if (/id="lblOwner"/.test(comHtml)) imp = parseDallasImprovement(comHtml);
+          }
+        } catch {
+          // keep whatever the first page gave (usually nothing) — non-fatal
+        }
+      }
+      const { buildingSqft, yearBuilt, buildingClass } = imp;
+
       return {
         legalDescription: legalLines.join(" ").trim() || null,
         mailingAddress,
         landValue: parseDallasDollar(extractSpan(html, "ValueSummary1_pnlValue_lblLandVal")),
         improvementValue: parseDallasDollar(extractSpan(html, "ValueSummary1_lblImpVal")),
         totalValue: parseDallasDollar(extractSpan(html, "ValueSummary1_pnlValue_lblTotalVal")),
+        ...(buildingSqft != null ? { buildingSqft } : {}),
+        ...(yearBuilt != null ? { yearBuilt } : {}),
+        ...(buildingClass ? { buildingClass } : {}),
         // Only the single most-recent deed's date is available here (unlike
         // TrueProdigy's full deed history) — same lighter tier as Fort Bend/Grayson,
         // which get no deed info at all, so a date-only entry is still a real gain.
@@ -2294,7 +2387,31 @@ async function enrichRecord(record: CadRecord): Promise<CadRecord> {
             ? await enrichDallas(record.accountNumber)
             : null;
 
-  return enrichment ? { ...record, ...enrichment } : record;
+  const merged = enrichment ? { ...record, ...enrichment } : record;
+
+  // Structure / lot fields are gap-fill only: a real value from the primary
+  // ArcGIS match (applyStructureDetail) always wins over an enrichment source's
+  // version of the same field, so a spread can't null out or override it.
+  for (const k of [
+    "buildingSqft",
+    "yearBuilt",
+    "buildingClass",
+    "lotSizeSqft",
+    "lotSizeAcres",
+  ] as const) {
+    if (record[k] != null && merged[k] == null) merged[k] = record[k];
+  }
+
+  // Last-resort lot size: several counties (Dallas, Kaufman, Bexar) have no
+  // acreage field anywhere, but their legal description text routinely states
+  // it ("... ACS 1.671 ...", "ACRES 1.024"). Parsed only when nothing better
+  // was found — never overrides a real numeric field.
+  if (merged.lotSizeAcres == null && merged.legalDescription) {
+    const acres = acresFromLegalText(merged.legalDescription);
+    if (acres != null) merged.lotSizeAcres = acres;
+  }
+
+  return merged;
 }
 
 function nearbyDedupeKey(r: CadRecord): string {
