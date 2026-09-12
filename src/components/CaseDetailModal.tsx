@@ -138,6 +138,7 @@ import {
   saveFilingMethod,
   saveFilingProofFields,
   confirmFiling,
+  requestAdditionalInfo,
   type FormType,
   type FilingMethod,
   type FormSubmission,
@@ -146,7 +147,15 @@ import {
   filingSubmissionStatus,
   hasFilingReferenceNumber,
   FILING_SUBMISSION_STATUS_LABEL,
+  type FilingSubmissionStatus,
 } from "@/lib/filing-submission-status";
+import {
+  computeEvidenceStatus,
+  EVIDENCE_STATUS_LABEL,
+  type EvidenceStatusStage,
+} from "@/lib/evidence-status";
+import { getCachedModuleResult } from "@/lib/module-results-cache";
+import type { ModuleResultMap } from "@/lib/ai-report-modules";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
 import {
@@ -491,11 +500,18 @@ export function CaseDetailView({
           {/* --- Prepare & File --- */}
           {activeTab === "file" && (
             <div>
-              <FilingWorkflowLauncher
+              <FiledProtestStatusCard
+                userId={userId}
                 property={property}
                 protest={current}
                 evidenceCount={evidenceDocuments.length}
-                noticeSignedAt={noticeSignedAt}
+                onOpen={() => setFilingOpen(true)}
+              />
+              <EvidenceStatusCard
+                userId={userId}
+                property={property}
+                protest={current}
+                evidenceDocuments={evidenceDocuments}
                 onOpen={() => setFilingOpen(true)}
               />
               <CasePlanSection
@@ -1465,6 +1481,7 @@ const EMPTY_FORM_SUBMISSION: FormSubmission = {
   emailSubject: null,
   emailSentAt: null,
   filingConfirmedAt: null,
+  additionalRequestedAt: null,
 };
 
 // Shown right after the Notice of Protest is signed, so filing it (Go to
@@ -2134,37 +2151,335 @@ function FilingSubmissionFlow({
 // The entry point to the step-by-step filing workflow (which opens in its own
 // popup). Shows where the case is at a glance so the button reads "Start" vs.
 // "Continue", and flags a blocked Pre-Filing Check up front.
-function FilingWorkflowLauncher({
+// Part 3's own small label map for the Notice of Protest's "Final Status" —
+// deliberately separate from FILING_SUBMISSION_STATUS_LABEL (which is
+// generic across all four documents in Part 2's own panels): this is the
+// one and only place this app ever says "Protest Filed", and only once
+// filingConfirmedAt is real — confirmFiling()'s existing discipline already
+// enforces that it's never set just because the user said "submitted" or a
+// delivery was confirmed; this card only ever surfaces what's already true.
+function noticeFinalStatusLabel(status: FilingSubmissionStatus): string {
+  switch (status) {
+    case "unstarted":
+      return "Not Filed Yet";
+    case "method_chosen":
+      return "Submitted — Awaiting Delivery Confirmation";
+    case "awaiting_confirmation":
+      return "Awaiting County Confirmation";
+    case "additional_requested":
+      return "Additional Information Requested";
+    case "confirmed":
+      return "Protest Filed";
+  }
+}
+
+// Part 3 — the Filed Protest half of the status/action screen. Reads the
+// exact same submission row Part 2's own FilingSubmissionFlow (for
+// notice_of_protest) reads and writes; this card never duplicates that
+// workflow, it only rolls the same real fields up into one glance +
+// whichever action (Start/Continue/Review/View) makes sense right now.
+function FiledProtestStatusCard({
+  userId,
   property,
   protest,
   evidenceCount,
-  noticeSignedAt,
   onOpen,
 }: {
+  userId: string;
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceCount: number;
-  noticeSignedAt: string | null;
   onOpen: () => void;
 }) {
+  const [loading, setLoading] = useState(true);
+  const [submission, setSubmission] = useState<FormSubmission | null>(null);
+  const [proofCount, setProofCount] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getSubmission(protest.id, "notice_of_protest"),
+      getFilingProofDocumentsFor(userId, property.id, "notice_of_protest"),
+    ])
+      .then(([s, docs]) => {
+        if (!live) return;
+        setSubmission(s);
+        setProofCount(docs.length);
+      })
+      .catch((err) => console.error("Could not load the filed-protest status:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [protest.id, userId, property.id]);
+
   const blocked = isPreFilingBlocked(getPreFilingCheck(property, protest, evidenceCount));
-  const started = !!noticeSignedAt || protest.status !== "requested";
+  const status = filingSubmissionStatus(submission);
+  const started = status !== "unstarted";
+  const statusLabel = noticeFinalStatusLabel(status);
+
   return (
     <div className="mt-4 card-elev p-4">
-      <h4 className="font-serif text-base font-semibold">Prepare &amp; File</h4>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
-        forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
-        signing, filing, and your evidence package. Everything you sign is saved to your Documents.
-      </p>
-      {blocked && (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-serif text-base font-semibold">Filed Protest</h4>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            status === "confirmed"
+              ? "bg-success/15 text-success"
+              : status === "additional_requested"
+                ? "bg-destructive/10 text-destructive"
+                : status === "awaiting_confirmation"
+                  ? "bg-warning/15 text-warning-foreground"
+                  : "bg-secondary text-muted-foreground"
+          }`}
+        >
+          {statusLabel}
+        </span>
+      </div>
+
+      {loading ? (
+        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
+      ) : !started ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
+          forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
+          signing, filing, and your evidence package.
+        </p>
+      ) : (
+        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs sm:grid-cols-4">
+          <Field
+            label="Submission Method"
+            value={
+              submission?.filingMethod
+                ? FILING_METHOD_LABEL[submission.filingMethod]
+                : "Not yet chosen"
+            }
+          />
+          <Field
+            label="Submission Date"
+            value={
+              submission?.filingConfirmedAt
+                ? new Date(submission.filingConfirmedAt).toLocaleDateString()
+                : "—"
+            }
+          />
+          <Field
+            label="Submission Proof"
+            value={
+              proofCount > 0
+                ? `${proofCount} document${proofCount === 1 ? "" : "s"}`
+                : hasFilingReferenceNumber(submission)
+                  ? "Reference number on file"
+                  : "None yet"
+            }
+          />
+          <Field
+            label="County Confirmation"
+            value={
+              status === "confirmed"
+                ? "Confirmed"
+                : status === "additional_requested"
+                  ? "More info requested"
+                  : status === "awaiting_confirmation"
+                    ? "Awaiting reply"
+                    : "Not yet"
+            }
+          />
+        </dl>
+      )}
+
+      {blocked && !started && (
         <p className="mt-2 text-xs text-warning-foreground">
           Action needed in the Pre-Filing Check — open the workflow to resolve it.
         </p>
       )}
+
       <button onClick={onOpen} className="btn-accent mt-3 text-xs py-1.5">
-        {started ? "Continue Filing" : blocked ? "Review Pre-Filing Check" : "Start Filing"}
+        {status === "confirmed"
+          ? "View Filing"
+          : started
+            ? "Continue Filing"
+            : blocked
+              ? "Review Pre-Filing Check"
+              : "Start Filing"}
       </button>
+    </div>
+  );
+}
+
+// Part 3 — the Evidence half of the status/action screen. criticalMissing
+// comes from Module 8's own cached checklist (getCachedModuleResult, a plain
+// read — no new AI call); the rest from the same "evidence" submission row
+// Part 2's Evidence tab reads and writes. Never re-does either module's work,
+// just tells the user which of the two states applies and what to do next.
+function EvidenceStatusCard({
+  userId,
+  property,
+  protest,
+  evidenceDocuments,
+  onOpen,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceDocuments: DocumentRecord[];
+  onOpen: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [submission, setSubmission] = useState<FormSubmission | null>(null);
+  const [criticalMissingCount, setCriticalMissingCount] = useState<number | null>(null);
+  const [requesting, setRequesting] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getSubmission(protest.id, "evidence"),
+      getCachedModuleResult(property.id, "evidence"),
+    ])
+      .then(([s, cached]) => {
+        if (!live) return;
+        setSubmission(s);
+        if (cached) {
+          const result = cached.result as ModuleResultMap["evidence"];
+          const critical = (result.items ?? []).filter(
+            (i) => i.priority === "Critical" && i.status === "Missing",
+          ).length;
+          setCriticalMissingCount(critical);
+        } else {
+          setCriticalMissingCount(null);
+        }
+      })
+      .catch((err) => console.error("Could not load the evidence status:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [protest.id, property.id]);
+
+  async function handleRequestAdditional() {
+    setRequesting(true);
+    try {
+      const at = await requestAdditionalInfo(userId, protest.id, "evidence");
+      setSubmission((s) => ({
+        ...(s ?? {
+          fieldValues: {},
+          signature: null,
+          signedAt: null,
+          documentId: null,
+          filingMethod: null,
+          filingConfirmationNumber: null,
+          mailTrackingNumber: null,
+          emailRecipient: null,
+          emailSubject: null,
+          emailSentAt: null,
+          filingConfirmedAt: null,
+          additionalRequestedAt: null,
+        }),
+        additionalRequestedAt: at,
+      }));
+      toast.info("Logged — showing as Additional Evidence Requested.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  // Evidence upload lives in exactly one place — Module 8 on the AI Report
+  // page — same real deep link CasePlanSection/DocumentsSection already use.
+  function goToModule8() {
+    updateIntake(buildAiReportIntakePatch(property));
+    window.open(`${import.meta.env.BASE_URL}ai-report?openModule=evidence`, "_blank");
+  }
+
+  const status = loading
+    ? null
+    : computeEvidenceStatus({
+        evidenceDocCount: evidenceDocuments.length,
+        criticalMissingCount,
+        submission,
+      });
+
+  return (
+    <div className="mt-4 card-elev p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-serif text-base font-semibold">Evidence</h4>
+        {status && (
+          <span
+            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              status === "complete" || status === "confirmed"
+                ? "bg-success/15 text-success"
+                : status === "additional_requested"
+                  ? "bg-destructive/10 text-destructive"
+                  : status === "awaiting_confirmation" || status === "submitted"
+                    ? "bg-warning/15 text-warning-foreground"
+                    : "bg-secondary text-muted-foreground"
+            }`}
+          >
+            {EVIDENCE_STATUS_LABEL[status]}
+          </span>
+        )}
+      </div>
+
+      {loading || !status ? (
+        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
+      ) : (
+        <>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {evidenceDocuments.length} evidence document{evidenceDocuments.length === 1 ? "" : "s"}{" "}
+            on this case
+            {criticalMissingCount != null &&
+              criticalMissingCount > 0 &&
+              ` · ${criticalMissingCount} critical item${criticalMissingCount === 1 ? "" : "s"} still missing`}
+            .
+          </p>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(status === "not_started" ||
+              status === "evidence_required" ||
+              status === "being_prepared") && (
+              <button onClick={goToModule8} className="btn-accent text-xs py-1.5">
+                Continue to Evidence
+              </button>
+            )}
+            {status === "ready_to_submit" && (
+              <button onClick={onOpen} className="btn-accent text-xs py-1.5">
+                Submit Evidence
+              </button>
+            )}
+            {(status === "submitted" || status === "awaiting_confirmation") && (
+              <button onClick={onOpen} className="btn-outline text-xs py-1.5">
+                View Submission
+              </button>
+            )}
+            {(status === "confirmed" || status === "complete") && (
+              <button
+                onClick={handleRequestAdditional}
+                disabled={requesting}
+                className="text-xs text-accent hover:underline disabled:opacity-60"
+              >
+                {requesting ? "Saving…" : "County asked for more?"}
+              </button>
+            )}
+            {status === "additional_requested" && (
+              <>
+                <button onClick={goToModule8} className="btn-accent text-xs py-1.5">
+                  Add Evidence
+                </button>
+                <button onClick={onOpen} className="btn-outline text-xs py-1.5">
+                  Continue to Evidence
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
