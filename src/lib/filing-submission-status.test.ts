@@ -1,69 +1,88 @@
 import { describe, it, expect } from "vitest";
 import { filingSubmissionStatus, hasFilingReferenceNumber } from "./filing-submission-status";
 
+function sub(
+  over: Partial<{
+    filingMethod: "online" | "mail" | "in_person" | "email" | null;
+    emailSentAt: string | null;
+    filingConfirmedAt: string | null;
+    additionalRequestedAt: string | null;
+  }> = {},
+) {
+  return {
+    filingMethod: null,
+    emailSentAt: null,
+    filingConfirmedAt: null,
+    additionalRequestedAt: null,
+    ...over,
+  };
+}
+
 describe("filingSubmissionStatus", () => {
   it("is unstarted when there's no submission row at all", () => {
     expect(filingSubmissionStatus(null)).toBe("unstarted");
   });
 
   it("is unstarted when a row exists but no method has been picked yet", () => {
-    expect(
-      filingSubmissionStatus({ filingMethod: null, emailSentAt: null, filingConfirmedAt: null }),
-    ).toBe("unstarted");
+    expect(filingSubmissionStatus(sub())).toBe("unstarted");
   });
 
   it("is method_chosen once a non-email method is picked, before confirming", () => {
     for (const method of ["online", "mail", "in_person"] as const) {
-      expect(
-        filingSubmissionStatus({
-          filingMethod: method,
-          emailSentAt: null,
-          filingConfirmedAt: null,
-        }),
-      ).toBe("method_chosen");
+      expect(filingSubmissionStatus(sub({ filingMethod: method }))).toBe("method_chosen");
     }
   });
 
   it("is method_chosen for email before it's been marked sent", () => {
-    expect(
-      filingSubmissionStatus({ filingMethod: "email", emailSentAt: null, filingConfirmedAt: null }),
-    ).toBe("method_chosen");
+    expect(filingSubmissionStatus(sub({ filingMethod: "email" }))).toBe("method_chosen");
   });
 
   it("is awaiting_confirmation once email is marked sent but not yet confirmed", () => {
     expect(
-      filingSubmissionStatus({
-        filingMethod: "email",
-        emailSentAt: "2026-02-01T00:00:00Z",
-        filingConfirmedAt: null,
-      }),
+      filingSubmissionStatus(sub({ filingMethod: "email", emailSentAt: "2026-02-01T00:00:00Z" })),
     ).toBe("awaiting_confirmation");
   });
 
   it("never reports awaiting_confirmation for a non-email method", () => {
-    expect(
-      filingSubmissionStatus({
-        filingMethod: "mail",
-        emailSentAt: null,
-        filingConfirmedAt: null,
-      }),
-    ).not.toBe("awaiting_confirmation");
+    expect(filingSubmissionStatus(sub({ filingMethod: "mail" }))).not.toBe("awaiting_confirmation");
   });
 
   it("is confirmed once filingConfirmedAt is set, regardless of method or email state", () => {
     expect(
-      filingSubmissionStatus({
-        filingMethod: "email",
-        emailSentAt: "2026-02-01T00:00:00Z",
-        filingConfirmedAt: "2026-02-10T00:00:00Z",
-      }),
+      filingSubmissionStatus(
+        sub({
+          filingMethod: "email",
+          emailSentAt: "2026-02-01T00:00:00Z",
+          filingConfirmedAt: "2026-02-10T00:00:00Z",
+        }),
+      ),
     ).toBe("confirmed");
     expect(
-      filingSubmissionStatus({
-        filingMethod: "online",
-        emailSentAt: null,
-        filingConfirmedAt: "2026-02-10T00:00:00Z",
-      }),
+      filingSubmissionStatus(
+        sub({ filingMethod: "online", filingConfirmedAt: "2026-02-10T00:00:00Z" }),
+      ),
+    ).toBe("confirmed");
+  });
+
+  it("is additional_requested once the county asks for more after a confirmation", () => {
+    expect(
+      filingSubmissionStatus(
+        sub({
+          filingConfirmedAt: "2026-02-10T00:00:00Z",
+          additionalRequestedAt: "2026-02-15T00:00:00Z",
+        }),
+      ),
+    ).toBe("additional_requested");
+  });
+
+  it("reverts to confirmed once a fresh confirmation supersedes an old request", () => {
+    expect(
+      filingSubmissionStatus(
+        sub({
+          filingConfirmedAt: "2026-03-01T00:00:00Z",
+          additionalRequestedAt: "2026-02-15T00:00:00Z",
+        }),
+      ),
     ).toBe("confirmed");
   });
 });

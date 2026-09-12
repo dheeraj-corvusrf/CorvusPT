@@ -39,6 +39,11 @@ export type FormSubmission = {
   // own word + real evidence, never auto-confirmed" discipline as
   // markFiled()/handleConfirmFiled elsewhere in this app.
   filingConfirmedAt: string | null;
+  // The county came back asking for more on this document, after it was
+  // already confirmed — see filingSubmissionStatus's own comment for how
+  // this and filingConfirmedAt resolve into one status (newest wins, so a
+  // fresh re-confirmation naturally clears an old request).
+  additionalRequestedAt: string | null;
 };
 
 type SubmissionRow = {
@@ -54,6 +59,7 @@ type SubmissionRow = {
   email_subject: string | null;
   email_sent_at: string | null;
   filing_confirmed_at: string | null;
+  additional_requested_at: string | null;
 };
 
 function fromRow(row: SubmissionRow): FormSubmission {
@@ -72,6 +78,7 @@ function fromRow(row: SubmissionRow): FormSubmission {
     emailSubject: row.email_subject,
     emailSentAt: row.email_sent_at,
     filingConfirmedAt: row.filing_confirmed_at,
+    additionalRequestedAt: row.additional_requested_at,
   };
 }
 
@@ -82,7 +89,7 @@ export async function getSubmission(
   const { data, error } = await supabase
     .from("protest_form_submissions")
     .select(
-      "field_values, signature_type, signature_data, signed_at, document_id, filing_method, filing_confirmation_number, mail_tracking_number, email_recipient, email_subject, email_sent_at, filing_confirmed_at",
+      "field_values, signature_type, signature_data, signed_at, document_id, filing_method, filing_confirmation_number, mail_tracking_number, email_recipient, email_subject, email_sent_at, filing_confirmed_at, additional_requested_at",
     )
     .eq("protest_id", protestId)
     .eq("form_type", formType)
@@ -213,6 +220,29 @@ export async function confirmFiling(
       user_id: userId,
       form_type: formType,
       filing_confirmed_at: at,
+      updated_at: at,
+    },
+    { onConflict: "protest_id,form_type" },
+  );
+  if (error) throw error;
+  return at;
+}
+
+// The county came back asking for more on this document — see
+// FormSubmission.additionalRequestedAt above. Returns the timestamp so the
+// caller can update its own local state without a re-fetch.
+export async function requestAdditionalInfo(
+  userId: string,
+  protestId: string,
+  formType: FormType,
+): Promise<string> {
+  const at = new Date().toISOString();
+  const { error } = await supabase.from("protest_form_submissions").upsert(
+    {
+      protest_id: protestId,
+      user_id: userId,
+      form_type: formType,
+      additional_requested_at: at,
       updated_at: at,
     },
     { onConflict: "protest_id,form_type" },

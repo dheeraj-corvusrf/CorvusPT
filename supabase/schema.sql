@@ -2070,6 +2070,13 @@ alter table public.protest_form_submissions add column if not exists email_recip
 alter table public.protest_form_submissions add column if not exists email_subject text;
 alter table public.protest_form_submissions add column if not exists email_sent_at timestamptz;
 alter table public.protest_form_submissions add column if not exists filing_confirmed_at timestamptz;
+-- Generalized across all four documents (not just Evidence) — a county could
+-- in principle bounce back a request on any of them. Set whenever the county
+-- asks for more after a confirmation; a later, fresher filing_confirmed_at
+-- naturally supersedes it (see filingSubmissionStatus's own comment) — no
+-- separate "clear this" step needed. See View Case's Filed Protest / Evidence
+-- status cards (CaseDetailModal.tsx).
+alter table public.protest_form_submissions add column if not exists additional_requested_at timestamptz;
 
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
