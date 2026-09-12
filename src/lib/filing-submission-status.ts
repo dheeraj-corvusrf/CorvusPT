@@ -1,13 +1,18 @@
 // Pure status derivation for the Filing Method & Submission workflow — the
 // same real fields protest-form-submissions.ts already persists, read back
-// into one of five states so every surface (FilingStepBar, the per-document
+// into one of six states so every surface (FilingStepBar, the per-document
 // panel's own status line, View Case's Filed Protest / Evidence status
 // cards) agrees on what "done" means without re-deriving it differently in
 // each place.
 import type { FormSubmission } from "./protest-form-submissions";
 
 export type FilingSubmissionStatus =
-  "unstarted" | "method_chosen" | "awaiting_confirmation" | "confirmed" | "additional_requested";
+  | "unstarted"
+  | "method_chosen"
+  | "awaiting_confirmation"
+  | "confirmed"
+  | "additional_requested"
+  | "rejected";
 
 export const FILING_SUBMISSION_STATUS_LABEL: Record<FilingSubmissionStatus, string> = {
   unstarted: "Not yet submitted",
@@ -15,42 +20,72 @@ export const FILING_SUBMISSION_STATUS_LABEL: Record<FilingSubmissionStatus, stri
   awaiting_confirmation: "Awaiting County Confirmation",
   confirmed: "Confirmed",
   additional_requested: "Additional Information Requested",
+  rejected: "Rejected",
 };
 
 type StatusFields = Pick<
   FormSubmission,
-  "filingMethod" | "emailSentAt" | "filingConfirmedAt" | "additionalRequestedAt"
+  | "filingMethod"
+  | "submittedAt"
+  | "filingConfirmedAt"
+  | "additionalRequestedAt"
+  | "rejectedAt"
 >;
 
 export function filingSubmissionStatus(submission: StatusFields | null): FilingSubmissionStatus {
   if (!submission) return "unstarted";
-  const { filingConfirmedAt, additionalRequestedAt } = submission;
-  // Newest timestamp wins — a request that came in after the last
-  // confirmation takes priority; a fresh confirmFiling() call after that
-  // (the user re-submitted) naturally supersedes it again, with no separate
-  // "clear the request" step anywhere.
-  if (additionalRequestedAt && (!filingConfirmedAt || additionalRequestedAt > filingConfirmedAt)) {
-    return "additional_requested";
+  const { filingConfirmedAt, additionalRequestedAt, rejectedAt, submittedAt } = submission;
+
+  // Whichever of the three real "the county did something" events is
+  // newest wins — so a fresh re-confirmation after a rejection or an
+  // additional-info request naturally supersedes it, with no separate
+  // "clear this" step anywhere.
+  const events: { at: string; status: FilingSubmissionStatus }[] = [
+    ...(filingConfirmedAt ? [{ at: filingConfirmedAt, status: "confirmed" as const }] : []),
+    ...(additionalRequestedAt
+      ? [{ at: additionalRequestedAt, status: "additional_requested" as const }]
+      : []),
+    ...(rejectedAt ? [{ at: rejectedAt, status: "rejected" as const }] : []),
+  ];
+  if (events.length > 0) {
+    events.sort((a, b) => (a.at < b.at ? 1 : -1));
+    return events[0].status;
   }
-  if (filingConfirmedAt) return "confirmed";
-  // Email is the one method with a real middle state: the user told us they
-  // sent it, but nothing here reads a reply — see confirmFiling's own
-  // comment. Every other method treats a real reference number or an
-  // uploaded proof document as confirmation-ready in one step.
-  if (submission.filingMethod === "email" && submission.emailSentAt) {
-    return "awaiting_confirmation";
-  }
+
+  // The customer's own "I delivered this" report — the same real signal
+  // for every method now (Online/Mail/In Person included, not just Email).
+  if (submittedAt) return "awaiting_confirmation";
   if (submission.filingMethod) return "method_chosen";
   return "unstarted";
 }
 
 // A typed confirmation/tracking number is real proof on its own — an uploaded
 // document is the other, separately-tracked kind (see getFilingProofDocumentsFor
-// in documents.ts); the caller combines both when deciding whether "Confirm"
-// should be enabled.
+// in documents.ts); the caller combines both when deciding whether "Mark as
+// Submitted" should be enabled.
 export function hasFilingReferenceNumber(
   submission: Pick<FormSubmission, "filingConfirmationNumber" | "mailTrackingNumber"> | null,
 ): boolean {
   if (!submission) return false;
   return !!(submission.filingConfirmationNumber?.trim() || submission.mailTrackingNumber?.trim());
+}
+
+// What kind of proof this method's own confirmation actually looks like —
+// real, county-process fact (not invented per-county data; every county uses
+// one of these four real channels the same general way).
+export function confirmationMethodDescription(
+  method: FormSubmission["filingMethod"],
+): string | null {
+  switch (method) {
+    case "online":
+      return "County portal confirmation, receipt, confirmation number, or screenshot";
+    case "email":
+      return "County acknowledgement or response through email";
+    case "mail":
+      return "Mailing receipt, delivery/tracking evidence, and county acknowledgement where applicable";
+    case "in_person":
+      return "Stamped copy, receipt, or county acknowledgement";
+    case null:
+      return null;
+  }
 }

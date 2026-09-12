@@ -11,10 +11,10 @@ export type EvidenceStatusStage =
   | "evidence_required"
   | "being_prepared"
   | "ready_to_submit"
-  | "submitted"
   | "awaiting_confirmation"
   | "confirmed"
   | "additional_requested"
+  | "rejected"
   | "complete";
 
 export const EVIDENCE_STATUS_LABEL: Record<EvidenceStatusStage, string> = {
@@ -22,10 +22,10 @@ export const EVIDENCE_STATUS_LABEL: Record<EvidenceStatusStage, string> = {
   evidence_required: "Evidence Required",
   being_prepared: "Evidence Being Prepared",
   ready_to_submit: "Ready to Submit",
-  submitted: "Submitted",
   awaiting_confirmation: "Awaiting Confirmation",
   confirmed: "Evidence Confirmed",
   additional_requested: "Additional Evidence Requested",
+  rejected: "Evidence Rejected",
   complete: "Evidence Complete",
 };
 
@@ -39,13 +39,14 @@ export type EvidenceStatusInput = {
   criticalMissingCount: number | null;
   submission: Pick<
     FormSubmission,
-    "filingMethod" | "emailSentAt" | "filingConfirmedAt" | "additionalRequestedAt"
+    "filingMethod" | "submittedAt" | "filingConfirmedAt" | "additionalRequestedAt" | "rejectedAt"
   > | null;
 };
 
 export function computeEvidenceStatus(input: EvidenceStatusInput): EvidenceStatusStage {
   const subStatus = filingSubmissionStatus(input.submission);
 
+  if (subStatus === "rejected") return "rejected";
   if (subStatus === "additional_requested") return "additional_requested";
   if (subStatus === "confirmed") {
     return input.criticalMissingCount === null || input.criticalMissingCount === 0
@@ -53,9 +54,10 @@ export function computeEvidenceStatus(input: EvidenceStatusInput): EvidenceStatu
       : "confirmed";
   }
   if (subStatus === "awaiting_confirmation") return "awaiting_confirmation";
-  if (subStatus === "method_chosen") return "submitted";
 
-  // No method chosen yet — readiness is purely about the evidence itself.
+  // Neither "method_chosen" nor "unstarted" involves the county yet —
+  // readiness before that point is purely about the evidence itself, a
+  // method noted but not yet acted on still just means "ready."
   if (input.evidenceDocCount === 0) {
     return input.criticalMissingCount === null ? "not_started" : "evidence_required";
   }
@@ -63,4 +65,14 @@ export function computeEvidenceStatus(input: EvidenceStatusInput): EvidenceStatu
     return "being_prepared";
   }
   return "ready_to_submit";
+}
+
+// A plain completeness percentage over Module 8's own checklist — "how much
+// of what Corvus verified is actually in hand," not a re-judgment of any
+// item. null (not 0) when Module 8 hasn't run yet, same "genuinely unknown
+// vs. actually zero" discipline as criticalMissingCount above.
+export function evidenceScore(items: { status: "Verified" | "Found" | "Missing" }[] | null): number | null {
+  if (!items || items.length === 0) return null;
+  const nonMissing = items.filter((i) => i.status !== "Missing").length;
+  return Math.round((nonMissing / items.length) * 100);
 }

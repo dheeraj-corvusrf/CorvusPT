@@ -2077,6 +2077,22 @@ alter table public.protest_form_submissions add column if not exists filing_conf
 -- separate "clear this" step needed. See View Case's Filed Protest / Evidence
 -- status cards (CaseDetailModal.tsx).
 alter table public.protest_form_submissions add column if not exists additional_requested_at timestamptz;
+-- submitted_at is the generic "the customer says they delivered this"
+-- marker for EVERY method (Online/Mail/In Person included, not just Email's
+-- own email_sent_at) — see filingSubmissionStatus's own comment for how the
+-- three real event timestamps (filing_confirmed_at, additional_requested_at,
+-- rejected_at) plus this one resolve into a single status.
+alter table public.protest_form_submissions add column if not exists submitted_at timestamptz;
+alter table public.protest_form_submissions add column if not exists rejected_at timestamptz;
+-- Generate Evidence Package's own reminder setting — only meaningful on the
+-- 'evidence' row; see send-evidence-reminders (pg_cron, daily).
+alter table public.protest_form_submissions add column if not exists reminder_frequency text default 'daily';
+alter table public.protest_form_submissions
+  drop constraint if exists protest_form_submissions_reminder_frequency_check;
+alter table public.protest_form_submissions
+  add constraint protest_form_submissions_reminder_frequency_check
+  check (reminder_frequency is null or reminder_frequency in ('daily', 'weekly', 'off'));
+alter table public.protest_form_submissions add column if not exists last_reminder_sent_at timestamptz;
 
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,

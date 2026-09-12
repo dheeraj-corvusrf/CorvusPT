@@ -10,6 +10,7 @@ export type FormType =
   "notice_of_protest" | "appointment_of_agent" | "evidence_declaration" | "evidence";
 
 export type FilingMethod = "online" | "mail" | "in_person" | "email";
+export type ReminderFrequency = "daily" | "weekly" | "off";
 
 export type FormSubmission = {
   fieldValues: FieldValues;
@@ -34,6 +35,11 @@ export type FormSubmission = {
   emailRecipient: string | null;
   emailSubject: string | null;
   emailSentAt: string | null;
+  // The generic "the customer says they delivered this" marker — every
+  // method sets this now (Online/Mail/In Person included, not just Email),
+  // distinct from filingConfirmedAt: this is the customer's own report,
+  // filingConfirmedAt is the county's real, later confirmation.
+  submittedAt: string | null;
   // The user's own explicit "yes, the county has this" — set once real proof
   // (a reference number or an uploaded document) is on file. Same "customer's
   // own word + real evidence, never auto-confirmed" discipline as
@@ -44,6 +50,13 @@ export type FormSubmission = {
   // this and filingConfirmedAt resolve into one status (newest wins, so a
   // fresh re-confirmation naturally clears an old request).
   additionalRequestedAt: string | null;
+  // The county rejected this document — same newest-timestamp precedence
+  // against filingConfirmedAt/additionalRequestedAt.
+  rejectedAt: string | null;
+  // Generate Evidence Package's own setting — only meaningful on the
+  // "evidence" row; drives send-evidence-reminders (pg_cron, daily).
+  reminderFrequency: ReminderFrequency | null;
+  lastReminderSentAt: string | null;
 };
 
 type SubmissionRow = {
@@ -58,8 +71,12 @@ type SubmissionRow = {
   email_recipient: string | null;
   email_subject: string | null;
   email_sent_at: string | null;
+  submitted_at: string | null;
   filing_confirmed_at: string | null;
   additional_requested_at: string | null;
+  rejected_at: string | null;
+  reminder_frequency: ReminderFrequency | null;
+  last_reminder_sent_at: string | null;
 };
 
 function fromRow(row: SubmissionRow): FormSubmission {
@@ -77,8 +94,12 @@ function fromRow(row: SubmissionRow): FormSubmission {
     emailRecipient: row.email_recipient,
     emailSubject: row.email_subject,
     emailSentAt: row.email_sent_at,
+    submittedAt: row.submitted_at,
     filingConfirmedAt: row.filing_confirmed_at,
     additionalRequestedAt: row.additional_requested_at,
+    rejectedAt: row.rejected_at,
+    reminderFrequency: row.reminder_frequency,
+    lastReminderSentAt: row.last_reminder_sent_at,
   };
 }
 
@@ -89,7 +110,7 @@ export async function getSubmission(
   const { data, error } = await supabase
     .from("protest_form_submissions")
     .select(
-      "field_values, signature_type, signature_data, signed_at, document_id, filing_method, filing_confirmation_number, mail_tracking_number, email_recipient, email_subject, email_sent_at, filing_confirmed_at, additional_requested_at",
+      "field_values, signature_type, signature_data, signed_at, document_id, filing_method, filing_confirmation_number, mail_tracking_number, email_recipient, email_subject, email_sent_at, submitted_at, filing_confirmed_at, additional_requested_at, rejected_at, reminder_frequency, last_reminder_sent_at",
     )
     .eq("protest_id", protestId)
     .eq("form_type", formType)
@@ -205,6 +226,31 @@ export async function saveFilingProofFields(
   if (error) throw error;
 }
 
+// The customer's own "I delivered this" report — the first of the three real
+// event timestamps filingSubmissionStatus resolves into a single status
+// (Submitted/Awaiting Confirmation reads off this one; Confirmed/Rejected/
+// Additional Requested are their own, later events). Same for every method,
+// not just Email.
+export async function markSubmitted(
+  userId: string,
+  protestId: string,
+  formType: FormType,
+): Promise<string> {
+  const at = new Date().toISOString();
+  const { error } = await supabase.from("protest_form_submissions").upsert(
+    {
+      protest_id: protestId,
+      user_id: userId,
+      form_type: formType,
+      submitted_at: at,
+      updated_at: at,
+    },
+    { onConflict: "protest_id,form_type" },
+  );
+  if (error) throw error;
+  return at;
+}
+
 // The real, honest "this document is with the county" signal — see
 // FormSubmission.filingConfirmedAt above. Returns the timestamp so the caller
 // can update its own local state without a re-fetch.
@@ -249,4 +295,46 @@ export async function requestAdditionalInfo(
   );
   if (error) throw error;
   return at;
+}
+
+// The county rejected this document — see FormSubmission.rejectedAt above.
+export async function markRejected(
+  userId: string,
+  protestId: string,
+  formType: FormType,
+): Promise<string> {
+  const at = new Date().toISOString();
+  const { error } = await supabase.from("protest_form_submissions").upsert(
+    {
+      protest_id: protestId,
+      user_id: userId,
+      form_type: formType,
+      rejected_at: at,
+      updated_at: at,
+    },
+    { onConflict: "protest_id,form_type" },
+  );
+  if (error) throw error;
+  return at;
+}
+
+// Generate Evidence Package's own reminder-cadence setting — read by
+// send-evidence-reminders (pg_cron, daily).
+export async function saveReminderFrequency(
+  userId: string,
+  protestId: string,
+  formType: FormType,
+  frequency: ReminderFrequency,
+): Promise<void> {
+  const { error } = await supabase.from("protest_form_submissions").upsert(
+    {
+      protest_id: protestId,
+      user_id: userId,
+      form_type: formType,
+      reminder_frequency: frequency,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "protest_id,form_type" },
+  );
+  if (error) throw error;
 }
