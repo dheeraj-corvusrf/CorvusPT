@@ -233,6 +233,24 @@ export async function acknowledgeGuidance(protestId: string): Promise<void> {
   if (error) throw error;
 }
 
+// Fixes the one real scenario the Pre-Filing Check's Tax Year row can flag
+// that editing the PROPERTY record can never resolve: protests.tax_year is a
+// snapshot captured once at requestProtest() time, so it goes stale if the
+// property's own tax_year later rolls to a new year (a new CAD cycle lands)
+// while this protest is still in progress. See getPreFilingCheck's
+// resolveField: "protest" in pre-filing-check.ts.
+export async function updateProtestTaxYear(
+  protestId: string,
+  taxYear: number,
+): Promise<{ taxYear: number }> {
+  const { error } = await supabase
+    .from("protests")
+    .update({ tax_year: taxYear })
+    .eq("id", protestId);
+  if (error) throw error;
+  return { taxYear };
+}
+
 export async function listProtests(userId: string): Promise<ProtestRecord[]> {
   const { data, error } = await supabase
     .from("protests")

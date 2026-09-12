@@ -119,7 +119,14 @@ function Home() {
             </Link>
           </div>
         </div>
-        <div className="container-page pt-8 pb-0 md:pt-12 md:pb-2">
+        {/* pt-16 (not pt-8) below md — the flyby banner above is absolutely
+            positioned at top: 1.5rem and stands ~40px tall, so on a mobile
+            viewport (where the heading wraps to more, larger-relative-size
+            lines starting right after this padding) an 8-unit gap let the
+            banner fly directly across the heading text instead of clearing
+            it. md:pt-12 is unchanged — not reported broken there, and this
+            reserves real layout space rather than guessing a coordinate. */}
+        <div className="container-page pt-16 pb-0 md:pt-12 md:pb-2">
           <div className="mx-auto max-w-3xl text-center">
             <h1 className="font-serif text-3xl sm:text-4xl md:text-6xl font-semibold leading-[1.15] md:leading-[1.1]">
               AI Property Tax Management
