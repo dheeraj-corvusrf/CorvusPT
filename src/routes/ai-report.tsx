@@ -77,11 +77,13 @@ import {
 import {
   getModuleAnalysis,
   askModuleQuestion,
+  EVIDENCE_CATEGORY_ORDER,
   type BatchModuleId,
   type ModuleAnalysisInput,
   type ModuleResultMap,
   type StrategyEntry,
 } from "@/lib/ai-report-modules";
+import { computeEvidenceReadiness } from "@/lib/evidence-readiness";
 import { getComps, type CompsResult, type CompProperty } from "@/lib/cad-comps";
 import { getSiteGis, type SiteGisResult } from "@/lib/site-gis";
 import { geocodeAddress, type GeocodedPoint } from "@/lib/geocode";
@@ -157,7 +159,7 @@ import {
 } from "@/lib/data-sheet";
 import { analyzeEvidence, type EvidenceAnalysis, type DocumentStatus } from "@/lib/protest-reason";
 import { buildEvidencePacket } from "@/lib/evidence-packet";
-import { categorizeEvidenceUploads } from "@/lib/evidence-categorize";
+import { categorizeEvidenceUploads, evidenceItemSlug } from "@/lib/evidence-categorize";
 import { downloadPdf } from "@/lib/protest-documents";
 import {
   listModuleOverrides,
@@ -948,6 +950,44 @@ function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalEvidenceCount]);
 
+  // Module 8 Part 8's feed-forward: when a real evidence item TRANSITIONS to
+  // Verified with a relatedModule attached, the Module 2-7 finding it names
+  // is now backed by real evidence that finding's own last run didn't have
+  // — so re-run that module for real, not just a "you might want to
+  // refresh" hint. Compares against each item's own previously-seen status
+  // (not just "have we ever triggered this key") so the property's initial
+  // checklist — which can already show items Verified from day one, e.g.
+  // straight off authoritativeFacts — is captured as a silent baseline on
+  // first sight, never itself treated as a transition. Resets on property
+  // change so a revisited property gets a fresh baseline.
+  const evidenceStatusSeenRef = useRef<{ propertyId: string | null; status: Map<string, string> }>({
+    propertyId: null,
+    status: new Map(),
+  });
+  useEffect(() => {
+    const items = (moduleData.evidence?.data as ModuleResultMap["evidence"] | undefined)?.items;
+    if (!items || !resolvedProperty) return;
+    if (evidenceStatusSeenRef.current.propertyId !== resolvedProperty.id) {
+      evidenceStatusSeenRef.current = { propertyId: resolvedProperty.id, status: new Map() };
+    }
+    const seen = evidenceStatusSeenRef.current.status;
+    for (const it of items) {
+      const status = it.status ?? (it.availability === "Low" ? "Missing" : "Found");
+      const key = it.item;
+      const previous = seen.get(key);
+      seen.set(key, status);
+      if (previous === undefined) continue; // baseline — not a transition
+      if (previous !== "Verified" && status === "Verified" && it.relatedModule) {
+        const rm = MODULES.find((mm) => mm.id === it.relatedModule);
+        loadModule(it.relatedModule, { force: true });
+        toast.info(
+          `New evidence confirmed — refreshing ${rm?.shortName ?? it.relatedModule} with the latest evidence.`,
+        );
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moduleData.evidence?.data, resolvedProperty?.id]);
+
   // Save owner-confirmed income figures. Optimistic; the effect above then
   // re-runs Module 7 with the fresh numbers. The form always sends the
   // complete field set (values or explicit null), so this is a passthrough.
@@ -1558,6 +1598,33 @@ function Report() {
             );
           }
         }
+      }
+      const improvementData = moduleData.improvement?.data as
+        ModuleResultMap["improvement"] | undefined;
+      if (improvementData) {
+        const poorComponents = improvementData.buildingComponents
+          .filter((c) => !c.notApplicable && c.condition === "Poor")
+          .map((c) => c.component);
+        const obsolescenceParts: string[] = [];
+        if (improvementData.functionalObsolescencePct != null)
+          obsolescenceParts.push(
+            `functional obsolescence ${improvementData.functionalObsolescencePct}%`,
+          );
+        if (improvementData.externalObsolescencePct != null)
+          obsolescenceParts.push(
+            `external/economic obsolescence ${improvementData.externalObsolescencePct}%`,
+          );
+        facts.push(
+          `Improvement Condition (Module 5): ` +
+            (poorComponents.length > 0
+              ? `${poorComponents.join(", ")} rated Poor condition`
+              : "no building component rated Poor from an uploaded photo") +
+            (obsolescenceParts.length > 0 ? `; ${obsolescenceParts.join(", ")}` : "") +
+            (improvementData.effectiveAgeYears != null
+              ? `; effective age ~${improvementData.effectiveAgeYears} years`
+              : "") +
+            `.`,
+        );
       }
       const zoningData = moduleData.zoning?.data as ModuleResultMap["zoning"] | undefined;
       if (zoningData) {
@@ -6099,20 +6166,6 @@ function strategySlug(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-// Same stable-slug convention as strategySlug above, for Module 8's own
-// evidence-checklist items — used to tag an upload with the exact checklist
-// category it belongs to (documentType `Evidence Category: ${slug}`, see
-// EvidenceCategoryRow below), so a document uploaded under one category
-// keeps showing there even if the AI's own item wording shifts slightly on
-// a later regenerate (the same real real-world category, matched by slug,
-// not by exact string).
-function evidenceItemSlug(item: string): string {
-  return item
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 // Compact ranked row for the card preview — used by both ModuleVisual's
 // "strategy" case and StrategyDetail's header below. Row order itself
 // already conveys rank (top = strongest), so no separate number badge.
@@ -8950,6 +9003,10 @@ function ModulePreviewContent({
   // uploadingEvidence (the actual upload itself).
   const [expandedEvidenceItem, setExpandedEvidenceItem] = useState<string | null>(null);
   const [categorizingEvidence, setCategorizingEvidence] = useState(false);
+  // Part 2's "library" view — group the same real items by category instead
+  // of by priority. Priority stays the default (Part 3 explicitly wants
+  // prioritization first); this is just a different lens on the same data.
+  const [evidenceGroupBy, setEvidenceGroupBy] = useState<"priority" | "category">("priority");
   // Module 5's optional "which component" tag on the single upload — "" means
   // let AI decide (categorizeEvidenceUploads).
   const [improvementUploadCat, setImprovementUploadCat] = useState("");
@@ -10464,6 +10521,7 @@ function ModulePreviewContent({
             resolvedProperty,
             protestEvidenceDocs,
             analysis.documentFindings,
+            d.items,
           );
           const filenameBase = resolvedProperty.accountNumber ?? resolvedProperty.id;
           downloadPdf(bytes, `Evidence-Packet-${filenameBase}.pdf`);
@@ -10499,8 +10557,15 @@ function ModulePreviewContent({
         );
       };
 
+      // Part 2's library grouping — only categories actually present for
+      // this property/strategy are shown, never a padded generic 11-row
+      // list ("AI should not require every document").
+      const categoriesPresent = EVIDENCE_CATEGORY_ORDER.filter((cat) =>
+        d.items.some((it) => (it.category ?? "Other Supporting Evidence") === cat),
+      );
+
       return (
-        <div className="mt-4 grid gap-3">
+        <div className="mt-4 grid gap-3" id="evidence-checklist-top">
           {allowEvidenceUpload && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3">
               <div className="min-w-0 text-xs text-muted-foreground">
@@ -10523,40 +10588,156 @@ function ModulePreviewContent({
             </div>
           )}
 
-          {needsActionItems.length > 0 && (
-            <div className="grid gap-2 rounded-md bg-destructive/5 p-2">
-              <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-destructive">
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Needs your action — {needsActionItems.length} critical item
-                {needsActionItems.length === 1 ? "" : "s"} missing
-              </div>
-              {needsActionItems.map(renderEvidenceRow)}
+          {categoriesPresent.length > 1 && (
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-muted-foreground">Group by:</span>
+              {(["priority", "category"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setEvidenceGroupBy(mode)}
+                  className={`rounded-full px-2 py-0.5 font-medium capitalize ${
+                    evidenceGroupBy === mode
+                      ? "bg-accent/15 text-accent"
+                      : "text-muted-foreground hover:bg-secondary/60"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
             </div>
           )}
 
-          {onFileItems.length > 0 && (
-            <div className="grid gap-2">
-              <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
-                On file &amp; verified — {onFileItems.length}
-              </div>
-              {onFileItems.map(renderEvidenceRow)}
+          {evidenceGroupBy === "priority" ? (
+            <>
+              {needsActionItems.length > 0 && (
+                <div
+                  id="evidence-needs-action"
+                  className="grid gap-2 rounded-md bg-destructive/5 p-2"
+                >
+                  <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-destructive">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    Needs your action — {needsActionItems.length} critical item
+                    {needsActionItems.length === 1 ? "" : "s"} missing
+                  </div>
+                  {needsActionItems.map(renderEvidenceRow)}
+                </div>
+              )}
+
+              {onFileItems.length > 0 && (
+                <div className="grid gap-2">
+                  <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                    On file &amp; verified — {onFileItems.length}
+                  </div>
+                  {onFileItems.map(renderEvidenceRow)}
+                </div>
+              )}
+
+              {strengthenItems.length > 0 && (
+                <div className="grid gap-2">
+                  <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                    Strengthen your case (optional) — {strengthenItems.length}
+                  </div>
+                  <p className="-mt-1 text-[11px] text-muted-foreground">
+                    None of these block your protest — they add weight where the case is thin.
+                  </p>
+                  {strengthenItems.map(renderEvidenceRow)}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="grid gap-3">
+              {categoriesPresent.map((cat) => {
+                const inCategory = d.items.filter(
+                  (it) => (it.category ?? "Other Supporting Evidence") === cat,
+                );
+                return (
+                  <div key={cat} className="grid gap-2">
+                    <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                      {cat} — {inCategory.length}
+                    </div>
+                    {inCategory.map(renderEvidenceRow)}
+                  </div>
+                );
+              })}
             </div>
           )}
 
-          {strengthenItems.length > 0 && (
-            <div className="grid gap-2">
-              <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
-                Strengthen your case (optional) — {strengthenItems.length}
+          {/* Part 7's "Evidence Completeness Check" — real counts by
+              priority tier, never a re-judgment of any item, and never
+              blocking: only Critical missing changes the completion label,
+              exactly the "only Critical blocks" rule Part 3 already set. */}
+          {d.items.length > 0 && (
+            <div className="grid gap-2 rounded-md border border-border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                  Evidence Readiness
+                </div>
+                <span
+                  className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    needsActionItems.length > 0
+                      ? "bg-warning/15 text-warning-foreground"
+                      : "bg-success/15 text-success"
+                  }`}
+                >
+                  {needsActionItems.length > 0
+                    ? "Incomplete — Additional Evidence Recommended"
+                    : "Complete"}
+                </span>
               </div>
-              <p className="-mt-1 text-[11px] text-muted-foreground">
-                None of these block your protest — they add weight where the case is thin.
-              </p>
-              {strengthenItems.map(renderEvidenceRow)}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs sm:grid-cols-3">
+                {(
+                  [
+                    ["Critical Evidence", "Critical"],
+                    ["Important Evidence", "Important"],
+                    ["Supporting Evidence", "Supporting"],
+                  ] as const
+                ).map(([label, tier]) => {
+                  const total = d.items.filter((i) => evPriority(i) === tier).length;
+                  const have = d.items.filter(
+                    (i) => evPriority(i) === tier && evStatus(i) !== "Missing",
+                  ).length;
+                  return total > 0 ? (
+                    <div key={tier}>
+                      <span className="text-muted-foreground">{label}: </span>
+                      <span className="font-medium">
+                        {have} of {total}
+                      </span>
+                    </div>
+                  ) : null;
+                })}
+                <div>
+                  <span className="text-muted-foreground">Missing Evidence: </span>
+                  <span className="font-medium">
+                    {d.items.filter((i) => evStatus(i) === "Missing").length}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Evidence Packet: </span>
+                  <span className="font-medium">
+                    {analysis && packetEligibleCount > 0 && needsActionItems.length === 0
+                      ? "Ready"
+                      : "In Progress"}
+                  </span>
+                </div>
+              </div>
+              {needsActionItems.length > 0 && (
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-semibold text-foreground">
+                    Additional Evidence Recommended
+                  </span>{" "}
+                  — one or more important items are still missing. You can continue, but obtaining
+                  the recommended evidence could strengthen the identified protest arguments.
+                </p>
+              )}
             </div>
           )}
 
           {allowEvidenceUpload && (
-            <div className="border-t border-border/60 pt-4 print:hidden">
+            <div
+              id="evidence-upload-section"
+              className="border-t border-border/60 pt-4 print:hidden"
+            >
               <div className="text-sm font-medium">Upload Evidence</div>
               <p className="text-xs text-muted-foreground">
                 Add documents in bulk — AI reads each one and sorts it into the matching category
@@ -10690,6 +10871,120 @@ function ModulePreviewContent({
               {packetError && <p className="mt-1 text-xs text-destructive">{packetError}</p>}
             </div>
           )}
+
+          {/* Part 8's end-of-module Evidence Summary — every number reused
+              from state already computed above, plus the one pure rollup
+              (strategiesSupported/overall) from evidence-readiness.ts. */}
+          {d.items.length > 0 &&
+            (() => {
+              const readiness = computeEvidenceReadiness(
+                d.items.map((it) => ({
+                  status: evStatus(it),
+                  priority: evPriority(it),
+                  relatedModule: it.relatedModule ?? null,
+                })),
+              );
+              const packetReady =
+                !!analysis && packetEligibleCount > 0 && needsActionItems.length === 0;
+              const nextModule = MODULES.find((mm) => mm.id === "executive");
+              const scrollTo = (id: string) =>
+                document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+              return (
+                <div className="grid gap-3 rounded-lg border border-border bg-secondary/20 p-4 print:hidden">
+                  <div className="font-serif text-base font-semibold">Evidence Summary</div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs sm:grid-cols-3">
+                    <div>
+                      <span className="text-muted-foreground">Protest Strategies Supported: </span>
+                      <span className="font-medium">{readiness.strategiesSupported}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Evidence Items Identified: </span>
+                      <span className="font-medium">{readiness.itemsIdentified}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Evidence Uploaded: </span>
+                      <span className="font-medium">{protestEvidenceDocs.length}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Evidence Verified: </span>
+                      <span className="font-medium">{readiness.verifiedCount}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Critical Evidence Missing: </span>
+                      <span className="font-medium">{readiness.criticalMissingCount}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Evidence Packet: </span>
+                      <span className="font-medium">{packetReady ? "Ready" : "In Progress"}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-muted-foreground">Overall Evidence Readiness:</span>
+                    <span
+                      className={`font-semibold ${
+                        readiness.overall === "Strong"
+                          ? "text-success"
+                          : readiness.overall === "Moderate"
+                            ? "text-warning-foreground"
+                            : "text-destructive"
+                      }`}
+                    >
+                      {readiness.overall}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    This is an evidence-readiness assessment, not a prediction of protest success.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+                    {allowEvidenceUpload && (
+                      <button
+                        type="button"
+                        onClick={() => scrollTo("evidence-upload-section")}
+                        className="btn-primary text-xs py-1.5"
+                      >
+                        Upload Evidence
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => scrollTo("evidence-checklist-top")}
+                      className="btn-outline text-xs py-1.5"
+                    >
+                      View Evidence Plan
+                    </button>
+                    {needsActionItems.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEvidenceGroupBy("priority");
+                          scrollTo("evidence-needs-action");
+                        }}
+                        className="btn-outline text-xs py-1.5"
+                      >
+                        View Missing Evidence
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleDownloadPacket}
+                      disabled={!analysis || downloadingPacket || packetEligibleCount === 0}
+                      className="btn-outline text-xs py-1.5 disabled:opacity-60"
+                    >
+                      {downloadingPacket ? "Compiling…" : "Download Evidence Packet"}
+                    </button>
+                    {nextModule && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenModule(nextModule.id)}
+                        className="btn-outline text-xs py-1.5"
+                      >
+                        Continue to {nextModule.shortName}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
         </div>
       );
     }
@@ -11447,10 +11742,30 @@ function EvidenceCategoryRow({
 
       {expanded && (
         <div className="grid gap-2 border-t border-black/5 px-3 pb-3 pt-2.5">
+          {it.category && (
+            <span className="w-fit rounded-full bg-background/70 px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground">
+              {it.category}
+            </span>
+          )}
           {it.whyNeeded && (
             <p className="text-xs">
               <span className="font-semibold">Why it matters: </span>
               <span className="text-muted-foreground">{it.whyNeeded}</span>
+            </p>
+          )}
+          {it.relatedModule &&
+            (() => {
+              const rm = MODULES.find((mm) => mm.id === it.relatedModule);
+              return rm ? (
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-semibold text-foreground">Supports: </span>
+                  {rm.shortName}
+                </p>
+              ) : null;
+            })()}
+          {it.contributionNote && status !== "Missing" && (
+            <p className="rounded-md bg-accent/5 p-1.5 text-xs text-accent">
+              {it.contributionNote}
             </p>
           )}
           {it.verificationNote && (
