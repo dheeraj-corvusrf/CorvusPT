@@ -220,6 +220,70 @@ export type StrategyEntry = {
   dataSufficient: boolean;
 };
 
+// Part 2's "potential evidence documents" library groups, in canonical
+// display order — an item is tagged with exactly one, "Other Supporting
+// Evidence" is the catch-all for a stale cached row without one. Shared by
+// ai-report.tsx's category-grouped view and evidence-packet.ts's
+// strategy-section packet reorg, so both read the same 11 names.
+export const EVIDENCE_CATEGORY_ORDER = [
+  "Property Condition & Physical Evidence",
+  "Property Characteristics & Site Evidence",
+  "Zoning, Land Use & Legal Restrictions",
+  "Valuation & Comparable Evidence",
+  "Income & Commercial Property Evidence",
+  "Functional Obsolescence",
+  "Economic Issues",
+  "Special-Purpose / Specialized Property Evidence",
+  "Ownership & Transaction Evidence",
+  "Tax Protest & County Evidence",
+  "Other Supporting Evidence",
+] as const;
+export type EvidenceCategory = (typeof EVIDENCE_CATEGORY_ORDER)[number];
+
+export type EvidenceRelatedModule =
+  "comps" | "site" | "improvement" | "zoning" | "income" | "strategy";
+
+export type EvidenceItem = {
+  item: string;
+  // priority is the real driver now — only "Critical" items block the
+  // user; Important/Supporting/Optional are shown as ways to strengthen
+  // the case. importance/availability are kept, DERIVED from
+  // priority/status, so the quadrant card + executive readiness keep
+  // working while callers migrate. See MODULE_SPECS.evidence.
+  priority: "Critical" | "Important" | "Supporting" | "Optional";
+  // Verified: a document on file or an authoritative record (CAD, value
+  // history, GIS) directly satisfies this. Found: a document plausibly
+  // matches but isn't confirmed. Missing: nothing on file.
+  status: "Verified" | "Found" | "Missing";
+  // Where it was found — "CAD record", "USGS + FEMA", an exact filename,
+  // or null when Missing.
+  foundIn: string | null;
+  // One plain sentence: what this item actually proves for the case.
+  whyNeeded: string;
+  // Why it's Verified, or exactly what's still unconfirmed.
+  verificationNote: string;
+  importance: "High" | "Low";
+  availability: "High" | "Low";
+  // Part 2's "potential evidence documents" library grouping — optional so
+  // a stale cached row without it still renders (falls back to "Other
+  // Supporting Evidence" at the call site).
+  category?: EvidenceCategory;
+  // Which real Module 2-7 (or Protest Strategy) finding this item's
+  // evidence would confirm/change if verified — drives the "Supports: X"
+  // line and the auto-refresh feed-forward. Optional/null for the same
+  // stale-cache reason as category.
+  relatedModule?: EvidenceRelatedModule | null;
+  // One cautious sentence on how this specific document helps the case —
+  // never a win-probability claim. null/absent when Missing or on a stale
+  // cached row.
+  contributionNote?: string | null;
+  // Real, concrete suggestions for what to upload to satisfy this checklist
+  // item — see MODULE_SPECS.evidence in the edge function. whereToObtain is
+  // always a general source TYPE (the CAD, a surveyor, a licensed
+  // appraiser, etc.), never a specific vendor/URL the AI can't verify.
+  documentSuggestions: { documentName: string; whatToInclude: string; whereToObtain: string }[];
+};
+
 export type ModuleResultMap = {
   strategy: {
     strategies: StrategyEntry[];
@@ -367,34 +431,7 @@ export type ModuleResultMap = {
     lineItemNotes: { line: string; note: string }[];
   };
   evidence: {
-    items: {
-      item: string;
-      // priority is the real driver now — only "Critical" items block the
-      // user; Important/Supporting/Optional are shown as ways to strengthen
-      // the case. importance/availability are kept, DERIVED from
-      // priority/status, so the quadrant card + executive readiness keep
-      // working while callers migrate. See MODULE_SPECS.evidence.
-      priority: "Critical" | "Important" | "Supporting" | "Optional";
-      // Verified: a document on file or an authoritative record (CAD, value
-      // history, GIS) directly satisfies this. Found: a document plausibly
-      // matches but isn't confirmed. Missing: nothing on file.
-      status: "Verified" | "Found" | "Missing";
-      // Where it was found — "CAD record", "USGS + FEMA", an exact filename,
-      // or null when Missing.
-      foundIn: string | null;
-      // One plain sentence: what this item actually proves for the case.
-      whyNeeded: string;
-      // Why it's Verified, or exactly what's still unconfirmed.
-      verificationNote: string;
-      importance: "High" | "Low";
-      availability: "High" | "Low";
-      // Real, concrete suggestions for what to upload to satisfy this
-      // checklist item — see MODULE_SPECS.evidence in the edge function.
-      // whereToObtain is always a general source TYPE (the CAD, a
-      // surveyor, a licensed appraiser, etc.), never a specific vendor/
-      // URL the AI can't actually verify.
-      documentSuggestions: { documentName: string; whatToInclude: string; whereToObtain: string }[];
-    }[];
+    items: EvidenceItem[];
   };
   // Recommendation/basis/nextStep kept for backward compatibility with any
   // stale cached shape — the real UI (ai-report.tsx's "executive" cases)
