@@ -20,10 +20,21 @@ export function DocumentReviewModal({
   doc,
   onClose,
   onExplanation,
+  onAnalyze,
+  analyzing,
 }: {
   doc: DocumentRecord | null;
   onClose: () => void;
   onExplanation: (id: string, explanation: string) => void;
+  // The verdict badge below ("Check: Valid" / "Not checked yet") reflects a
+  // separate AI pass (analyze-document, classify + verdict) from the
+  // explanation this modal fetches on its own (review-document, prose only)
+  // — a document can be actively "read" here for its explanation and still
+  // show "Not checked yet" because that other pass has simply never run.
+  // Surfacing the same Run AI check button DocumentViewerModal already has
+  // means the badge is never a dead end: it explains itself.
+  onAnalyze: (doc: DocumentRecord) => void;
+  analyzing: boolean;
 }) {
   const [explanation, setExplanation] = useState<string | null>(null);
   const [loadingExplanation, setLoadingExplanation] = useState(false);
@@ -109,7 +120,23 @@ export function DocumentReviewModal({
               >
                 {doc.aiVerdict ? `Check: ${m.label}` : "Not checked yet"}
               </span>
+              {!doc.aiVerdict && (
+                <button
+                  type="button"
+                  onClick={() => onAnalyze(doc)}
+                  disabled={analyzing}
+                  className="text-xs text-accent hover:underline disabled:opacity-60"
+                >
+                  {analyzing ? "Checking…" : "Run AI check"}
+                </button>
+              )}
             </div>
+            {!doc.aiVerdict && (
+              <p className="text-muted-foreground text-xs">
+                This is a different pass from the explanation below — it classifies the document and
+                flags anything that looks off, clearing the badge above once it runs.
+              </p>
+            )}
             {doc.aiNotes && <p className="text-muted-foreground">{doc.aiNotes}</p>}
 
             <div>

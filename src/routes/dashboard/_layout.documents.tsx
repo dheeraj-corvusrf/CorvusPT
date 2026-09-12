@@ -628,6 +628,8 @@ function Documents() {
         doc={reviewDoc}
         onClose={() => setReviewDoc(null)}
         onExplanation={(id, explanation) => patchDoc(id, { aiExplanation: explanation })}
+        onAnalyze={handleAnalyze}
+        analyzing={reviewDoc ? analyzingIds.has(reviewDoc.id) : false}
       />
 
       {editDoc && user && (
