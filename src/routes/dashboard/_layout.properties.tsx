@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { currency, resetIntake, updateIntake } from "@/lib/intake-store";
 import { useAuth } from "@/lib/auth";
@@ -43,6 +43,7 @@ import {
   getDocumentUrl,
   previewKind,
   verdictMeta,
+  isEvidenceDoc,
   type DocumentRecord,
 } from "@/lib/documents";
 import {
@@ -50,6 +51,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuCheckboxItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -65,6 +68,7 @@ import {
   Trash2,
   Ban,
   RotateCcw,
+  SlidersHorizontal,
 } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/_layout/properties")({
@@ -114,6 +118,7 @@ const STATUS_FILTER_OPTIONS: { key: StatusFilter; label: string }[] = [
 const LS_VIEW = "corvus.properties.view";
 const LS_SORT = "corvus.properties.sort";
 const LS_FILTER = "corvus.properties.filter";
+const LS_COLUMNS = "corvus.properties.columns";
 
 function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   try {
@@ -128,6 +133,74 @@ function writePref(key: string, value: string) {
     localStorage.setItem(key, value);
   } catch {
     // storage blocked (private window etc.) — the choice just won't persist
+  }
+}
+
+// List view's real table columns, beyond the always-shown Address + Actions.
+// User-configurable (a "Columns" picker) and remembered per browser, same as
+// the view/sort/filter prefs above — everyone wants a different subset of
+// this detail visible at once.
+type PropertyColumnKey =
+  | "county"
+  | "account"
+  | "taxYear"
+  | "status"
+  | "payment"
+  | "aiScore"
+  | "value"
+  | "savings"
+  | "deadline"
+  | "evidence";
+
+const COLUMN_OPTIONS: { key: PropertyColumnKey; label: string }[] = [
+  { key: "county", label: "County" },
+  { key: "account", label: "Account #" },
+  { key: "taxYear", label: "Tax year" },
+  { key: "status", label: "Protest status" },
+  { key: "payment", label: "Payment status" },
+  { key: "aiScore", label: "AI score" },
+  { key: "value", label: "Assessed value" },
+  { key: "savings", label: "Est. savings" },
+  { key: "deadline", label: "Protest deadline" },
+  { key: "evidence", label: "Evidence on file" },
+];
+
+// Mirrors exactly what the old (non-configurable) compact row used to show,
+// so switching to the table for the first time changes nothing by default —
+// deadline and evidence are the two genuinely new, opt-in columns.
+const DEFAULT_COLUMNS: PropertyColumnKey[] = [
+  "county",
+  "account",
+  "taxYear",
+  "status",
+  "payment",
+  "aiScore",
+  "value",
+  "savings",
+];
+
+function readColumnsPref(): PropertyColumnKey[] {
+  const allowed = new Set(COLUMN_OPTIONS.map((c) => c.key));
+  try {
+    const raw = localStorage.getItem(LS_COLUMNS);
+    if (!raw) return DEFAULT_COLUMNS;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_COLUMNS;
+    const cleaned = parsed.filter(
+      (v): v is PropertyColumnKey => typeof v === "string" && allowed.has(v as PropertyColumnKey),
+    );
+    // An empty result (everything unchecked) is a real, deliberate choice —
+    // just Address + Actions — not treated as "no preference saved."
+    return cleaned;
+  } catch {
+    return DEFAULT_COLUMNS;
+  }
+}
+function writeColumnsPref(cols: PropertyColumnKey[]) {
+  try {
+    localStorage.setItem(LS_COLUMNS, JSON.stringify(cols));
+  } catch {
+    // storage blocked — the choice just won't persist
   }
 }
 
@@ -176,6 +249,20 @@ function Properties() {
     ),
   );
   const [search, setSearch] = useState("");
+  const [columns, setColumns] = useState<PropertyColumnKey[]>(() => readColumnsPref());
+  // Only for the List view's "Evidence on file" column — one fetch of every
+  // document up front (same call the Documents page makes), not one call per
+  // property, then filtered client-side per row with the same isEvidenceDoc
+  // rule Module 8 and the Pre-Filing Check already use.
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+
+  function toggleColumn(key: PropertyColumnKey) {
+    setColumns((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      writeColumnsPref(next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -192,6 +279,9 @@ function Properties() {
     listHealthScores(uid)
       .then(setHealthScores)
       .catch((err) => console.error(err));
+    listDocuments(uid)
+      .then(setDocuments)
+      .catch((err) => console.error("Could not load documents for the Evidence column:", err));
     getMyBilling(uid)
       .then(setBilling)
       .catch((err) => console.error("Could not load billing info:", err));
@@ -483,6 +573,63 @@ function Properties() {
     return { existingProtest, canReFile, cad, recordUrl, isPaid };
   }
 
+  // One cell's content for the List table's configurable columns — every
+  // column reads from data already loaded on this page (protests,
+  // healthScores, documents), never a new fetch per row.
+  function columnCell(key: PropertyColumnKey, p: PropertyRecord): ReactNode {
+    const muted = (text: string) => <span className="text-muted-foreground">{text}</span>;
+    switch (key) {
+      case "county":
+        return muted(p.cad ?? "—");
+      case "account":
+        return p.accountNumber ? (
+          <span className="inline-flex items-center gap-1 text-muted-foreground">
+            {p.accountNumber}
+            <CopyButton value={p.accountNumber} label="Account number copied" />
+          </span>
+        ) : (
+          muted("—")
+        );
+      case "taxYear":
+        return muted(p.taxYear != null ? String(p.taxYear) : "—");
+      case "status":
+        return <ActionStatusBadge property={p} protests={protests} />;
+      case "payment":
+        return isBeta ? muted("—") : <PaymentStatusBadge property={p} />;
+      case "aiScore": {
+        const s = healthScores[p.id];
+        return s ? <span className="font-medium text-accent">{s.score}/100</span> : muted("—");
+      }
+      case "value":
+        return (
+          <span className="font-medium tabular-nums">{currency(p.totalValue ?? undefined)}</span>
+        );
+      case "savings":
+        return p.estimatedSavings && p.estimatedSavings > 0 ? (
+          <span className="tabular-nums text-accent">{currency(p.estimatedSavings)}</span>
+        ) : (
+          muted("—")
+        );
+      case "deadline":
+        return p.protestDeadline
+          ? muted(new Date(`${p.protestDeadline}T00:00:00`).toLocaleDateString())
+          : muted("—");
+      case "evidence": {
+        const docs = documents.filter((d) => d.propertyId === p.id && isEvidenceDoc(d));
+        if (docs.length === 0) return muted("None yet");
+        const flagged = docs.filter(
+          (d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid",
+        ).length;
+        return (
+          <span className={flagged > 0 ? "text-warning-foreground" : "text-muted-foreground"}>
+            {docs.length} doc{docs.length === 1 ? "" : "s"}
+            {flagged > 0 ? ` · ${flagged} flagged` : ""}
+          </span>
+        );
+      }
+    }
+  }
+
   // Live-ish = a Stripe subscription that already exists / is pending, so
   // bulk-subscribe would refuse it (mirrors bulk-subscribe's server guard).
   const LIVEISH_SUB = new Set(["active", "trialing", "incomplete", "past_due", "unpaid"]);
@@ -490,6 +637,11 @@ function Properties() {
   // "active" property can be neither bulk-subscribed (already is) nor
   // bulk-deleted (would strand a billing subscription).
   const bulkEligible = (p: PropertyRecord) => p.subscriptionStatus !== "active";
+  // The user's chosen List-view columns, minus Payment for a beta account
+  // (nothing to report — no per-property subscription exists to show).
+  const visibleColumnOptions = COLUMN_OPTIONS.filter(
+    (c) => columns.includes(c.key) && !(c.key === "payment" && isBeta),
+  );
   const selectedProperties = sortedProperties.filter((p) => selectedIds.has(p.id));
   // Of the selection, the ones bulk-subscribe can actually take.
   const subscribableSelected = selectedProperties.filter(
@@ -693,6 +845,34 @@ function Properties() {
             </button>
           </div>
 
+          {view === "list" && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="btn-outline inline-flex items-center gap-1.5 text-sm"
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Columns
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel>Show columns</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {COLUMN_OPTIONS.filter((c) => !(c.key === "payment" && isBeta)).map((c) => (
+                  <DropdownMenuCheckboxItem
+                    key={c.key}
+                    checked={columns.includes(c.key)}
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={() => toggleColumn(c.key)}
+                  >
+                    {c.label}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
           {(search.trim() || statusFilter !== "all") && (
             <span className="w-full text-xs text-muted-foreground sm:w-auto">
               {displayProperties.length} of {properties.length} shown
@@ -748,82 +928,87 @@ function Properties() {
             </button>
           </div>
         ) : view === "list" ? (
-          <div className="grid gap-2">
-            {displayProperties.map((p) => {
-              const { existingProtest, canReFile, cad, recordUrl, isPaid } = rowInfo(p);
-              return (
-                <div key={p.id} className="card-elev p-3">
-                  <div className="flex items-center gap-3">
-                    {bulkEligible(p) && (
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${p.address} for bulk subscribe`}
-                        checked={selectedIds.has(p.id)}
-                        onChange={() => toggleSelected(p.id)}
-                        className="h-4 w-4 shrink-0"
-                      />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span className="truncate font-semibold">{p.address}</span>
-                        <ActionStatusBadge property={p} protests={protests} />
-                        {!isBeta && <PaymentStatusBadge property={p} />}
-                      </div>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {p.cad}
-                        {p.accountNumber ? ` · Acct ${p.accountNumber}` : ""} · Tax year {p.taxYear}
-                        {healthScores[p.id] ? ` · AI ${healthScores[p.id].score}/100` : ""}
-                      </p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <div className="font-semibold tabular-nums">
-                        {currency(p.totalValue ?? undefined)}
-                      </div>
-                      {p.estimatedSavings != null && p.estimatedSavings > 0 && (
-                        <div className="text-xs text-accent tabular-nums">
-                          {currency(p.estimatedSavings)} est.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <button
-                      onClick={() => openAiReport(p)}
-                      className="btn-outline px-2.5 py-1 text-xs"
+          <div className="card-elev overflow-x-auto p-0">
+            <table className="w-full min-w-[56rem] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  <th className="w-9 px-3 py-2.5" />
+                  <th className="min-w-[14rem] px-3 py-2.5">Address</th>
+                  {visibleColumnOptions.map((c) => (
+                    <th key={c.key} className="whitespace-nowrap px-3 py-2.5">
+                      {c.label}
+                    </th>
+                  ))}
+                  <th className="px-3 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayProperties.map((p) => {
+                  const { existingProtest, canReFile, cad, recordUrl, isPaid } = rowInfo(p);
+                  return (
+                    <tr
+                      key={p.id}
+                      className="border-b border-border/60 align-top last:border-0 hover:bg-secondary/30"
                     >
-                      Open AI Report
-                    </button>
-                    {existingProtest && isPaid && (
-                      <Link
-                        to="/dashboard/case"
-                        search={{ propertyId: p.id }}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn-outline px-2.5 py-1 text-xs"
-                      >
-                        View Case
-                      </Link>
-                    )}
-                    <PropertyActionsMenu
-                      p={p}
-                      info={{ existingProtest, canReFile, cad, recordUrl, isPaid }}
-                      isBeta={isBeta}
-                      deletingId={deletingId}
-                      cancelingId={cancelingId}
-                      resumingId={resumingId}
-                      subscribing={subscribing}
-                      compact
-                      onDocuments={() => setDocsProperty(p)}
-                      onAuthorize={() => setAuthorizingProperty(p)}
-                      onProtest={() => setProtestingProperty(p)}
-                      onResume={() => handleResumeSubscription(p)}
-                      onCancel={() => handleCancelSubscription(p)}
-                      onDelete={() => handleDelete(p, isPaid)}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+                      <td className="px-3 py-2.5">
+                        {bulkEligible(p) && (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${p.address} for bulk subscribe`}
+                            checked={selectedIds.has(p.id)}
+                            onChange={() => toggleSelected(p.id)}
+                            className="h-4 w-4"
+                          />
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 font-medium">{p.address}</td>
+                      {visibleColumnOptions.map((c) => (
+                        <td key={c.key} className="whitespace-nowrap px-3 py-2.5">
+                          {columnCell(c.key, p)}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => openAiReport(p)}
+                            className="btn-outline whitespace-nowrap px-2.5 py-1 text-xs"
+                          >
+                            Open AI Report
+                          </button>
+                          {existingProtest && isPaid && (
+                            <Link
+                              to="/dashboard/case"
+                              search={{ propertyId: p.id }}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn-outline whitespace-nowrap px-2.5 py-1 text-xs"
+                            >
+                              View Case
+                            </Link>
+                          )}
+                          <PropertyActionsMenu
+                            p={p}
+                            info={{ existingProtest, canReFile, cad, recordUrl, isPaid }}
+                            isBeta={isBeta}
+                            deletingId={deletingId}
+                            cancelingId={cancelingId}
+                            resumingId={resumingId}
+                            subscribing={subscribing}
+                            compact
+                            onDocuments={() => setDocsProperty(p)}
+                            onAuthorize={() => setAuthorizingProperty(p)}
+                            onProtest={() => setProtestingProperty(p)}
+                            onResume={() => handleResumeSubscription(p)}
+                            onCancel={() => handleCancelSubscription(p)}
+                            onDelete={() => handleDelete(p, isPaid)}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         ) : (
           <div className="grid gap-4">
