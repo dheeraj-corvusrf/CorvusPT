@@ -25,11 +25,7 @@ export const FILING_SUBMISSION_STATUS_LABEL: Record<FilingSubmissionStatus, stri
 
 type StatusFields = Pick<
   FormSubmission,
-  | "filingMethod"
-  | "submittedAt"
-  | "filingConfirmedAt"
-  | "additionalRequestedAt"
-  | "rejectedAt"
+  "filingMethod" | "submittedAt" | "filingConfirmedAt" | "additionalRequestedAt" | "rejectedAt"
 >;
 
 export function filingSubmissionStatus(submission: StatusFields | null): FilingSubmissionStatus {

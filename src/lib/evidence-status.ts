@@ -71,7 +71,9 @@ export function computeEvidenceStatus(input: EvidenceStatusInput): EvidenceStatu
 // of what Corvus verified is actually in hand," not a re-judgment of any
 // item. null (not 0) when Module 8 hasn't run yet, same "genuinely unknown
 // vs. actually zero" discipline as criticalMissingCount above.
-export function evidenceScore(items: { status: "Verified" | "Found" | "Missing" }[] | null): number | null {
+export function evidenceScore(
+  items: { status: "Verified" | "Found" | "Missing" }[] | null,
+): number | null {
   if (!items || items.length === 0) return null;
   const nonMissing = items.filter((i) => i.status !== "Missing").length;
   return Math.round((nonMissing / items.length) * 100);
