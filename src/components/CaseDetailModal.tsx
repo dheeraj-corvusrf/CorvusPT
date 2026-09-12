@@ -3485,6 +3485,15 @@ function EvidencePackageBuilder({
         setSelectedIds((preselected.length > 0 ? preselected : evidenceDocuments).map((d) => d.id));
         setDeadline(notice?.evidenceSubmissionDeadline ?? null);
         setReminderFrequencyState(submission?.reminderFrequency ?? "daily");
+        // Seed a real row at the default frequency so send-evidence-reminders
+        // has something to find — "by default, daily reminders" shouldn't
+        // require the user to first open this dropdown and pick "Daily"
+        // themselves.
+        if (!submission) {
+          saveReminderFrequency(userId, protest.id, "evidence", "daily").catch((err) =>
+            console.error("Could not seed the default reminder frequency:", err),
+          );
+        }
       })
       .catch((err) => console.error("Could not prepare the evidence package builder:", err))
       .finally(() => {
