@@ -188,11 +188,23 @@ function SignedInJourney() {
   // which use container-page for their own sections, so this still lines
   // up with THOSE instead.
   return (
+    // pb-24 (not pb-10) below sm — AskAiWidget is a fixed bottom-5 right-5
+    // button that stays at the same screen position regardless of scroll.
+    // On a short page (an empty/locked section like BPP Accounts or Tax
+    // Bills), this card's own header row (title + "Progress X%") can end up
+    // resting exactly in that fixed corner at the page's natural scrolled-
+    // to-bottom position, with the button covering real text. The extra
+    // bottom padding pushes the true end of the page (and the max scroll
+    // position) further down, so at rest this card has already scrolled
+    // clear of the button's fixed band — verified on a real Pixel 7
+    // viewport screenshot, not just a fullPage capture (which doesn't
+    // reproduce this at all, since a fixed element renders once per real
+    // viewport, not once per full-page capture).
     <div
       className={
         shouldShowShell(pathname)
-          ? "w-full px-6 sm:px-10 lg:px-16 pt-10 pb-10"
-          : "container-page pt-10 pb-10"
+          ? "w-full px-6 sm:px-10 lg:px-16 pt-10 pb-24 sm:pb-10"
+          : "container-page pt-10 pb-24 sm:pb-10"
       }
     >
       <JourneyTracker />
