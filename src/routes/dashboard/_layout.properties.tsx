@@ -536,11 +536,14 @@ function Properties() {
           <PaymentsModeChip />
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Bulk actions for a multi-selection — shown inline here beside the
-              page actions (not a floating bar) once one or more property
-              checkboxes are ticked. */}
+          {/* Bulk actions for a multi-selection — once one or more property
+              checkboxes are ticked, this floats and stays pinned near the top
+              of the viewport (position: sticky) as the page scrolls, rather
+              than scrolling away with the rest of this heading row — a long
+              property list means selections are often made well below the
+              fold. */}
           {selectedIds.size > 0 && (
-            <div className="mr-1 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 py-1 pl-3 pr-1">
+            <div className="sticky top-4 z-20 mr-1 flex items-center gap-2 rounded-lg border border-accent/40 bg-card py-1 pl-3 pr-1 shadow-md">
               <span className="text-sm font-medium">{selectedIds.size} selected</span>
               <button
                 type="button"
