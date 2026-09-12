@@ -154,6 +154,7 @@ import {
   FILING_STEP_META,
   isFilingStepDone,
   firstIncompleteFilingStep,
+  describeFilingRequirements,
   type FilingStepId,
   type FilingStepStatusInput,
 } from "@/lib/filing-workflow";
@@ -1466,6 +1467,44 @@ const EMPTY_FORM_SUBMISSION: FormSubmission = {
   filingConfirmedAt: null,
 };
 
+// Shown right after the Notice of Protest is signed, so filing it (Go to
+// County CAD, below) never reads as blocked on the evidence package or the
+// other forms — see describeFilingRequirements's own comment for why this is
+// general Texas process fact rather than a county-specific rule this app
+// doesn't actually have.
+function FilingRequirementsPanel({
+  steps,
+  hearingDate,
+}: {
+  steps: FilingStepId[];
+  hearingDate: string | null;
+}) {
+  const note = describeFilingRequirements(steps, hearingDate);
+  return (
+    <div className="rounded-md border border-border p-3 text-xs">
+      <p className="font-medium text-foreground">
+        What has to go with this filing — and what can follow
+      </p>
+      <p className="mt-1.5">
+        <span className="font-semibold text-success">Due now: </span>
+        <span className="text-muted-foreground">{note.dueNow}</span>
+      </p>
+      {note.canWaitUntil.length > 0 && (
+        <div className="mt-1.5">
+          <span className="font-semibold text-foreground">Can follow: </span>
+          <ul className="mt-1 grid gap-1 text-muted-foreground">
+            {note.canWaitUntil.map((item) => (
+              <li key={item.label}>
+                • <span className="font-medium text-foreground">{item.label}</span> — {item.detail}.
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One real "how are you actually getting this document to the county, and
 // what proves you did" flow — used identically for all four documents the
 // filing workflow tracks (File Protest, Agent/Representative, Evidence
@@ -2645,15 +2684,18 @@ export function DocumentsSection({
           </p>
 
           {noticeSignedAt ? (
-            <FilingSubmissionFlow
-              userId={userId}
-              property={property}
-              protest={protest}
-              formType="notice_of_protest"
-              docLabel="Notice of Protest"
-              countyInfo={countyInfo}
-              onConfirmed={handleNoticeFilingConfirmed}
-            />
+            <>
+              <FilingRequirementsPanel steps={filingSteps} hearingDate={protest.hearingDate} />
+              <FilingSubmissionFlow
+                userId={userId}
+                property={property}
+                protest={protest}
+                formType="notice_of_protest"
+                docLabel="Notice of Protest"
+                countyInfo={countyInfo}
+                onConfirmed={handleNoticeFilingConfirmed}
+              />
+            </>
           ) : (
             <p className="text-xs text-muted-foreground">
               Sign your Notice of Protest above to see how to file it with{" "}
