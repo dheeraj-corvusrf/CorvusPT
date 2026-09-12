@@ -138,13 +138,23 @@ import {
 } from "@/lib/protest-form-submissions";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
-import { requiredFilingSteps, FILING_STEP_META, type FilingStepId } from "@/lib/filing-workflow";
+import {
+  requiredFilingSteps,
+  FILING_STEP_META,
+  isFilingStepDone,
+  firstIncompleteFilingStep,
+  type FilingStepId,
+  type FilingStepStatusInput,
+} from "@/lib/filing-workflow";
 import { verdictMeta } from "@/lib/documents";
 import { PdfFormEditor } from "@/components/PdfFormEditor";
 import { FilingMethodsList } from "@/components/FilingMethodsList";
 import { Modal } from "@/components/Modal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SignaturePad, type SignatureValue } from "@/components/SignaturePad";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Calendar as DatePickerCalendar } from "@/components/ui/calendar";
+import { CalendarDays } from "lucide-react";
 
 // --- Tabbed filing workflow -------------------------------------------------
 // The case work is grouped into 5 phase tabs, all shown as a roadmap; a phase
@@ -1732,23 +1742,18 @@ export function DocumentsSection({
   );
   const preFilingItems = getPreFilingCheck(property, protest, evidenceDocuments.length);
   const preFilingBlocked = isPreFilingBlocked(preFilingItems);
-
-  function stepDone(id: FilingStepId): boolean {
-    switch (id) {
-      case "prefiling":
-        return !preFilingBlocked;
-      case "file":
-        return !!noticeSignedAt;
-      case "agent":
-        return !!agentFormSignedAt;
-      case "affidavit":
-        return !!evidenceDeclarationSignedAt;
-      case "evidence":
-        return !!protest.evidenceSubmittedConfirmedAt;
-    }
-  }
-
-  const firstIncomplete = filingSteps.find((s) => !stepDone(s)) ?? filingSteps[0];
+  // Shared with filing-workflow.ts so this step bar and anything else reading
+  // the same case (the AI Report page's Case Progress card) can never
+  // disagree on what "done" means for a step.
+  const filingStepStatus: FilingStepStatusInput = {
+    preFilingBlocked,
+    noticeSignedAt,
+    agentFormSignedAt,
+    evidenceDeclarationSignedAt,
+    evidenceSubmittedConfirmedAt: protest.evidenceSubmittedConfirmedAt ?? null,
+  };
+  const stepDone = (id: FilingStepId) => isFilingStepDone(id, filingStepStatus);
+  const firstIncomplete = firstIncompleteFilingStep(filingSteps, filingStepStatus);
   const [activeStep, setActiveStep] = useState<FilingStepId>(
     preFilingBlocked ? "prefiling" : firstIncomplete,
   );
@@ -2617,6 +2622,22 @@ function parseTimeToInput(display: string | null | undefined): string {
   return `${String(h).padStart(2, "0")}:${m[2]}`;
 }
 
+// Same "local calendar date, no timezone math" convention as the rest of this
+// file's date-only fields (see pre-filing-check.ts's own comment on this) —
+// built from/read back via the Date object's local getters, never toISOString,
+// so a viewer west of UTC never sees the day roll back by one.
+function dateInputToDate(v: string): Date | undefined {
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return undefined;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+function dateToDateInput(d: Date): string {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${day}`;
+}
+
 const INFORMAL_REVIEW_MODES: HearingMode[] = [
   "In Person",
   "Phone",
@@ -2645,6 +2666,7 @@ function InformalReviewSection({
     protest.informalReviewMode ?? "In Person",
   );
   const [savingSchedule, setSavingSchedule] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [guidance, setGuidance] = useState<InformalReviewGuidance | null>(null);
   const [loadingGuidance, setLoadingGuidance] = useState(false);
   const [guidanceError, setGuidanceError] = useState<string | null>(null);
@@ -2812,15 +2834,38 @@ function InformalReviewSection({
           onto your calendar.
         </p>
         <div className="mt-2 flex flex-wrap items-end gap-2">
-          <label className="grid gap-1 text-xs">
-            Date
-            <input
-              type="date"
-              value={dateInput}
-              onChange={(e) => setDateInput(e.target.value)}
-              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            />
-          </label>
+          <div className="grid gap-1 text-xs">
+            <span>Date</span>
+            <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Date"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+                >
+                  <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+                  {dateInput
+                    ? new Date(`${dateInput}T00:00:00`).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })
+                    : "Pick a date"}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-auto p-0">
+                <DatePickerCalendar
+                  mode="single"
+                  selected={dateInputToDate(dateInput)}
+                  onSelect={(d) => {
+                    if (d) setDateInput(dateToDateInput(d));
+                    setCalendarOpen(false);
+                  }}
+                  disabled={{ before: new Date(new Date().setHours(0, 0, 0, 0)) }}
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
           <label className="grid gap-1 text-xs">
             Time
             <input

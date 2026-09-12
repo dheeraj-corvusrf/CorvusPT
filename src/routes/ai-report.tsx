@@ -30,6 +30,7 @@ import {
   Cpu,
   Scale,
   Gauge,
+  ExternalLink,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -139,6 +140,7 @@ import {
 } from "@/lib/property-base-data";
 import { listProtests, requestProtest, type ProtestRecord } from "@/lib/protests";
 import { generateCasePrep } from "@/lib/protest-case";
+import { getCaseNextAction, type CaseNextAction } from "@/lib/case-next-action";
 import {
   uploadDocument,
   listDocuments,
@@ -650,6 +652,28 @@ function Report() {
     // property and remounting the protest-authorization modal mid-flow.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, state.address, state.cad, state.accountNumber]);
+
+  // The banner's Case Progress card — "what do I need to do next," in the
+  // exact same terms and using the exact same rules View Case itself uses
+  // (see case-next-action.ts). Only meaningful once a protest actually
+  // exists; cleared the moment it doesn't so a stale action never survives
+  // onto a different property.
+  const [nextAction, setNextAction] = useState<CaseNextAction | null>(null);
+  useEffect(() => {
+    if (!resolvedProperty || !existingProtest) {
+      setNextAction(null);
+      return;
+    }
+    let cancelled = false;
+    getCaseNextAction(resolvedProperty, existingProtest, evidenceDocs.length)
+      .then((a) => {
+        if (!cancelled) setNextAction(a);
+      })
+      .catch((err) => console.error("Could not compute the case's next action:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedProperty, existingProtest, evidenceDocs.length]);
 
   // Gates the eager module loads below — health/strategy/evidence include the
   // uploaded-evidence file names in their input (and therefore in the cache
@@ -2637,21 +2661,84 @@ function Report() {
         {user && (
           <div className="relative z-10 border-t border-primary-foreground/20 px-5 pb-5 pt-3 print:hidden sm:px-8 sm:pb-8">
             {existingProtest ? (
-              <div className="flex items-center gap-3">
-                <span className="badge-soft">
-                  Protest {existingProtest.status.replace("_", " ")}
-                </span>
-                {resolvedProperty && (
-                  <Link
-                    to="/dashboard/case"
-                    search={{ propertyId: resolvedProperty.id }}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn-outline border-white/30 text-primary-foreground hover:bg-background/10 text-sm py-1.5"
-                  >
-                    View Case
-                  </Link>
+              // Case Progress / Next Action — the stages shown, their labels,
+              // and which one is "current" all come from case-next-action.ts,
+              // the same rules View Case's own Prepare & File tab and Corvus
+              // AI Guidance panel are built on, so this can never say
+              // something View Case itself would disagree with. View Case
+              // stays the prominent, filled action (it's where the whole
+              // case actually gets managed); the dynamic button beside it
+              // just answers "what do I need to do next," using View Case's
+              // own terminology for whichever stage that is.
+              <div className="grid gap-3">
+                {nextAction ? (
+                  <>
+                    <ol className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs">
+                      {nextAction.timeline.map((stage, i) => (
+                        <li key={stage.id} className="flex items-center gap-1.5">
+                          {i > 0 && (
+                            <span aria-hidden className="text-primary-foreground/30">
+                              →
+                            </span>
+                          )}
+                          <span
+                            className={`whitespace-nowrap rounded-full px-2.5 py-1 font-medium ${
+                              stage.status === "current"
+                                ? "bg-accent text-accent-foreground"
+                                : stage.status === "done"
+                                  ? "bg-white/10 text-primary-foreground/70"
+                                  : "text-primary-foreground/40"
+                            }`}
+                          >
+                            {stage.status === "done" ? "✓ " : ""}
+                            {stage.label}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                    <p className="max-w-xl text-sm text-primary-foreground/80">
+                      {nextAction.summary}
+                    </p>
+                  </>
+                ) : (
+                  <div className="h-4 w-56 animate-pulse rounded bg-white/10" aria-hidden />
                 )}
+                <div className="flex flex-wrap items-center gap-3">
+                  {resolvedProperty && (
+                    <Link
+                      to="/dashboard/case"
+                      search={{ propertyId: resolvedProperty.id }}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-accent text-sm py-1.5 font-semibold"
+                    >
+                      View Case
+                    </Link>
+                  )}
+                  {nextAction?.action &&
+                    resolvedProperty &&
+                    (nextAction.action.kind === "external" ? (
+                      <a
+                        href={nextAction.action.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-outline inline-flex items-center gap-1.5 border-white/30 text-sm py-1.5 text-primary-foreground hover:bg-background/10"
+                      >
+                        {nextAction.action.label}
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    ) : (
+                      <Link
+                        to="/dashboard/case"
+                        search={{ propertyId: resolvedProperty.id }}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-outline border-white/30 text-sm py-1.5 text-primary-foreground hover:bg-background/10"
+                      >
+                        {nextAction.action.label}
+                      </Link>
+                    ))}
+                </div>
               </div>
             ) : hasFullAccess ? (
               <button onClick={startProtest} className="btn-accent text-sm py-1.5">
