@@ -330,6 +330,34 @@ const evidenceDocumentSuggestions = (
 
 const EVIDENCE_PRIORITIES = ["Critical", "Important", "Supporting", "Optional"] as const;
 const EVIDENCE_STATUSES = ["Verified", "Found", "Missing"] as const;
+// The Part 2 "potential evidence documents" library groups — an item is
+// tagged with exactly one of these, never an invented category.
+const EVIDENCE_CATEGORIES = [
+  "Property Condition & Physical Evidence",
+  "Property Characteristics & Site Evidence",
+  "Zoning, Land Use & Legal Restrictions",
+  "Valuation & Comparable Evidence",
+  "Income & Commercial Property Evidence",
+  "Functional Obsolescence",
+  "Economic Issues",
+  "Special-Purpose / Specialized Property Evidence",
+  "Ownership & Transaction Evidence",
+  "Tax Protest & County Evidence",
+  "Other Supporting Evidence",
+] as const;
+// Which real Module 2-7 finding (or the Protest Strategy module itself)
+// this item's evidence would confirm/change if verified — drives both the
+// "Supports: X" line and Part 8's auto-refresh feed-forward. Deliberately
+// excludes "evidence" itself and "health"/"executive" (not a Module 2-7
+// finding module).
+const EVIDENCE_RELATED_MODULES = [
+  "comps",
+  "site",
+  "improvement",
+  "zoning",
+  "income",
+  "strategy",
+] as const;
 
 const evidenceItems = (
   v: unknown,
@@ -340,6 +368,9 @@ const evidenceItems = (
   foundIn: string | null;
   whyNeeded: string;
   verificationNote: string;
+  category: (typeof EVIDENCE_CATEGORIES)[number];
+  relatedModule: (typeof EVIDENCE_RELATED_MODULES)[number] | null;
+  contributionNote: string | null;
   importance: "High" | "Low";
   availability: "High" | "Low";
   documentSuggestions: { documentName: string; whatToInclude: string; whereToObtain: string }[];
@@ -366,6 +397,16 @@ const evidenceItems = (
             status !== "Missing" && typeof x.foundIn === "string" && x.foundIn.trim()
               ? x.foundIn.trim().slice(0, 120)
               : null;
+          const category = EVIDENCE_CATEGORIES.includes(
+            x.category as (typeof EVIDENCE_CATEGORIES)[number],
+          )
+            ? (x.category as (typeof EVIDENCE_CATEGORIES)[number])
+            : ("Other Supporting Evidence" as const);
+          const relatedModule = EVIDENCE_RELATED_MODULES.includes(
+            x.relatedModule as (typeof EVIDENCE_RELATED_MODULES)[number],
+          )
+            ? (x.relatedModule as (typeof EVIDENCE_RELATED_MODULES)[number])
+            : null;
           return {
             item: String(x.item ?? "").slice(0, 120),
             priority,
@@ -374,6 +415,14 @@ const evidenceItems = (
             whyNeeded: typeof x.whyNeeded === "string" ? x.whyNeeded.slice(0, 300) : "",
             verificationNote:
               typeof x.verificationNote === "string" ? x.verificationNote.slice(0, 300) : "",
+            category,
+            relatedModule,
+            contributionNote:
+              status !== "Missing" &&
+              typeof x.contributionNote === "string" &&
+              x.contributionNote.trim()
+                ? x.contributionNote.trim().slice(0, 200)
+                : null,
             // Derived, kept for the quadrant card + executive readiness.
             importance: (priority === "Critical" ? "High" : "Low") as "High" | "Low",
             availability: (status === "Missing" ? "Low" : "High") as "High" | "Low",
@@ -1180,7 +1229,8 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "what's already on file before asking the user for anything. You are given (when available): " +
       "the documents already uploaded for this property with their AI-check read (evidenceOnFile), " +
       "real facts the app itself has already established (authoritativeFacts — CAD record, value " +
-      "history, zoning, site GIS, income, comps), and the selected protest strategy " +
+      "history, improvement condition, zoning, site GIS, income, comps), and the selected protest " +
+      "strategy " +
       "(selectedStrategy). Rules:\n" +
       "- For EACH item set status: 'Verified' when a specific uploaded document OR a specific line " +
       "in authoritativeFacts DIRECTLY satisfies it; 'Found' when an uploaded document plausibly " +
@@ -1204,11 +1254,28 @@ const MODULE_SPECS: Record<string, ModuleSpec> = {
       "surveyor, a licensed property appraiser (MAI), the owner's own records, the city/county " +
       "planning or zoning department, a general contractor or licensed inspector, or the owner's " +
       "own camera. Never invent a named vendor, website, or phone number.\n" +
+      "- category is exactly one of: Property Condition & Physical Evidence | Property " +
+      "Characteristics & Site Evidence | Zoning, Land Use & Legal Restrictions | Valuation & " +
+      "Comparable Evidence | Income & Commercial Property Evidence | Functional Obsolescence | " +
+      "Economic Issues | Special-Purpose / Specialized Property Evidence | Ownership & " +
+      "Transaction Evidence | Tax Protest & County Evidence | Other Supporting Evidence. Pick the " +
+      "single best fit — never invent a new category.\n" +
+      "- relatedModule names whichever real finding this item's evidence would confirm or change " +
+      "if verified, exactly one of: comps | site | improvement | zoning | income | strategy, or " +
+      "null when it doesn't tie to a specific one of those (e.g. a general ownership document).\n" +
+      "- contributionNote (only when status is NOT Missing): one short, cautious sentence on how " +
+      'this specific document helps the case — e.g. "This document provides supporting evidence ' +
+      'for the comparable assessment argument." or "This could materially strengthen the ' +
+      'condition argument." NEVER state or imply a win probability or percentage (e.g. never ' +
+      '"increases your chance of winning by X%") — this is a readiness signal, not a prediction. ' +
+      "null when status is Missing.\n" +
       "- 6-10 items. Favor items that differ on priority and status rather than a flat list.",
     schema:
       `{"items": [{"item": "<short item>", "priority": "<Critical | Important | Supporting | ` +
       `Optional>", "status": "<Verified | Found | Missing>", "foundIn": "<exact source, or null>", ` +
-      `"whyNeeded": "<one sentence>", "verificationNote": "<one sentence>", ` +
+      `"whyNeeded": "<one sentence>", "verificationNote": "<one sentence>", "category": "<one of ` +
+      `the 11 categories>", "relatedModule": "<comps | site | improvement | zoning | income | ` +
+      `strategy | null>", "contributionNote": "<one cautious sentence, or null if Missing>", ` +
       `"documentSuggestions": [{"documentName": "<short document type>", "whatToInclude": ` +
       `"<one sentence>", "whereToObtain": "<a general real source type>"}, ...]}, ...]}`,
     parse: (p) => ({ items: evidenceItems(p.items) }),

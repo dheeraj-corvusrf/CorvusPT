@@ -12,6 +12,20 @@ const MAX_BYTES_PER_DOC = 8 * 1024 * 1024;
 
 export type EvidenceCategorization = { fileName: string; matchedItem: string | null };
 
+// Turns an evidence-checklist item's text into a stable slug for the
+// `Evidence Category: <slug>` document tag — so a document uploaded under
+// one checklist item keeps showing there even if the AI's own item wording
+// shifts slightly on a later regenerate (matched by slug, not exact string).
+// Shared by ai-report.tsx (tagging uploads / rendering the checklist) and
+// evidence-packet.ts (resolving a document's real category for the packet's
+// by-strategy-section reorg).
+export function evidenceItemSlug(item: string): string {
+  return item
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 // Skips categorization entirely (returns every file uncategorized) rather
 // than throwing, when there's nothing real to match against or every file
 // is over the size cap — the caller falls back to its existing generic

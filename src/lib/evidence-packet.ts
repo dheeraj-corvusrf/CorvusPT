@@ -2,8 +2,10 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type RGB } from "pdf-lib
 import { getDocumentUrl, type DocumentRecord } from "./documents";
 import { currency } from "./intake-store";
 import { getCountyProtestInfo } from "./county-protest-info";
+import { evidenceItemSlug } from "./evidence-categorize";
 import type { PropertyRecord } from "./properties";
 import type { EvidenceAnalysis, DocumentStatus } from "./protest-reason";
+import type { EvidenceCategory, EvidenceItem } from "./ai-report-modules";
 
 // Compiles a property's real uploaded protest-evidence documents into one
 // organized, downloadable PDF — Module 8's "Download Evidence Packet". Real
@@ -115,6 +117,55 @@ class PageWriter {
   }
 }
 
+// Part 7: "The packet should be organized according to the protest
+// strategy rather than simply by upload date." Module 8's checklist tags
+// each item with one of the 11 EVIDENCE_CATEGORY_ORDER groups (see
+// ai-report-modules.ts) — this maps those onto the ticket's own named
+// sections. A few categories fold into one section on purpose rather than
+// inventing a split (e.g. "Valuation & Comparable Evidence" doesn't itself
+// distinguish sales from equity comps) — "exact sections should be
+// customized to the case," and only sections with a real document are ever
+// printed.
+const PACKET_SECTION_ORDER = [
+  "Property Information",
+  "Comparable Sales & Assessments",
+  "Property Condition",
+  "Income / Market Evidence",
+  "Functional / Economic Obsolescence",
+  "Supporting Documents",
+  "County Forms & Filing Documents",
+] as const;
+type PacketSection = (typeof PACKET_SECTION_ORDER)[number];
+
+const CATEGORY_TO_SECTION: Record<EvidenceCategory, PacketSection> = {
+  "Property Condition & Physical Evidence": "Property Condition",
+  "Property Characteristics & Site Evidence": "Property Information",
+  "Zoning, Land Use & Legal Restrictions": "Supporting Documents",
+  "Valuation & Comparable Evidence": "Comparable Sales & Assessments",
+  "Income & Commercial Property Evidence": "Income / Market Evidence",
+  "Functional Obsolescence": "Functional / Economic Obsolescence",
+  "Economic Issues": "Functional / Economic Obsolescence",
+  "Special-Purpose / Specialized Property Evidence": "Supporting Documents",
+  "Ownership & Transaction Evidence": "Supporting Documents",
+  "Tax Protest & County Evidence": "County Forms & Filing Documents",
+  "Other Supporting Evidence": "Supporting Documents",
+};
+
+// A document's real category comes from the same `Evidence Category: <slug>`
+// tag ai-report.tsx already writes on upload — resolved back to the
+// checklist item (and its AI-assigned category) by slug, not by an exact
+// string match, same discipline as the checklist UI itself. Uncategorized
+// uploads (generic PROTEST_EVIDENCE_DOCUMENT_TYPE, or an item predating this
+// field) fall into "Supporting Documents" rather than being dropped.
+function resolveSection(doc: DocumentRecord, items: EvidenceItem[]): PacketSection {
+  const slug = doc.documentType?.startsWith("Evidence Category: ")
+    ? doc.documentType.slice("Evidence Category: ".length)
+    : null;
+  const item = slug ? items.find((it) => evidenceItemSlug(it.item) === slug) : null;
+  const category = item?.category ?? "Other Supporting Evidence";
+  return CATEGORY_TO_SECTION[category];
+}
+
 const STATUS_LABEL: Record<DocumentStatus, string> = {
   Accepted: "Accepted",
   "Needs Review": "Needs Review — check this document before relying on it",
@@ -129,6 +180,11 @@ export async function buildEvidencePacket(
   property: PropertyRecord,
   documents: DocumentRecord[],
   findings: MatchedFinding[],
+  // Module 8's own checklist items — used only to resolve each included
+  // document's real category for the by-section reorg below. Optional (and
+  // defaulted to []) so an older caller not yet passing this still compiles
+  // and simply gets every document filed under "Supporting Documents."
+  items: EvidenceItem[] = [],
 ): Promise<Uint8Array> {
   const packet = await PDFDocument.create();
   const w = await PageWriter.create(packet);
@@ -153,7 +209,7 @@ export async function buildEvidencePacket(
   w.spacer(10);
   w.rule();
 
-  // ---- Table of contents ----
+  // ---- Table of contents, organized by protest-strategy section (Part 7) ----
   const paired = documents.map((doc, i) => ({ doc, finding: findings[i] ?? null }));
   const included = paired.filter(
     (p): p is { doc: DocumentRecord; finding: MatchedFinding } =>
@@ -161,14 +217,46 @@ export async function buildEvidencePacket(
   );
   const excluded = paired.filter((p) => !included.some((inc) => inc.doc.id === p.doc.id));
 
+  // "County Forms & Filing Documents" is always shown, even with no tagged
+  // document, since the county filing instructions below always belong to
+  // it — every other section only appears when a real document earns it
+  // ("exact sections should be customized to the case").
+  const sectionsPresent = PACKET_SECTION_ORDER.filter(
+    (section) =>
+      section === "County Forms & Filing Documents" ||
+      included.some((p) => resolveSection(p.doc, items) === section),
+  );
+  // Same section order, flattened, drives both the ToC numbering and the
+  // actual document loop below so the two always agree.
+  const orderedIncluded = sectionsPresent.flatMap((section) =>
+    included.filter((p) => resolveSection(p.doc, items) === section),
+  );
+
   w.text("Contents", { size: 12, bold: true, gap: 6 });
   if (included.length === 0) {
     w.text("No documents qualified for inclusion — see below.", { size: 10.5, color: MUTED });
   }
-  included.forEach((p, i) => {
-    w.text(`${i + 1}. ${p.doc.fileName}`, { size: 10.5, bold: true, gap: 1 });
-    w.text(STATUS_LABEL[p.finding.status], { size: 9, color: MUTED, gap: 4 });
-  });
+  let docNumber = 0;
+  for (const [sectionIndex, section] of sectionsPresent.entries()) {
+    const inSection = included.filter((p) => resolveSection(p.doc, items) === section);
+    if (inSection.length === 0 && section !== "County Forms & Filing Documents") continue;
+    w.text(`Section ${sectionIndex + 1} — ${section}`, {
+      size: 10.5,
+      bold: true,
+      color: ACCENT,
+      gap: 2,
+    });
+    if (inSection.length === 0) {
+      w.text("County filing instructions — see below.", { size: 9.5, color: MUTED, gap: 4 });
+      continue;
+    }
+    for (const p of inSection) {
+      docNumber++;
+      w.text(`${docNumber}. ${p.doc.fileName}`, { size: 10, gap: 1, maxWidth: CONTENT_WIDTH - 12 });
+      w.text(STATUS_LABEL[p.finding.status], { size: 9, color: MUTED, gap: 3 });
+    }
+    w.spacer(2);
+  }
 
   if (excluded.length > 0) {
     w.spacer(6);
@@ -181,12 +269,18 @@ export async function buildEvidencePacket(
     }
   }
 
-  // ---- County filing instructions ----
+  // ---- County filing instructions (always Section N — County Forms & Filing Documents) ----
+  const countySectionNumber = sectionsPresent.indexOf("County Forms & Filing Documents") + 1;
   const countyInfo = getCountyProtestInfo(property.cad);
   if (countyInfo) {
     w.spacer(10);
     w.rule();
-    w.text("How to Submit to Your County", { size: 12, bold: true, color: ACCENT, gap: 6 });
+    w.text(`Section ${countySectionNumber} — County Forms & Filing Documents`, {
+      size: 12,
+      bold: true,
+      color: ACCENT,
+      gap: 6,
+    });
     if (countyInfo.filingMethod.online) {
       w.text("Online:", { size: 10.5, bold: true, gap: 1 });
       w.text(countyInfo.filingMethod.online.url, { size: 10, gap: 1 });
@@ -207,6 +301,13 @@ export async function buildEvidencePacket(
     }
   } else {
     w.spacer(10);
+    w.rule();
+    w.text(`Section ${countySectionNumber} — County Forms & Filing Documents`, {
+      size: 12,
+      bold: true,
+      color: ACCENT,
+      gap: 6,
+    });
     w.text(
       "No confirmed filing-method details are on file for this county yet — check your " +
         "appraisal district's website or notice for how to submit this packet.",
@@ -214,10 +315,22 @@ export async function buildEvidencePacket(
     );
   }
 
-  // ---- Each included document: a divider page, then its real pages ----
-  for (const [i, { doc, finding }] of included.entries()) {
+  // ---- Each included document: a divider page, then its real pages —
+  // grouped by section (Part 7), same order and numbering as the ToC above.
+  let currentSection: PacketSection | null = null;
+  for (const [i, { doc, finding }] of orderedIncluded.entries()) {
+    const section = resolveSection(doc, items);
+    if (section !== currentSection) {
+      currentSection = section;
+      const sectionDivider = await PageWriter.create(packet);
+      sectionDivider.text(`Section ${sectionsPresent.indexOf(section) + 1} — ${section}`, {
+        size: 20,
+        bold: true,
+        color: ACCENT,
+      });
+    }
     const div = await PageWriter.create(packet);
-    div.text(`Document ${i + 1} of ${included.length}`, { size: 9.5, color: MUTED, gap: 2 });
+    div.text(`Document ${i + 1} of ${orderedIncluded.length}`, { size: 9.5, color: MUTED, gap: 2 });
     div.text(doc.fileName, { size: 16, bold: true, gap: 4 });
     div.text(STATUS_LABEL[finding.status], { size: 10, color: ACCENT, gap: 10 });
     if (finding.assessment) {

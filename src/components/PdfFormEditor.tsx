@@ -533,8 +533,9 @@ function SignedFilingGuidance({
             onClick={onMarkFiled}
             disabled={markingFiled}
             className="btn-accent text-xs py-1.5 disabled:opacity-60"
+            title="Closes this editor — pick your filing method and confirm it below"
           >
-            {markingFiled ? "Saving…" : "I've delivered this — Mark as Filed"}
+            {markingFiled ? "Saving…" : "Done — Continue Filing Below"}
           </button>
         )}
         <button onClick={onMakeChanges} className="text-xs text-accent hover:underline">

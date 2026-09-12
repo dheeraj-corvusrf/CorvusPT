@@ -2039,6 +2039,61 @@ create policy "Admins can view all base data"
   on public.property_base_data for select
   using (public.is_admin());
 
+-- Per-document filing-method tracking (see src/lib/protest-form-submissions.ts
+-- and the Filing Method & Submission workflow in CaseDetailModal.tsx). A
+-- county can allow different submission methods for different documents, so
+-- this lives on protest_form_submissions itself (one row per document) rather
+-- than the single case-level filing_channel/filing_confirmation_number/
+-- certified_mail_tracking columns on protests above — those stay for File
+-- Protest's own case-level mirror (see saveCaseRecordFields), unchanged.
+-- 'evidence' is a new allowed form_type — a submission row with no PDF/
+-- signature, purely to track the Evidence package's own method/proof;
+-- field_values now defaults to '{}' so a first-ever row for it (or for any
+-- form the user picks a method for before ever drafting it) doesn't fail the
+-- not-null constraint.
+alter table public.protest_form_submissions
+  drop constraint if exists protest_form_submissions_form_type_check;
+alter table public.protest_form_submissions
+  add constraint protest_form_submissions_form_type_check
+  check (form_type in ('notice_of_protest', 'appointment_of_agent', 'evidence_declaration', 'evidence'));
+alter table public.protest_form_submissions
+  alter column field_values set default '{}';
+alter table public.protest_form_submissions add column if not exists filing_method text;
+alter table public.protest_form_submissions
+  drop constraint if exists protest_form_submissions_filing_method_check;
+alter table public.protest_form_submissions
+  add constraint protest_form_submissions_filing_method_check
+  check (filing_method is null or filing_method in ('online', 'mail', 'in_person', 'email'));
+alter table public.protest_form_submissions add column if not exists filing_confirmation_number text;
+alter table public.protest_form_submissions add column if not exists mail_tracking_number text;
+alter table public.protest_form_submissions add column if not exists email_recipient text;
+alter table public.protest_form_submissions add column if not exists email_subject text;
+alter table public.protest_form_submissions add column if not exists email_sent_at timestamptz;
+alter table public.protest_form_submissions add column if not exists filing_confirmed_at timestamptz;
+-- Generalized across all four documents (not just Evidence) — a county could
+-- in principle bounce back a request on any of them. Set whenever the county
+-- asks for more after a confirmation; a later, fresher filing_confirmed_at
+-- naturally supersedes it (see filingSubmissionStatus's own comment) — no
+-- separate "clear this" step needed. See View Case's Filed Protest / Evidence
+-- status cards (CaseDetailModal.tsx).
+alter table public.protest_form_submissions add column if not exists additional_requested_at timestamptz;
+-- submitted_at is the generic "the customer says they delivered this"
+-- marker for EVERY method (Online/Mail/In Person included, not just Email's
+-- own email_sent_at) — see filingSubmissionStatus's own comment for how the
+-- three real event timestamps (filing_confirmed_at, additional_requested_at,
+-- rejected_at) plus this one resolve into a single status.
+alter table public.protest_form_submissions add column if not exists submitted_at timestamptz;
+alter table public.protest_form_submissions add column if not exists rejected_at timestamptz;
+-- Generate Evidence Package's own reminder setting — only meaningful on the
+-- 'evidence' row; see send-evidence-reminders (pg_cron, daily).
+alter table public.protest_form_submissions add column if not exists reminder_frequency text default 'daily';
+alter table public.protest_form_submissions
+  drop constraint if exists protest_form_submissions_reminder_frequency_check;
+alter table public.protest_form_submissions
+  add constraint protest_form_submissions_reminder_frequency_check
+  check (reminder_frequency is null or reminder_frequency in ('daily', 'weekly', 'off'));
+alter table public.protest_form_submissions add column if not exists last_reminder_sent_at timestamptz;
+
 -- ── ONE-TIME MANUAL STEP — do NOT run this as part of the routine schema paste ──
 -- After you have an account (sign up normally through the app first), run this once,
 -- by itself, substituting your real email, to make that account an admin:

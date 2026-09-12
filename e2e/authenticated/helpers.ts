@@ -42,6 +42,30 @@ export async function signIn(page: Page, email: string, password: string) {
   // not "/dashboard", so wait for the redirect away from /sign-in rather than
   // assuming a specific destination.
   await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"), { timeout: 15_000 });
+  await dismissLegalGateIfPresent(page);
+}
+
+// LegalGate.tsx blocks the ENTIRE app (fixed inset-0, every route) for any
+// signed-in account whose recorded Terms/Privacy acceptance is behind the
+// current version — which a real, previously-used account (like a seeded
+// test/admin account) hits routinely as those versions get bumped. Every
+// authenticated spec needs this dismissed right after sign-in, not just the
+// ones that happen to already expect a dialog, or every later click just
+// times out against this overlay intercepting pointer events.
+async function dismissLegalGateIfPresent(page: Page) {
+  // isVisible() checks the DOM immediately and does NOT wait — LegalGate only
+  // renders once its own getLatestTermsAcceptance() fetch resolves, which is
+  // still in flight right after sign-in's redirect. waitFor() actually polls
+  // for up to the timeout instead of taking one instant snapshot.
+  const heading = page.getByRole("heading", { name: "We've updated our Terms" });
+  const appeared = await heading
+    .waitFor({ state: "visible", timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!appeared) return;
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Accept & Continue" }).click();
+  await heading.waitFor({ state: "hidden", timeout: 10_000 });
 }
 
 // Deletes the most recently requested protest for this account — run after

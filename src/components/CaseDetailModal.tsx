@@ -71,14 +71,15 @@ import { verifyCaseReadiness, type CaseReadinessConcern } from "@/lib/case-readi
 import {
   uploadDocument,
   getProtestEvidenceDocuments,
-  getFilingProofDocuments,
+  getFilingProofDocumentsFor,
+  filingProofDocumentType,
   getDocumentById,
   getDocumentUrl,
-  FILING_PROOF_DOCUMENT_TYPE,
   SETTLEMENT_DOCUMENT_TYPE,
   DECISION_DOCUMENT_TYPE,
   type DocumentRecord,
 } from "@/lib/documents";
+import { getCadRecordUrl } from "@/lib/cad-record-url";
 import { verifyFilingProof, type FilingProofVerification } from "@/lib/filing-proof";
 import {
   extractHearingNotice,
@@ -134,8 +135,34 @@ import {
   getSubmission,
   saveDraft,
   signAndSubmit,
+  saveFilingMethod,
+  saveFilingProofFields,
+  markSubmitted,
+  confirmFiling,
+  requestAdditionalInfo,
+  markRejected,
+  saveReminderFrequency,
   type FormType,
+  type FilingMethod,
+  type FormSubmission,
+  type ReminderFrequency,
 } from "@/lib/protest-form-submissions";
+import {
+  filingSubmissionStatus,
+  hasFilingReferenceNumber,
+  confirmationMethodDescription,
+  FILING_SUBMISSION_STATUS_LABEL,
+  type FilingSubmissionStatus,
+} from "@/lib/filing-submission-status";
+import {
+  computeEvidenceStatus,
+  evidenceScore,
+  EVIDENCE_STATUS_LABEL,
+  type EvidenceStatusStage,
+} from "@/lib/evidence-status";
+import { selectRelevantEvidence, buildEvidencePackagePdf } from "@/lib/evidence-package";
+import { getCachedModuleResult } from "@/lib/module-results-cache";
+import type { ModuleResultMap } from "@/lib/ai-report-modules";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
 import {
@@ -143,6 +170,7 @@ import {
   FILING_STEP_META,
   isFilingStepDone,
   firstIncompleteFilingStep,
+  describeFilingRequirements,
   type FilingStepId,
   type FilingStepStatusInput,
 } from "@/lib/filing-workflow";
@@ -479,11 +507,18 @@ export function CaseDetailView({
           {/* --- Prepare & File --- */}
           {activeTab === "file" && (
             <div>
-              <FilingWorkflowLauncher
+              <FiledProtestStatusCard
+                userId={userId}
                 property={property}
                 protest={current}
                 evidenceCount={evidenceDocuments.length}
-                noticeSignedAt={noticeSignedAt}
+                onOpen={() => setFilingOpen(true)}
+              />
+              <EvidenceStatusCard
+                userId={userId}
+                property={property}
+                protest={current}
+                evidenceDocuments={evidenceDocuments}
                 onOpen={() => setFilingOpen(true)}
               />
               <CasePlanSection
@@ -1406,105 +1441,373 @@ export function CasePlanSection({
   );
 }
 
-// Real, county-specific guidance on what "proof of filing" actually looks
-// like for each real way this county accepts a protest — grounded in the
-// same real filingMethod facts FilingMethodsList already reads, not generic
-// advice. Every county returns at least one real tip, or the honest
-// fallback below when this county has no confirmed filing methods on file.
-function filingProofGuidance(countyInfo: CountyProtestInfo | null): string[] {
-  const tips: string[] = [];
-  if (countyInfo?.filingMethod.online) {
-    tips.push(
-      "Filed online: a screenshot or PDF of the confirmation page, or the confirmation email the portal sent you.",
-    );
-  }
-  if (countyInfo?.filingMethod.mail) {
-    tips.push(
-      "Mailed it: a photo of your Certified Mail receipt/tracking number, or the postmarked envelope.",
-    );
-  }
-  if (countyInfo?.filingMethod.inPerson) {
-    tips.push(
-      "Delivered in person: a photo of the stamped/dated copy the district handed back to you.",
-    );
-  }
-  if (countyInfo?.filingMethod.email.available) {
-    tips.push("Emailed it: a screenshot of your sent email, or any reply confirming receipt.");
-  }
-  if (tips.length === 0) {
-    tips.push(
-      "Any confirmation you received when you submitted it — a screenshot, email, receipt, or stamped copy.",
-    );
-  }
-  return tips;
+const FILING_METHOD_LABEL: Record<FilingMethod, string> = {
+  online: "Online / County Website",
+  mail: "Mail",
+  in_person: "In Person",
+  email: "Email",
+};
+
+// A real, county-confirmed method wins; when none is confirmed for this
+// county, all four still show (matches the honest "not confirmed, check
+// the website directly" fallback the instructions block below gives per
+// method) rather than leaving the picker with nothing to choose.
+function availableFilingMethods(countyInfo: CountyProtestInfo | null): FilingMethod[] {
+  const methods: FilingMethod[] = [];
+  if (countyInfo?.filingMethod.online) methods.push("online");
+  if (countyInfo?.filingMethod.mail) methods.push("mail");
+  if (countyInfo?.filingMethod.inPerson) methods.push("in_person");
+  if (countyInfo?.filingMethod.email.available) methods.push("email");
+  return methods.length > 0 ? methods : ["online", "mail", "in_person", "email"];
 }
 
-// "Have you completed and submitted your property protest?" — the real gate
-// before a case moves to "filed" (see handleMarkFiled and friends in
-// DocumentsSection below). Two steps: the Yes/Not Yet question itself, then
-// — only after Yes — real proof upload plus an advisory AI read of what it
-// shows. Never auto-advances; every step here needs an explicit click.
-function FilingConfirmationFlow({
-  step,
-  countyInfo,
-  proofDocs,
-  uploadingProof,
-  onUploadProof,
-  proofCheck,
-  checkingProof,
-  proofCheckError,
-  onRecheck,
-  markingFiled,
-  onNotYet,
-  onConfirmIntent,
-  onConfirmFiled,
+// mailto: can't attach a file (same known limitation as PdfFormEditor's own
+// buildFilingMailto) — the draft tells the user that plainly rather than
+// silently producing an email with nothing attached.
+function buildFilingEmailDraft(
+  docLabel: string,
+  property: PropertyRecord,
+): { subject: string; body: string } {
+  return {
+    subject: `${docLabel} — ${property.address}`,
+    body: `Please find my ${docLabel} for ${property.address}${
+      property.accountNumber ? ` (Account #${property.accountNumber})` : ""
+    }.\n\n(Attach your downloaded, signed PDF to this email before sending — it isn't included automatically.)`,
+  };
+}
+
+const EMPTY_FORM_SUBMISSION: FormSubmission = {
+  fieldValues: {},
+  signature: null,
+  signedAt: null,
+  documentId: null,
+  filingMethod: null,
+  filingConfirmationNumber: null,
+  mailTrackingNumber: null,
+  emailRecipient: null,
+  emailSubject: null,
+  emailSentAt: null,
+  submittedAt: null,
+  filingConfirmedAt: null,
+  additionalRequestedAt: null,
+  rejectedAt: null,
+  reminderFrequency: null,
+  lastReminderSentAt: null,
+};
+
+// Shown right after the Notice of Protest is signed, so filing it (Go to
+// County CAD, below) never reads as blocked on the evidence package or the
+// other forms — see describeFilingRequirements's own comment for why this is
+// general Texas process fact rather than a county-specific rule this app
+// doesn't actually have.
+function FilingRequirementsPanel({
+  steps,
+  hearingDate,
 }: {
-  step: "ask" | "proof";
-  countyInfo: CountyProtestInfo | null;
-  proofDocs: DocumentRecord[];
-  uploadingProof: boolean;
-  onUploadProof: (files: File[]) => void;
-  proofCheck: FilingProofVerification | null;
-  checkingProof: boolean;
-  proofCheckError: string | null;
-  onRecheck: () => void;
-  markingFiled: boolean;
-  onNotYet: () => void;
-  onConfirmIntent: () => void;
-  onConfirmFiled: () => void;
+  steps: FilingStepId[];
+  hearingDate: string | null;
 }) {
-  if (step === "ask") {
-    return (
-      <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-4 text-sm">
-        <p className="font-medium">Have you completed and submitted your property protest?</p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button onClick={onConfirmIntent} className="btn-accent text-xs py-1.5">
-            Yes — Protest Filed
-          </button>
-          <button onClick={onNotYet} className="btn-outline text-xs py-1.5">
-            Not Yet
-          </button>
+  const note = describeFilingRequirements(steps, hearingDate);
+  return (
+    <div className="rounded-md border border-border p-3 text-xs">
+      <p className="font-medium text-foreground">
+        What has to go with this filing — and what can follow
+      </p>
+      <p className="mt-1.5">
+        <span className="font-semibold text-success">Due now: </span>
+        <span className="text-muted-foreground">{note.dueNow}</span>
+      </p>
+      {note.canWaitUntil.length > 0 && (
+        <div className="mt-1.5">
+          <span className="font-semibold text-foreground">Can follow: </span>
+          <ul className="mt-1 grid gap-1 text-muted-foreground">
+            {note.canWaitUntil.map((item) => (
+              <li key={item.label}>
+                • <span className="font-medium text-foreground">{item.label}</span> — {item.detail}.
+              </li>
+            ))}
+          </ul>
         </div>
-      </div>
-    );
+      )}
+    </div>
+  );
+}
+
+// One real "how are you actually getting this document to the county, and
+// what proves you did" flow — used identically for all four documents the
+// filing workflow tracks (File Protest, Agent/Representative, Evidence
+// Affidavit, Evidence). A county can allow a different method for each, so
+// this is scoped per (protest, formType), never once per case. Self-
+// contained: loads and saves its own submission row and proof documents,
+// and only tells its parent about the one thing that actually changes the
+// case's own state — the moment this document is confirmed with the county
+// (onConfirmed), so the caller can react (flip protest.status for the
+// Notice of Protest, or set evidenceSubmittedConfirmedAt for Evidence).
+function FilingSubmissionFlow({
+  userId,
+  property,
+  protest,
+  formType,
+  docLabel,
+  countyInfo,
+  onConfirmed,
+  // Bumped by a caller (Generate Evidence Package, once it saves a new
+  // proof document) to force this panel to re-fetch its own submission +
+  // proof list — it has no other reason to know that happened.
+  refreshToken,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  formType: FormType;
+  docLabel: string;
+  countyInfo: CountyProtestInfo | null;
+  onConfirmed: (at: string) => void;
+  refreshToken?: number;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [submission, setSubmission] = useState<FormSubmission | null>(null);
+  const [proofDocs, setProofDocs] = useState<DocumentRecord[]>([]);
+  const [uploadingProof, setUploadingProof] = useState(false);
+  const [proofCheck, setProofCheck] = useState<FilingProofVerification | null>(null);
+  const [checkingProof, setCheckingProof] = useState(false);
+  const [proofCheckError, setProofCheckError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [savingField, setSavingField] = useState<string | null>(null);
+  const [confNumInput, setConfNumInput] = useState("");
+  const [trackingInput, setTrackingInput] = useState("");
+  const [emailRecipientInput, setEmailRecipientInput] = useState("");
+  const [emailSubjectInput, setEmailSubjectInput] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getSubmission(protest.id, formType),
+      getFilingProofDocumentsFor(userId, property.id, formType),
+    ])
+      .then(([s, docs]) => {
+        if (!live) return;
+        setSubmission(s);
+        setProofDocs(docs);
+        setConfNumInput(s?.filingConfirmationNumber ?? "");
+        setTrackingInput(s?.mailTrackingNumber ?? "");
+        setEmailRecipientInput(s?.emailRecipient ?? countyInfo?.filingMethod.email.address ?? "");
+        const draft = buildFilingEmailDraft(docLabel, property);
+        setEmailSubjectInput(s?.emailSubject ?? draft.subject);
+      })
+      .catch((err) => console.error(`Could not load filing status for ${docLabel}:`, err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [protest.id, formType, userId, property.id, refreshToken]);
+
+  async function chooseMethod(method: FilingMethod) {
+    setSavingField("method");
+    try {
+      await saveFilingMethod(userId, protest.id, formType, method);
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), filingMethod: method }));
+      // Mirrors into the case-level field File Protest already had —
+      // CaseRecordSection keeps reading real, current data instead of a
+      // second, disconnected copy the user would have to enter twice.
+      if (formType === "notice_of_protest") {
+        saveCaseRecordFields(protest.id, { filingChannel: method }).catch((err) =>
+          console.error("Could not mirror filing method to the case record:", err),
+        );
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setSavingField(null);
+    }
   }
 
-  const tips = filingProofGuidance(countyInfo);
-  return (
-    <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-4 text-sm">
-      <p className="font-medium">Upload proof that you filed</p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        This app has no direct connection to {countyInfo?.cad ?? "your county"} — your own proof is
-        the record this case relies on. What counts as proof depends on how you filed:
-      </p>
-      <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
-        {tips.map((tip) => (
-          <li key={tip}>• {tip}</li>
-        ))}
-      </ul>
+  async function saveConfirmationNumber() {
+    setSavingField("conf");
+    try {
+      const value = confNumInput.trim() || null;
+      await saveFilingProofFields(userId, protest.id, formType, {
+        filingConfirmationNumber: value,
+      });
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), filingConfirmationNumber: value }));
+      if (formType === "notice_of_protest") {
+        saveCaseRecordFields(protest.id, { filingConfirmationNumber: value }).catch((err) =>
+          console.error("Could not mirror confirmation number to the case record:", err),
+        );
+      }
+      toast.success("Saved.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setSavingField(null);
+    }
+  }
 
+  async function saveTrackingNumber() {
+    setSavingField("tracking");
+    try {
+      const value = trackingInput.trim() || null;
+      await saveFilingProofFields(userId, protest.id, formType, { mailTrackingNumber: value });
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), mailTrackingNumber: value }));
+      if (formType === "notice_of_protest") {
+        saveCaseRecordFields(protest.id, { certifiedMailTracking: value }).catch((err) =>
+          console.error("Could not mirror tracking number to the case record:", err),
+        );
+      }
+      toast.success("Saved.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setSavingField(null);
+    }
+  }
+
+  async function handleUploadProof(files: File[]) {
+    setUploadingProof(true);
+    try {
+      const uploaded: DocumentRecord[] = [];
+      for (const file of files) {
+        uploaded.push(
+          await uploadDocument(userId, property.id, file, filingProofDocumentType(formType)),
+        );
+      }
+      const next = [...proofDocs, ...uploaded];
+      setProofDocs(next);
+      handleCheckProof(next);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not upload this file."));
+    } finally {
+      setUploadingProof(false);
+    }
+  }
+
+  async function handleCheckProof(docs: DocumentRecord[] = proofDocs) {
+    if (docs.length === 0) return;
+    setCheckingProof(true);
+    setProofCheckError(null);
+    try {
+      setProofCheck(await verifyFilingProof(property, docs));
+    } catch (err) {
+      setProofCheckError(getErrorMessage(err, "Could not check this proof."));
+    } finally {
+      setCheckingProof(false);
+    }
+  }
+
+  // The customer's own "I delivered this" report — the same real signal for
+  // every method now (Online/Mail/In Person included, not just Email). Not
+  // the same as the county actually confirming it — see handleConfirm below.
+  async function handleMarkSubmitted() {
+    setConfirming(true);
+    try {
+      const at = await markSubmitted(userId, protest.id, formType);
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), submittedAt: at }));
+      toast.success("Logged — showing as Awaiting County Confirmation.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  // The one honest source of "the county actually has this" — the
+  // customer's own explicit click, same discipline as markFiled() elsewhere
+  // in this app. Never auto-confirmed from the AI read above, which is
+  // advisory only, and never set just because the customer marked it
+  // submitted — that's a real, separate, earlier event.
+  async function handleConfirm() {
+    setConfirming(true);
+    try {
+      const at = await confirmFiling(userId, protest.id, formType);
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), filingConfirmedAt: at }));
+      onConfirmed(at);
+      toast.success(`${docLabel} marked as filed with the county.`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function handleReject() {
+    setConfirming(true);
+    try {
+      const at = await markRejected(userId, protest.id, formType);
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), rejectedAt: at }));
+      toast.info(`${docLabel} marked as rejected — fix it and mark as submitted again.`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  // Email is mocked — Corvus prepares the draft, but sending and reading any
+  // reply both happen in the user's own mail client (this app has no email
+  // account integration). "Sent" and "the county confirmed" are deliberately
+  // two separate, manual steps rather than one click, so the case never
+  // claims a confirmation this app can't actually see. Sets the same generic
+  // submittedAt every other method uses, plus email's own sent-log fields.
+  async function handleMarkEmailSent() {
+    setConfirming(true);
+    try {
+      const at = new Date().toISOString();
+      await Promise.all([
+        saveFilingProofFields(userId, protest.id, formType, {
+          emailRecipient: emailRecipientInput.trim() || null,
+          emailSubject: emailSubjectInput.trim() || null,
+          emailSentAt: at,
+        }),
+        markSubmitted(userId, protest.id, formType),
+      ]);
+      setSubmission((s) => ({
+        ...(s ?? EMPTY_FORM_SUBMISSION),
+        emailRecipient: emailRecipientInput.trim() || null,
+        emailSubject: emailSubjectInput.trim() || null,
+        emailSentAt: at,
+        submittedAt: at,
+      }));
+      toast.success("Logged — showing as Awaiting County Confirmation.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  if (loading) {
+    return <p className="mt-3 text-xs text-muted-foreground">Loading filing status…</p>;
+  }
+
+  const method = submission?.filingMethod ?? null;
+  const status = filingSubmissionStatus(submission);
+  const methods = availableFilingMethods(countyInfo);
+  const cadUrl = getCadRecordUrl({
+    cad: property.cad ?? "",
+    accountNumber: property.accountNumber,
+  });
+  const emailDraft = buildFilingEmailDraft(docLabel, property);
+  const emailAddress = countyInfo?.filingMethod.email.address ?? null;
+  const mailtoHref = emailAddress
+    ? `mailto:${encodeURIComponent(emailAddress)}?subject=${encodeURIComponent(
+        emailSubjectInput || emailDraft.subject,
+      )}&body=${encodeURIComponent(emailDraft.body)}`
+    : null;
+  const canConfirm = hasFilingReferenceNumber(submission) || proofDocs.length > 0;
+  // The submit form (method-specific input + proof + "Mark as Submitted")
+  // shows whenever there's genuinely something to (re)submit — not yet
+  // submitted, or bounced back (rejected / additional info requested).
+  const canEditSubmission =
+    status === "method_chosen" || status === "rejected" || status === "additional_requested";
+
+  const proofBlock = (
+    <div className="mt-3">
       {proofDocs.length > 0 && (
-        <ul className="mt-3 grid gap-1 text-xs">
+        <ul className="mb-2 grid gap-1 text-xs">
           {proofDocs.map((doc) => (
             <li key={doc.id} className="text-foreground">
               {doc.fileName}
@@ -1512,9 +1815,8 @@ function FilingConfirmationFlow({
           ))}
         </ul>
       )}
-
       <label
-        className={`mt-3 inline-flex btn-outline cursor-pointer py-1.5 text-xs ${uploadingProof ? "pointer-events-none opacity-60" : ""}`}
+        className={`inline-flex btn-outline cursor-pointer py-1.5 text-xs ${uploadingProof ? "pointer-events-none opacity-60" : ""}`}
       >
         {uploadingProof ? "Uploading…" : "Upload Proof"}
         <input
@@ -1526,17 +1828,16 @@ function FilingConfirmationFlow({
           onChange={(e) => {
             const selected = e.target.files ? Array.from(e.target.files) : [];
             e.target.value = "";
-            if (selected.length > 0) onUploadProof(selected);
+            if (selected.length > 0) handleUploadProof(selected);
           }}
         />
       </label>
-
       {checkingProof && (
-        <p className="mt-3 text-xs text-muted-foreground">Checking what this shows…</p>
+        <p className="mt-2 text-xs text-muted-foreground">Checking what this shows…</p>
       )}
-      {proofCheckError && <p className="mt-3 text-xs text-destructive">{proofCheckError}</p>}
+      {proofCheckError && <p className="mt-2 text-xs text-destructive">{proofCheckError}</p>}
       {proofCheck && !checkingProof && (
-        <div className="mt-3 rounded-md border border-border p-2.5 text-xs">
+        <div className="mt-2 rounded-md border border-border p-2.5 text-xs">
           <div className="font-medium">AI check — review before confirming</div>
           <div className="mt-1.5 grid gap-1.5">
             {proofCheck.findings.map((f, i) => (
@@ -1568,63 +1869,725 @@ function FilingConfirmationFlow({
           {proofCheck.overallAssessment && (
             <p className="mt-1.5 text-muted-foreground">{proofCheck.overallAssessment}</p>
           )}
-          <button type="button" onClick={onRecheck} className="mt-1.5 text-accent hover:underline">
+          <button
+            type="button"
+            onClick={() => handleCheckProof()}
+            className="mt-1.5 text-accent hover:underline"
+          >
             Re-check
           </button>
         </div>
       )}
+    </div>
+  );
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        <button
-          onClick={onConfirmFiled}
-          disabled={proofDocs.length === 0 || markingFiled}
-          title={proofDocs.length === 0 ? "Upload at least one proof document first" : undefined}
-          className="btn-accent text-xs py-1.5 disabled:opacity-60"
+  return (
+    <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-4 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          How you&apos;re filing this
+        </span>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            status === "confirmed"
+              ? "bg-success/15 text-success"
+              : status === "rejected" || status === "additional_requested"
+                ? "bg-destructive/10 text-destructive"
+                : status === "awaiting_confirmation"
+                  ? "bg-warning/15 text-warning-foreground"
+                  : "bg-secondary text-muted-foreground"
+          }`}
         >
-          {markingFiled ? "Saving…" : "Confirm — Mark as Filed"}
-        </button>
-        <button onClick={onNotYet} className="btn-outline text-xs py-1.5">
-          Cancel
-        </button>
+          {FILING_SUBMISSION_STATUS_LABEL[status]}
+        </span>
       </div>
+
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {methods.map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => chooseMethod(m)}
+            disabled={
+              savingField === "method" ||
+              status === "confirmed" ||
+              status === "awaiting_confirmation"
+            }
+            className={`rounded-full px-2.5 py-1 text-xs font-medium disabled:cursor-default ${
+              method === m
+                ? "bg-accent/15 text-accent"
+                : "border border-border text-muted-foreground hover:bg-secondary"
+            }`}
+          >
+            {FILING_METHOD_LABEL[m]}
+          </button>
+        ))}
+      </div>
+
+      {!method && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Pick how you&apos;re filing this to see the right instructions.
+        </p>
+      )}
+
+      {method && status === "confirmed" && submission?.filingConfirmedAt && (
+        <p className="mt-2 text-xs text-success">
+          ✓ Confirmed with the county on{" "}
+          {new Date(submission.filingConfirmedAt).toLocaleDateString()} via{" "}
+          {FILING_METHOD_LABEL[method].toLowerCase()}.
+        </p>
+      )}
+
+      {method && status === "rejected" && (
+        <p className="mt-2 text-xs text-destructive">
+          The county rejected this
+          {submission?.rejectedAt
+            ? ` on ${new Date(submission.rejectedAt).toLocaleDateString()}`
+            : ""}
+          — review what&apos;s below, fix it, and mark as submitted again.
+        </p>
+      )}
+
+      {method && status !== "confirmed" && (
+        <div className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+          {method === "online" &&
+            (countyInfo?.filingMethod.online ? (
+              <>
+                <p>
+                  {countyInfo.cad} accepts online filing.
+                  {countyInfo.filingMethod.online.notes
+                    ? ` ${countyInfo.filingMethod.online.notes}`
+                    : ""}
+                </p>
+                <a
+                  href={countyInfo.filingMethod.online.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-accent mt-2 inline-flex text-xs py-1.5"
+                >
+                  Go to County Portal →
+                </a>
+              </>
+            ) : (
+              <>
+                <p>
+                  We don&apos;t have a confirmed online portal for {property.cad ?? "this county"}{" "}
+                  on file — try its CAD record page instead.
+                </p>
+                {cadUrl && (
+                  <a
+                    href={cadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-outline mt-2 inline-flex text-xs py-1.5"
+                  >
+                    Go to County CAD →
+                  </a>
+                )}
+              </>
+            ))}
+
+          {method === "mail" &&
+            (countyInfo?.filingMethod.mail ? (
+              <>
+                <p className="font-medium text-foreground">
+                  {countyInfo.filingMethod.mail.address}
+                </p>
+                {countyInfo.filingMethod.mail.notes && (
+                  <p className="mt-1">{countyInfo.filingMethod.mail.notes}</p>
+                )}
+              </>
+            ) : (
+              <p>
+                We don&apos;t have a confirmed mailing address for {property.cad ?? "this county"}{" "}
+                on file — check its website directly.
+              </p>
+            ))}
+          {method === "mail" && property.protestDeadline && (
+            <p className="mt-1">
+              Deadline: {new Date(`${property.protestDeadline}T00:00:00`).toLocaleDateString()} —
+              mail early enough to arrive (or be postmarked) by then.
+            </p>
+          )}
+
+          {method === "in_person" &&
+            (countyInfo?.filingMethod.inPerson ? (
+              <>
+                <p className="font-medium text-foreground">
+                  {countyInfo.filingMethod.inPerson.address}
+                </p>
+                <p className="mt-1">
+                  {countyInfo.filingMethod.inPerson.notes ||
+                    "Hours and appointment requirements aren't confirmed for this county — check its website."}
+                </p>
+              </>
+            ) : (
+              <p>
+                We don&apos;t have a confirmed in-person location for{" "}
+                {property.cad ?? "this county"} on file — check its website directly.
+              </p>
+            ))}
+          {method === "in_person" && (
+            <p className="mt-1">Bring a government-issued photo ID and a printed copy of this.</p>
+          )}
+
+          {method === "email" &&
+            (emailAddress ? (
+              <>
+                <p>Draft to send from your own email — CorvusPT doesn&apos;t send it for you:</p>
+                <div className="mt-1 rounded-md border border-border bg-background p-2 text-foreground">
+                  <p>
+                    <span className="font-medium">To:</span> {emailAddress}
+                  </p>
+                  <p>
+                    <span className="font-medium">Subject:</span>{" "}
+                    {emailSubjectInput || emailDraft.subject}
+                  </p>
+                  <p className="mt-1 whitespace-pre-wrap">{emailDraft.body}</p>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {mailtoHref && (
+                    <a href={mailtoHref} className="btn-outline text-xs py-1.5">
+                      Open in Mail App →
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigator.clipboard
+                        .writeText(emailDraft.body)
+                        .then(() => toast.success("Copied."))
+                        .catch(() => toast.error("Could not copy."))
+                    }
+                    className="btn-outline text-xs py-1.5"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p>
+                No confirmed email address on file for {property.cad ?? "this county"} — use another
+                method, or check its website.
+              </p>
+            ))}
+        </div>
+      )}
+
+      {method === "online" && canEditSubmission && (
+        <div className="mt-3 grid gap-2">
+          <label className="grid gap-1 text-xs">
+            Confirmation number{" "}
+            <span className="text-muted-foreground">(optional — counts as proof on its own)</span>
+            <div className="flex gap-1">
+              <input
+                value={confNumInput}
+                onChange={(e) => setConfNumInput(e.target.value)}
+                placeholder="Portal confirmation code"
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              />
+              <button
+                type="button"
+                onClick={saveConfirmationNumber}
+                disabled={savingField === "conf"}
+                className="btn-outline shrink-0 text-xs disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </label>
+          {proofBlock}
+          <button
+            type="button"
+            onClick={handleMarkSubmitted}
+            disabled={!canConfirm || confirming}
+            title={canConfirm ? undefined : "Enter a confirmation number or upload proof first"}
+            className="btn-accent w-fit text-xs py-1.5 disabled:opacity-60"
+          >
+            {confirming ? "Saving…" : "Mark as Submitted"}
+          </button>
+        </div>
+      )}
+
+      {method === "mail" && canEditSubmission && (
+        <div className="mt-3 grid gap-2">
+          <label className="grid gap-1 text-xs">
+            Certified-mail tracking number
+            <div className="flex gap-1">
+              <input
+                value={trackingInput}
+                onChange={(e) => setTrackingInput(e.target.value)}
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+              />
+              <button
+                type="button"
+                onClick={saveTrackingNumber}
+                disabled={savingField === "tracking"}
+                className="btn-outline shrink-0 text-xs disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </label>
+          {proofBlock}
+          <button
+            type="button"
+            onClick={handleMarkSubmitted}
+            disabled={!canConfirm || confirming}
+            title={canConfirm ? undefined : "Enter a tracking number or upload proof first"}
+            className="btn-accent w-fit text-xs py-1.5 disabled:opacity-60"
+          >
+            {confirming ? "Saving…" : "Mark as Submitted"}
+          </button>
+          <p className="text-[11px] text-muted-foreground">
+            Mailing it doesn&apos;t by itself mean the county accepted it — this stays{" "}
+            {FILING_SUBMISSION_STATUS_LABEL.method_chosen.toLowerCase()} until it&apos;s confirmed.
+          </p>
+        </div>
+      )}
+
+      {method === "in_person" && canEditSubmission && (
+        <div className="mt-3 grid gap-2">
+          {proofBlock}
+          <button
+            type="button"
+            onClick={handleMarkSubmitted}
+            disabled={!canConfirm || confirming}
+            title={canConfirm ? undefined : "Upload proof first (a stamped copy, receipt, etc.)"}
+            className="btn-accent w-fit text-xs py-1.5 disabled:opacity-60"
+          >
+            {confirming ? "Saving…" : "Mark as Submitted"}
+          </button>
+        </div>
+      )}
+
+      {method === "email" && canEditSubmission && (
+        <div className="mt-3 grid gap-2">
+          <label className="grid gap-1 text-xs">
+            Recipient
+            <input
+              value={emailRecipientInput}
+              onChange={(e) => setEmailRecipientInput(e.target.value)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="grid gap-1 text-xs">
+            Subject
+            <input
+              value={emailSubjectInput}
+              onChange={(e) => setEmailSubjectInput(e.target.value)}
+              className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+          <p className="text-[11px] text-muted-foreground">Attaching a screenshot is optional.</p>
+          {proofBlock}
+          <button
+            type="button"
+            onClick={handleMarkEmailSent}
+            disabled={confirming}
+            className="btn-accent w-fit text-xs py-1.5 disabled:opacity-60"
+          >
+            {confirming ? "Saving…" : "Mark as Sent"}
+          </button>
+        </div>
+      )}
+
+      {/* Once anyone marks it submitted, the same "now what" block applies
+          regardless of method — the only real difference is what confirmation
+          from the county actually looks like (confirmationMethodDescription). */}
+      {status === "awaiting_confirmation" && method && (
+        <div className="mt-3 rounded-md border border-warning/40 bg-warning/10 p-3 text-xs">
+          <p className="font-semibold text-warning-foreground">Awaiting County Confirmation</p>
+          <p className="mt-1 text-muted-foreground">
+            {method === "email" ? (
+              <>
+                Sent to {submission?.emailRecipient || emailAddress || "the county"}
+                {submission?.emailSentAt
+                  ? ` on ${new Date(submission.emailSentAt).toLocaleDateString()}`
+                  : ""}
+                .{" "}
+              </>
+            ) : (
+              submission?.submittedAt &&
+              `Marked submitted on ${new Date(submission.submittedAt).toLocaleDateString()}. `
+            )}
+            What confirmation from {property.cad ?? "the county"} usually looks like:{" "}
+            {confirmationMethodDescription(method)}. If you don&apos;t hear back within about 10
+            business days,{" "}
+            {countyInfo?.arbContact?.phone
+              ? `call ${countyInfo.arbContact.phone}`
+              : "follow up with the appraisal district"}{" "}
+            to confirm receipt.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={confirming}
+              className="btn-accent text-xs py-1.5 disabled:opacity-60"
+            >
+              {confirming ? "Saving…" : "County Confirmed"}
+            </button>
+            <button
+              type="button"
+              onClick={handleReject}
+              disabled={confirming}
+              className="btn-outline text-destructive text-xs py-1.5 disabled:opacity-60"
+            >
+              Rejected?
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// The entry point to the step-by-step filing workflow (which opens in its own
-// popup). Shows where the case is at a glance so the button reads "Start" vs.
-// "Continue", and flags a blocked Pre-Filing Check up front.
-function FilingWorkflowLauncher({
+// Part 3's own small label map for the Notice of Protest's "Final Status" —
+// deliberately separate from FILING_SUBMISSION_STATUS_LABEL (which is
+// generic across all four documents in Part 2's own panels): this is the
+// one and only place this app ever says "Protest Filed", and only once
+// filingConfirmedAt is real — confirmFiling()'s existing discipline already
+// enforces that it's never set just because the user said "submitted" or a
+// delivery was confirmed; this card only ever surfaces what's already true.
+function noticeFinalStatusLabel(status: FilingSubmissionStatus): string {
+  switch (status) {
+    case "unstarted":
+      return "Not Filed Yet";
+    case "method_chosen":
+      return "Method Selected — Not Yet Submitted";
+    case "awaiting_confirmation":
+      return "Awaiting County Confirmation";
+    case "additional_requested":
+      return "Additional Information Requested";
+    case "rejected":
+      return "Rejected — Needs Correction";
+    case "confirmed":
+      return "Protest Filed";
+  }
+}
+
+// Part 3 — the Filed Protest half of the status/action screen. Reads the
+// exact same submission row Part 2's own FilingSubmissionFlow (for
+// notice_of_protest) reads and writes; this card never duplicates that
+// workflow, it only rolls the same real fields up into one glance +
+// whichever action (Start/Continue/Review/View) makes sense right now.
+function FiledProtestStatusCard({
+  userId,
   property,
   protest,
   evidenceCount,
-  noticeSignedAt,
   onOpen,
 }: {
+  userId: string;
   property: PropertyRecord;
   protest: ProtestRecord;
   evidenceCount: number;
-  noticeSignedAt: string | null;
   onOpen: () => void;
 }) {
+  const [loading, setLoading] = useState(true);
+  const [submission, setSubmission] = useState<FormSubmission | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    getSubmission(protest.id, "notice_of_protest")
+      .then((s) => {
+        if (!live) return;
+        setSubmission(s);
+      })
+      .catch((err) => console.error("Could not load the filed-protest status:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [protest.id, userId, property.id]);
+
   const blocked = isPreFilingBlocked(getPreFilingCheck(property, protest, evidenceCount));
-  const started = !!noticeSignedAt || protest.status !== "requested";
+  const status = filingSubmissionStatus(submission);
+  const started = status !== "unstarted";
+  const statusLabel = noticeFinalStatusLabel(status);
+
   return (
     <div className="mt-4 card-elev p-4">
-      <h4 className="font-serif text-base font-semibold">Prepare &amp; File</h4>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
-        forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
-        signing, filing, and your evidence package. Everything you sign is saved to your Documents.
-      </p>
-      {blocked && (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-serif text-base font-semibold">Filed Protest</h4>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            status === "confirmed"
+              ? "bg-success/15 text-success"
+              : status === "additional_requested" || status === "rejected"
+                ? "bg-destructive/10 text-destructive"
+                : status === "awaiting_confirmation"
+                  ? "bg-warning/15 text-warning-foreground"
+                  : "bg-secondary text-muted-foreground"
+          }`}
+        >
+          {statusLabel}
+        </span>
+      </div>
+
+      {loading ? (
+        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
+      ) : !started ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Corvus walks you through it one step at a time — the Pre-Filing Check, the exact county
+          forms you need (Notice of Protest, and an agent or affidavit form only if they apply),
+          signing, filing, and your evidence package.
+        </p>
+      ) : (
+        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs sm:grid-cols-4">
+          <Field
+            label="Submission Method"
+            value={
+              submission?.filingMethod
+                ? FILING_METHOD_LABEL[submission.filingMethod]
+                : "Not yet chosen"
+            }
+          />
+          <Field
+            label="Submission Date"
+            value={
+              submission?.submittedAt ? new Date(submission.submittedAt).toLocaleDateString() : "—"
+            }
+          />
+          <Field
+            label="Confirmation Method"
+            value={confirmationMethodDescription(submission?.filingMethod ?? null) ?? "—"}
+          />
+          <Field
+            label="County Confirmation"
+            value={
+              status === "confirmed"
+                ? "Confirmed"
+                : status === "rejected"
+                  ? "Rejected"
+                  : status === "additional_requested"
+                    ? "More info requested"
+                    : status === "awaiting_confirmation"
+                      ? "Awaiting reply"
+                      : "Not yet"
+            }
+          />
+        </dl>
+      )}
+
+      {blocked && !started && (
         <p className="mt-2 text-xs text-warning-foreground">
           Action needed in the Pre-Filing Check — open the workflow to resolve it.
         </p>
       )}
+
       <button onClick={onOpen} className="btn-accent mt-3 text-xs py-1.5">
-        {started ? "Continue Filing" : blocked ? "Review Pre-Filing Check" : "Start Filing"}
+        {status === "confirmed"
+          ? "View Filing"
+          : started
+            ? "Continue Filing"
+            : blocked
+              ? "Review Pre-Filing Check"
+              : "Start Filing"}
       </button>
+    </div>
+  );
+}
+
+// Part 3 — the Evidence half of the status/action screen. criticalMissing
+// comes from Module 8's own cached checklist (getCachedModuleResult, a plain
+// read — no new AI call); the rest from the same "evidence" submission row
+// Part 2's Evidence tab reads and writes. Never re-does either module's work,
+// just tells the user which of the two states applies and what to do next.
+function EvidenceStatusCard({
+  userId,
+  property,
+  protest,
+  evidenceDocuments,
+  onOpen,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceDocuments: DocumentRecord[];
+  onOpen: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [submission, setSubmission] = useState<FormSubmission | null>(null);
+  const [criticalMissingCount, setCriticalMissingCount] = useState<number | null>(null);
+  const [score, setScore] = useState<number | null>(null);
+  const [proofCount, setProofCount] = useState(0);
+  const [requesting, setRequesting] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getSubmission(protest.id, "evidence"),
+      getCachedModuleResult(property.id, "evidence"),
+      getFilingProofDocumentsFor(userId, property.id, "evidence"),
+    ])
+      .then(([s, cached, proofDocs]) => {
+        if (!live) return;
+        setSubmission(s);
+        setProofCount(proofDocs.length);
+        if (cached) {
+          const items = (cached.result as ModuleResultMap["evidence"]).items ?? [];
+          setCriticalMissingCount(
+            items.filter((i) => i.priority === "Critical" && i.status === "Missing").length,
+          );
+          setScore(evidenceScore(items));
+        } else {
+          setCriticalMissingCount(null);
+          setScore(null);
+        }
+      })
+      .catch((err) => console.error("Could not load the evidence status:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [protest.id, property.id, userId]);
+
+  async function handleRequestAdditional() {
+    setRequesting(true);
+    try {
+      const at = await requestAdditionalInfo(userId, protest.id, "evidence");
+      setSubmission((s) => ({ ...(s ?? EMPTY_FORM_SUBMISSION), additionalRequestedAt: at }));
+      toast.info("Logged — showing as Additional Evidence Requested.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  // Evidence upload lives in exactly one place — Module 8 on the AI Report
+  // page — same real deep link CasePlanSection/DocumentsSection already use.
+  function goToModule8() {
+    updateIntake(buildAiReportIntakePatch(property));
+    window.open(`${import.meta.env.BASE_URL}ai-report?openModule=evidence`, "_blank");
+  }
+
+  const status = loading
+    ? null
+    : computeEvidenceStatus({
+        evidenceDocCount: evidenceDocuments.length,
+        criticalMissingCount,
+        submission,
+      });
+  const methodChosen =
+    status &&
+    !["not_started", "evidence_required", "being_prepared", "ready_to_submit"].includes(status);
+
+  return (
+    <div className="mt-4 card-elev p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-serif text-base font-semibold">Evidence</h4>
+        {status && (
+          <span
+            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              status === "complete" || status === "confirmed"
+                ? "bg-success/15 text-success"
+                : status === "additional_requested" || status === "rejected"
+                  ? "bg-destructive/10 text-destructive"
+                  : status === "awaiting_confirmation"
+                    ? "bg-warning/15 text-warning-foreground"
+                    : "bg-secondary text-muted-foreground"
+            }`}
+          >
+            {EVIDENCE_STATUS_LABEL[status]}
+          </span>
+        )}
+      </div>
+
+      {loading || !status ? (
+        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
+      ) : (
+        <>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {evidenceDocuments.length} evidence document{evidenceDocuments.length === 1 ? "" : "s"}{" "}
+            on this case
+            {score != null && ` · Evidence Score ${score}%`}
+            {criticalMissingCount != null &&
+              criticalMissingCount > 0 &&
+              ` · ${criticalMissingCount} critical item${criticalMissingCount === 1 ? "" : "s"} still missing`}
+            .
+          </p>
+          {score != null && score < 70 && (
+            <p className="mt-1 text-xs text-warning-foreground">
+              Your evidence score is low — add more to strengthen the case.
+            </p>
+          )}
+
+          {methodChosen && (
+            <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs sm:grid-cols-3">
+              <Field
+                label="Confirmation Method"
+                value={confirmationMethodDescription(submission?.filingMethod ?? null) ?? "—"}
+              />
+              <Field
+                label="Submission Date"
+                value={
+                  submission?.submittedAt
+                    ? new Date(submission.submittedAt).toLocaleDateString()
+                    : "—"
+                }
+              />
+              <Field
+                label="Submission Proof"
+                value={
+                  proofCount > 0
+                    ? `${proofCount} document${proofCount === 1 ? "" : "s"}`
+                    : hasFilingReferenceNumber(submission)
+                      ? "Reference number on file"
+                      : "None yet"
+                }
+              />
+            </dl>
+          )}
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(status === "not_started" ||
+              status === "evidence_required" ||
+              status === "being_prepared") && (
+              <button onClick={goToModule8} className="btn-accent text-xs py-1.5">
+                Continue to Evidence
+              </button>
+            )}
+            {status === "ready_to_submit" && (
+              <button onClick={onOpen} className="btn-accent text-xs py-1.5">
+                Submit Evidence
+              </button>
+            )}
+            {status === "awaiting_confirmation" && (
+              <button onClick={onOpen} className="btn-outline text-xs py-1.5">
+                View Submission
+              </button>
+            )}
+            {(status === "confirmed" || status === "complete") && (
+              <button
+                onClick={handleRequestAdditional}
+                disabled={requesting}
+                className="text-xs text-accent hover:underline disabled:opacity-60"
+              >
+                {requesting ? "Saving…" : "County asked for more?"}
+              </button>
+            )}
+            {(status === "additional_requested" || status === "rejected") && (
+              <>
+                <button onClick={goToModule8} className="btn-accent text-xs py-1.5">
+                  Add Evidence
+                </button>
+                <button onClick={onOpen} className="btn-outline text-xs py-1.5">
+                  Continue to Evidence
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1658,7 +2621,6 @@ export function DocumentsSection({
   onPropertyUpdate?: (patch: Partial<PropertyRecord>) => void;
   allowSigning?: boolean;
 }) {
-  const [markingFiled, setMarkingFiled] = useState(false);
   const [authorization, setAuthorization] = useState<AuthorizationRecord | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [editingForm, setEditingForm] = useState<"protest" | "agent" | "evidence" | null>(null);
@@ -1682,22 +2644,10 @@ export function DocumentsSection({
     null,
   );
 
-  // "Have you completed and submitted your property protest?" flow — see
-  // handleMarkFiled/handleConfirmFiled below. The case is never moved to
-  // "filed" just because the Notice of Protest was signed; this is the real
-  // gate: an explicit Yes, at least one real proof-of-filing document, and
-  // an (advisory, never blocking) AI read of what that document shows.
-  const [filingStep, setFilingStep] = useState<"closed" | "ask" | "proof">("closed");
-  const [filingProofDocs, setFilingProofDocs] = useState<DocumentRecord[]>([]);
-  const [uploadingProof, setUploadingProof] = useState(false);
-  const [proofCheck, setProofCheck] = useState<FilingProofVerification | null>(null);
-  const [checkingProof, setCheckingProof] = useState(false);
-  const [proofCheckError, setProofCheckError] = useState<string | null>(null);
   // The saved Notice of Protest "how will you appear at the ARB hearing"
   // answer, loaded eagerly (not just when the editor opens) — it decides
   // whether the Evidence Affidavit step is part of this filing.
   const [noticeHearingAppearance, setNoticeHearingAppearance] = useState<string | null>(null);
-  const [markingEvidenceSubmitted, setMarkingEvidenceSubmitted] = useState(false);
 
   useEffect(() => {
     getAuthorization(protest.id)
@@ -1705,12 +2655,6 @@ export function DocumentsSection({
       .catch((err) => console.error(err))
       .finally(() => setAuthLoading(false));
   }, [protest.id]);
-
-  useEffect(() => {
-    getFilingProofDocuments(userId, property.id)
-      .then(setFilingProofDocs)
-      .catch((err) => console.error("Could not load proof-of-filing documents:", err));
-  }, [userId, property.id]);
 
   // Eager load of the two secondary forms' signed-at + the notice's hearing
   // answer, so the step bar can show completion / decide the step set without
@@ -1785,18 +2729,15 @@ export function DocumentsSection({
     setActiveStep(id);
   }
 
-  async function handleMarkEvidenceSubmitted() {
-    setMarkingEvidenceSubmitted(true);
-    try {
-      const at = new Date().toISOString();
-      await saveCaseRecordFields(protest.id, { evidenceSubmittedConfirmedAt: at });
-      onUpdate({ evidenceSubmittedConfirmedAt: at });
-      toast.success("Evidence package marked as submitted.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not save this.");
-    } finally {
-      setMarkingEvidenceSubmitted(false);
-    }
+  // The Evidence tab's own FilingSubmissionFlow already ran confirmFiling()
+  // (real timestamp, its own toast/loading state) — this just mirrors that
+  // moment into the existing evidenceSubmittedConfirmedAt column, which
+  // case-next-action.ts / pre-filing-check.ts / the Case Record already read.
+  function handleEvidenceFilingConfirmed(at: string) {
+    saveCaseRecordFields(protest.id, { evidenceSubmittedConfirmedAt: at }).catch((err) =>
+      console.error("Could not save the evidence-submitted confirmation:", err),
+    );
+    onUpdate({ evidenceSubmittedConfirmedAt: at });
   }
 
   const formType: FormType | null =
@@ -2043,88 +2984,23 @@ export function DocumentsSection({
     }
   }
 
-  // Opens the "Have you completed and submitted your property protest?"
-  // flow — no longer marks the case filed directly (kept the same name/
-  // signature since it's already wired as PdfFormEditor's onMarkFiled prop
-  // and the standalone banner's button below). Also closes the form editor
-  // modal when called from inside it (PdfFormEditor's own "Mark as Filed"
-  // button) — the flow itself renders inline in this section, behind where
-  // that modal would otherwise stay open on top of it.
+  // Just closes the editor — actually recording how/whether this was filed
+  // now happens in the always-visible FilingSubmissionFlow panel on the tab
+  // behind it (kept the same name since it's already wired as
+  // PdfFormEditor's onMarkFiled prop).
   function handleMarkFiled() {
     setEditingForm(null);
-    setProofCheck(null);
-    setProofCheckError(null);
-    setFilingStep("ask");
   }
 
-  // "Not Yet" — closes the prompt and leaves the case exactly as it was, so
-  // the customer lands back on the real filing instructions/guidance above
-  // rather than anywhere that implies progress was lost.
-  function handleNotYetFiled() {
-    setFilingStep("closed");
-  }
-
-  function handleConfirmIntentToFile() {
-    setFilingStep("proof");
-  }
-
-  async function handleUploadProof(files: File[]) {
-    setUploadingProof(true);
-    try {
-      const uploaded: DocumentRecord[] = [];
-      for (const file of files) {
-        uploaded.push(await uploadDocument(userId, property.id, file, FILING_PROOF_DOCUMENT_TYPE));
-      }
-      setFilingProofDocs((prev) => [...prev, ...uploaded]);
-      // Runs automatically the moment there's something to check — this is
-      // meant to be a real step in confirming filing, not an easily-skipped
-      // optional extra the customer has to remember to click.
-      handleCheckProof([...filingProofDocs, ...uploaded]);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not upload this file.");
-    } finally {
-      setUploadingProof(false);
-    }
-  }
-
-  // Real AI read of what the uploaded proof actually shows (signature
-  // presence, whose name, what date/year) — see verify-filing-proof's own
-  // comment. Advisory only: never blocks handleConfirmFiled below, and
-  // never runs unless the customer has actually uploaded something real to
-  // look at.
-  async function handleCheckProof(docs: DocumentRecord[] = filingProofDocs) {
-    if (docs.length === 0) return;
-    setCheckingProof(true);
-    setProofCheckError(null);
-    try {
-      const result = await verifyFilingProof(property, docs);
-      setProofCheck(result);
-    } catch (err) {
-      setProofCheckError(err instanceof Error ? err.message : "Could not check this proof.");
-    } finally {
-      setCheckingProof(false);
-    }
-  }
-
-  // The real, final confirmation — never reachable without at least one
-  // real proof-of-filing document on file (see the disabled state on the
-  // button below). This app still has no way to independently verify
-  // filing (no e-filing integration with any county), so the customer's
-  // own explicit Yes plus a real uploaded document is the one honest source
-  // of this fact, same discipline as before — just no longer a single,
-  // unconfirmed click.
-  async function handleConfirmFiled() {
-    if (filingProofDocs.length === 0) return;
-    setMarkingFiled(true);
+  // The Notice of Protest's own FilingSubmissionFlow confirms with the real
+  // county — that's the one honest signal this app has for "filed" (no
+  // e-filing integration exists), so it's what actually advances the case.
+  async function handleNoticeFilingConfirmed() {
     try {
       await markFiled(protest.id);
       onUpdate({ status: "filed" });
-      setFilingStep("closed");
-      toast.success("Marked as filed.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not mark this case as filed.");
-    } finally {
-      setMarkingFiled(false);
     }
   }
 
@@ -2230,73 +3106,24 @@ export function DocumentsSection({
             signed form is saved to your Documents.
           </p>
 
-          {/* Filing itself always happens on the county's own site or mailbox —
-              CorvusRF has no e-filing integration with any appraisal district
-              (none publish a public submission API), so this can only ever
-              prepare the real forms and point you at every real way this
-              county actually accepts one, never submit on your behalf. */}
-          <div className="rounded-md border border-border p-3 text-sm">
-            <p className="font-medium">
-              How to actually file this — every way {property.cad ?? "your county"} accepts it
+          {noticeSignedAt ? (
+            <>
+              <FilingRequirementsPanel steps={filingSteps} hearingDate={protest.hearingDate} />
+              <FilingSubmissionFlow
+                userId={userId}
+                property={property}
+                protest={protest}
+                formType="notice_of_protest"
+                docLabel="Notice of Protest"
+                countyInfo={countyInfo}
+                onConfirmed={handleNoticeFilingConfirmed}
+              />
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Sign your Notice of Protest above to see how to file it with{" "}
+              {property.cad ?? "your county"}.
             </p>
-            {countyInfo ? (
-              <>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {countyInfo.cad} is a separate system — CorvusRF prepares your real forms above,
-                  but doesn't submit to any of these on your behalf.
-                </p>
-                <div className="mt-2 text-xs text-muted-foreground">
-                  <FilingMethodsList countyInfo={countyInfo} />
-                </div>
-                {countyInfo.filingMethod.online && (
-                  <a
-                    href={countyInfo.filingMethod.online.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn-accent mt-2 inline-flex text-xs py-1.5"
-                  >
-                    File Online at {countyInfo.cad} →
-                  </a>
-                )}
-              </>
-            ) : (
-              <p className="mt-1 text-xs text-muted-foreground">
-                We don't have this county's confirmed filing methods on file yet — download your
-                signed Notice of Protest above and check {property.cad ?? "your appraisal district"}
-                's website directly for the current address or any online option.
-              </p>
-            )}
-          </div>
-
-          {noticeSignedAt && protest.status === "requested" && filingStep === "closed" && (
-            <div className="rounded-md border border-accent/30 bg-accent/5 p-3 text-sm">
-              <p>
-                You've signed your Notice of Protest — that only prepares the document. It isn't
-                filed with {property.cad ?? "your county"} until you actually deliver it (online, by
-                mail, or in person). Once you have, confirm it below.
-              </p>
-              <button onClick={handleMarkFiled} className="btn-accent mt-2 text-xs py-1.5">
-                Have you filed?
-              </button>
-            </div>
-          )}
-
-          {noticeSignedAt && protest.status === "requested" && filingStep !== "closed" && (
-            <FilingConfirmationFlow
-              step={filingStep}
-              countyInfo={countyInfo}
-              proofDocs={filingProofDocs}
-              uploadingProof={uploadingProof}
-              onUploadProof={handleUploadProof}
-              proofCheck={proofCheck}
-              checkingProof={checkingProof}
-              proofCheckError={proofCheckError}
-              onRecheck={() => handleCheckProof()}
-              markingFiled={markingFiled}
-              onNotYet={handleNotYetFiled}
-              onConfirmIntent={handleConfirmIntentToFile}
-              onConfirmFiled={handleConfirmFiled}
-            />
           )}
         </div>
       )}
@@ -2325,6 +3152,21 @@ export function DocumentsSection({
               A signed authorization must be on file before this form can be pre-filled.
             </p>
           )}
+          {agentFormSignedAt ? (
+            <FilingSubmissionFlow
+              userId={userId}
+              property={property}
+              protest={protest}
+              formType="appointment_of_agent"
+              docLabel="Appointment of Agent"
+              countyInfo={countyInfo}
+              onConfirmed={() => {}}
+            />
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Sign the Appointment of Agent above to see how to file it.
+            </p>
+          )}
         </div>
       )}
 
@@ -2342,6 +3184,21 @@ export function DocumentsSection({
             Form 50-283 is a sworn affidavit — after you sign it in-app, it must be notarized before
             it's delivered to the ARB.
           </p>
+          {evidenceDeclarationSignedAt ? (
+            <FilingSubmissionFlow
+              userId={userId}
+              property={property}
+              protest={protest}
+              formType="evidence_declaration"
+              docLabel="Evidence Affidavit"
+              countyInfo={countyInfo}
+              onConfirmed={() => {}}
+            />
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Sign the affidavit above (and have it notarized) to see how to file it.
+            </p>
+          )}
         </div>
       )}
 
@@ -2350,11 +3207,12 @@ export function DocumentsSection({
         <FilingEvidenceStep
           evidenceDocuments={evidenceDocuments}
           strategyRecommendation={strategyRecommendation}
-          submittedAt={protest.evidenceSubmittedConfirmedAt ?? null}
-          allowSubmit={allowSigning}
-          marking={markingEvidenceSubmitted}
+          userId={userId}
+          property={property}
+          protest={protest}
+          countyInfo={countyInfo}
           onGoToModule8={goToModule8}
-          onMarkSubmitted={handleMarkEvidenceSubmitted}
+          onConfirmed={handleEvidenceFilingConfirmed}
         />
       )}
 
@@ -2416,7 +3274,7 @@ export function DocumentsSection({
           }
           caseStatus={protest.status}
           onMarkFiled={handleMarkFiled}
-          markingFiled={markingFiled}
+          markingFiled={false}
           hasEvidence={hasEvidence}
           generatingReason={generatingReason}
           onGenerateReason={handleGenerateReason}
@@ -2486,23 +3344,29 @@ function FilingStepBar({
 function FilingEvidenceStep({
   evidenceDocuments,
   strategyRecommendation,
-  submittedAt,
-  allowSubmit,
-  marking,
+  userId,
+  property,
+  protest,
+  countyInfo,
   onGoToModule8,
-  onMarkSubmitted,
+  onConfirmed,
 }: {
   evidenceDocuments: DocumentRecord[];
   strategyRecommendation: string | null;
-  submittedAt: string | null;
-  allowSubmit: boolean;
-  marking: boolean;
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  countyInfo: CountyProtestInfo | null;
   onGoToModule8: () => void;
-  onMarkSubmitted: () => void;
+  onConfirmed: (at: string) => void;
 }) {
   const withIssues = evidenceDocuments.filter(
     (d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid",
   );
+  // Bumped once the package builder saves a new proof document, so the
+  // FilingSubmissionFlow below (which loaded its own proof list before that
+  // existed) picks it up without a full page reload.
+  const [refreshToken, setRefreshToken] = useState(0);
   return (
     <div className="mt-3 grid gap-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2554,29 +3418,278 @@ function FilingEvidenceStep({
         </p>
       )}
 
-      <div className="rounded-md border border-border p-3">
-        {submittedAt ? (
-          <p className="text-xs text-success">
-            ✓ Evidence package marked as submitted on {new Date(submittedAt).toLocaleDateString()}.
-          </p>
-        ) : (
-          <>
-            <p className="text-xs text-muted-foreground">
-              Once you've delivered your evidence package to the county (with your affidavit, if you
-              won't appear in person), record it here.
-            </p>
-            {allowSubmit && (
-              <button
-                onClick={onMarkSubmitted}
-                disabled={marking}
-                className="btn-accent mt-2 text-xs py-1.5 disabled:opacity-60"
-              >
-                {marking ? "Saving…" : "Mark evidence package submitted"}
-              </button>
-            )}
-          </>
-        )}
+      {evidenceDocuments.length > 0 && (
+        <EvidencePackageBuilder
+          userId={userId}
+          property={property}
+          protest={protest}
+          evidenceDocuments={evidenceDocuments}
+          onSaved={() => setRefreshToken((t) => t + 1)}
+        />
+      )}
+
+      <FilingSubmissionFlow
+        userId={userId}
+        property={property}
+        protest={protest}
+        formType="evidence"
+        docLabel="Evidence Package"
+        countyInfo={countyInfo}
+        onConfirmed={onConfirmed}
+        refreshToken={refreshToken}
+      />
+    </div>
+  );
+}
+
+// Generate Evidence Package — combines the real evidence documents Module 8
+// already matched to this case's checklist into one downloadable PDF, using
+// selectRelevantEvidence/buildEvidencePackagePdf (evidence-package.ts). The
+// user can add/remove/reorder before generating; saving it becomes the
+// Evidence submission's own real proof (FilingSubmissionFlow above), so
+// there's exactly one "Evidence Submitted" toggle, not a second one here.
+function EvidencePackageBuilder({
+  userId,
+  property,
+  protest,
+  evidenceDocuments,
+  onSaved,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceDocuments: DocumentRecord[];
+  onSaved: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deadline, setDeadline] = useState<string | null>(null);
+  const [reminderFrequency, setReminderFrequencyState] = useState<ReminderFrequency>("daily");
+  const [generating, setGenerating] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBytes, setPreviewBytes] = useState<Uint8Array | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getCachedModuleResult(property.id, "evidence"),
+      getLatestHearingNotice(protest.id),
+      getSubmission(protest.id, "evidence"),
+    ])
+      .then(([cached, notice, submission]) => {
+        if (!live) return;
+        const items = cached ? ((cached.result as ModuleResultMap["evidence"]).items ?? []) : null;
+        const preselected = selectRelevantEvidence(evidenceDocuments, items);
+        setSelectedIds((preselected.length > 0 ? preselected : evidenceDocuments).map((d) => d.id));
+        setDeadline(notice?.evidenceSubmissionDeadline ?? null);
+        setReminderFrequencyState(submission?.reminderFrequency ?? "daily");
+        // Seed a real row at the default frequency so send-evidence-reminders
+        // has something to find — "by default, daily reminders" shouldn't
+        // require the user to first open this dropdown and pick "Daily"
+        // themselves.
+        if (!submission) {
+          saveReminderFrequency(userId, protest.id, "evidence", "daily").catch((err) =>
+            console.error("Could not seed the default reminder frequency:", err),
+          );
+        }
+      })
+      .catch((err) => console.error("Could not prepare the evidence package builder:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+    // Runs once per property/case — evidenceDocuments changing (a fresh
+    // array reference on every parent render) shouldn't re-run this and
+    // silently reset an in-progress selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [property.id, protest.id]);
+
+  function toggle(id: string) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function moveUp(id: string) {
+    setSelectedIds((prev) => {
+      const i = prev.indexOf(id);
+      if (i <= 0) return prev;
+      const next = [...prev];
+      [next[i - 1], next[i]] = [next[i], next[i - 1]];
+      return next;
+    });
+  }
+  function moveDown(id: string) {
+    setSelectedIds((prev) => {
+      const i = prev.indexOf(id);
+      if (i === -1 || i >= prev.length - 1) return prev;
+      const next = [...prev];
+      [next[i + 1], next[i]] = [next[i], next[i + 1]];
+      return next;
+    });
+  }
+
+  async function handleGenerate() {
+    setGenerating(true);
+    try {
+      const selectedDocs = selectedIds
+        .map((id) => evidenceDocuments.find((d) => d.id === id))
+        .filter((d): d is DocumentRecord => !!d);
+      const files = [];
+      for (const d of selectedDocs) {
+        const url = await getDocumentUrl(d.storagePath);
+        const bytes = await fetch(url).then((r) => r.arrayBuffer());
+        files.push({ fileName: d.fileName, bytes });
+      }
+      const pdfBytes = await buildEvidencePackagePdf(files);
+      setPreviewBytes(pdfBytes);
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(new Blob([pdfBytes as BlobPart], { type: "application/pdf" }));
+      });
+      toast.success("Package generated — review it below.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not generate the package."));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleSaveToDocuments() {
+    if (!previewBytes) return;
+    setSaving(true);
+    try {
+      const fileName = `Evidence-Package-${property.accountNumber ?? property.id}.pdf`;
+      const file = new File([previewBytes as BlobPart], fileName, { type: "application/pdf" });
+      await uploadDocument(userId, property.id, file, filingProofDocumentType("evidence"));
+      toast.success("Saved to Documents — this is now your Evidence proof.");
+      onSaved();
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleDownload() {
+    if (!previewBytes) return;
+    downloadPdf(previewBytes, `Evidence-Package-${property.accountNumber ?? property.id}.pdf`);
+  }
+
+  async function handleReminderChange(freq: ReminderFrequency) {
+    setReminderFrequencyState(freq);
+    try {
+      await saveReminderFrequency(userId, protest.id, "evidence", freq);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    }
+  }
+
+  if (loading) {
+    return <p className="text-xs text-muted-foreground">Preparing the evidence package builder…</p>;
+  }
+
+  return (
+    <div className="rounded-md border border-border p-3 text-sm">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Generate Evidence Package
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Corvus pre-selected the documents Module 8 already matched to your case — add, remove, or
+        reorder before generating.
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {deadline
+          ? `Deadline: ${new Date(`${deadline}T00:00:00`).toLocaleDateString()}.`
+          : "Deadline not confirmed yet — check your hearing notice."}
+      </p>
+
+      <ul className="mt-2 grid gap-1">
+        {evidenceDocuments.map((d) => {
+          const idx = selectedIds.indexOf(d.id);
+          const checked = idx !== -1;
+          return (
+            <li
+              key={d.id}
+              className="flex items-center gap-2 rounded-md border border-border px-2 py-1 text-xs"
+            >
+              <input type="checkbox" checked={checked} onChange={() => toggle(d.id)} />
+              <span className="min-w-0 flex-1 truncate">{d.fileName}</span>
+              {checked && (
+                <div className="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => moveUp(d.id)}
+                    disabled={idx === 0}
+                    className="text-muted-foreground disabled:opacity-30"
+                    aria-label={`Move ${d.fileName} up`}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveDown(d.id)}
+                    disabled={idx === selectedIds.length - 1}
+                    className="text-muted-foreground disabled:opacity-30"
+                    aria-label={`Move ${d.fileName} down`}
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      <label className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        Remind me:
+        <select
+          value={reminderFrequency}
+          onChange={(e) => handleReminderChange(e.target.value as ReminderFrequency)}
+          className="rounded-md border border-input bg-background px-1.5 py-1 text-xs"
+        >
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+
+      <div>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={generating || selectedIds.length === 0}
+          className="btn-accent mt-3 text-xs py-1.5 disabled:opacity-60"
+        >
+          {generating ? "Generating…" : "Generate Package"}
+        </button>
       </div>
+
+      {previewUrl && (
+        <div className="mt-3">
+          <iframe
+            title="Evidence package preview"
+            src={previewUrl}
+            className="h-64 w-full rounded-md border border-border"
+          />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleSaveToDocuments}
+              disabled={saving}
+              className="btn-accent text-xs py-1.5 disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save to Documents"}
+            </button>
+            <button type="button" onClick={handleDownload} className="btn-outline text-xs py-1.5">
+              Download
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

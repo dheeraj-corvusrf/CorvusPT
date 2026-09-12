@@ -552,7 +552,17 @@ function Documents() {
             ))}
           </div>
         ) : groups.length > 0 ? (
-          <div className="grid gap-4">
+          // grid-cols-1 (not bare `grid`) matters here — Tailwind's plain
+          // `grid` utility only sets display:grid with no explicit track
+          // sizing, so its single implicit column sizes to fit its widest
+          // child's content (min-width: auto default for grid items) instead
+          // of being capped at the container's width. grid-cols-1 uses
+          // minmax(0,1fr), which actually constrains it — this was the real
+          // source of a mobile-width horizontal-overflow bug (a long
+          // property address/action row pushing the whole page wider than
+          // the viewport), traced end-to-end via computed overflowX/
+          // scrollWidth on every ancestor, not any single child element.
+          <div className="grid grid-cols-1 gap-4">
             <div className="card-elev p-4">
               <label htmlFor="doc-property-picker" className="text-sm font-medium">
                 Property
@@ -758,7 +768,7 @@ function DocumentViewerModal({
               </button>
             </div>
             {doc.aiCheckedAt ? (
-              <div className="mt-2 grid gap-2">
+              <div className="mt-2 grid grid-cols-1 gap-2">
                 <VerdictBadge doc={doc} />
                 {doc.aiNotes && <p className="text-muted-foreground text-xs">{doc.aiNotes}</p>}
                 {doc.aiCrossRefs && (
@@ -1000,7 +1010,7 @@ function PropertyDocGroup({
 
   return (
     <div className="card-elev p-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <button
           type="button"
           onClick={() => hasDocs && setExpanded((e) => !e)}
@@ -1059,7 +1069,11 @@ function PropertyDocGroup({
         </div>
       </div>
       {expanded && (
-        <div className="mt-2 grid gap-2">
+        // grid-cols-1, not bare `grid` — see the property-picker wrapper's
+        // comment above for why (Tailwind's `grid` alone doesn't cap the
+        // track to its container's width, so a wide DocRow can push the
+        // whole page wider on mobile).
+        <div className="mt-2 grid grid-cols-1 gap-2">
           {group.docs.map((doc) => (
             <DocRow
               key={doc.id}
@@ -1359,7 +1373,7 @@ function RecentlyDeletedSection({
         <span className="text-muted-foreground text-xs">{docs.length} · removed after 30 days</span>
       </button>
       {open && (
-        <div className="mt-2 grid gap-2">
+        <div className="mt-2 grid grid-cols-1 gap-2">
           {docs.map((doc) => (
             <div
               key={doc.id}

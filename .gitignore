@@ -20,6 +20,7 @@ dist-ssr
 .nitro
 *.local
 .env
+SECRETS.md
 
 # Wrangler / Cloudflare
 .wrangler/

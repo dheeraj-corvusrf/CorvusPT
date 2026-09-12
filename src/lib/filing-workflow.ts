@@ -117,3 +117,53 @@ export function firstIncompleteFilingStep(
 ): FilingStepId {
   return steps.find((id) => !isFilingStepDone(id, s)) ?? steps[0];
 }
+
+// "What has to go with the protest vs. what can follow" — shown once the
+// Notice of Protest is signed, so the customer can file it (Go to County
+// CAD) without waiting on evidence or the other forms. Texas doesn't require
+// anything but the Notice of Protest itself by the protest deadline; every
+// other required step in `steps` has its own real, later point it needs to
+// be ready by — never a county-by-county rule this app doesn't actually have
+// (no CountyProtestInfo field tracks "what must accompany filing"), so this
+// stays general Texas-Comptroller-process fact, the same epistemic standard
+// FILING_STEP_META's own blurbs already use.
+export type FilingRequirementsNote = {
+  dueNow: string;
+  canWaitUntil: { label: string; detail: string }[];
+};
+
+export function describeFilingRequirements(
+  steps: FilingStepId[],
+  hearingDate: string | null,
+): FilingRequirementsNote {
+  const hearingPhrase = hearingDate
+    ? `before your hearing on ${new Date(`${hearingDate}T00:00:00`).toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      })}`
+    : "before your hearing or informal review";
+  const canWaitUntil: { label: string; detail: string }[] = [];
+  if (steps.includes("agent")) {
+    canWaitUntil.push({
+      label: FILING_STEP_META.agent.label,
+      detail: "file it before your agent needs to act on your behalf",
+    });
+  }
+  if (steps.includes("affidavit")) {
+    canWaitUntil.push({
+      label: FILING_STEP_META.affidavit.label,
+      detail: `needed ${hearingPhrase}, since you won't appear in person`,
+    });
+  }
+  if (steps.includes("evidence")) {
+    canWaitUntil.push({
+      label: FILING_STEP_META.evidence.label,
+      detail: `have it ready ${hearingPhrase}`,
+    });
+  }
+  return {
+    dueNow: "Your signed Notice of Protest — that's the only thing due by your protest deadline.",
+    canWaitUntil,
+  };
+}

@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { invokeEdgeFunction } from "./edge-functions";
+import type { FormType } from "./protest-form-submissions";
 
 // document_type is free-text (no schema enum), so this is just a convention shared
 // between the upload call and the filter query that reads it back — see
@@ -213,18 +214,46 @@ export function isEvidenceDoc(d: DocumentRecord): boolean {
   return d.documentType === PROTEST_EVIDENCE_DOCUMENT_TYPE;
 }
 
-// Real "Filing Proof"-tagged documents for one property — see
-// CaseDetailModal.tsx's "Have you completed and submitted your property
-// protest?" flow. The case is never marked Filed without at least one of
-// these on file (see handleConfirmFiled).
+// One distinct proof tag per document the Filing Method & Submission workflow
+// tracks (CaseDetailModal.tsx) — so a screenshot uploaded as proof for the
+// Agent form never gets counted as proof the Notice of Protest was filed.
+// notice_of_protest keeps the original "Filing Proof" string unchanged —
+// case-record.ts and case-report.ts already read that exact tag for the
+// case's own filing-proof completion, so they need no changes.
+const FILING_PROOF_DOCUMENT_TYPE_BY_FORM: Record<FormType, string> = {
+  notice_of_protest: FILING_PROOF_DOCUMENT_TYPE,
+  appointment_of_agent: "Filing Proof — Agent/Representative",
+  evidence_declaration: "Filing Proof — Evidence Affidavit",
+  evidence: "Filing Proof — Evidence",
+};
+
+export function filingProofDocumentType(formType: FormType): string {
+  return FILING_PROOF_DOCUMENT_TYPE_BY_FORM[formType];
+}
+
+// Real filing-proof documents for one property, scoped to a specific document
+// (Notice of Protest / Agent / Affidavit / Evidence) — see
+// CaseDetailModal.tsx's Filing Method & Submission workflow. The case is
+// never marked Filed without at least one of these (or a typed reference
+// number) on file for the Notice of Protest (see handleConfirmFiled).
+export async function getFilingProofDocumentsFor(
+  userId: string,
+  propertyId: string,
+  formType: FormType,
+): Promise<DocumentRecord[]> {
+  const docs = await listDocuments(userId);
+  const tag = filingProofDocumentType(formType);
+  return docs.filter((d) => d.propertyId === propertyId && d.documentType === tag);
+}
+
+// Kept as the original, notice_of_protest-only call for case-record.ts's and
+// case-report.ts's own "has any filing proof been uploaded for this case"
+// reads — unrelated to which document a specific proof file was for.
 export async function getFilingProofDocuments(
   userId: string,
   propertyId: string,
 ): Promise<DocumentRecord[]> {
-  const docs = await listDocuments(userId);
-  return docs.filter(
-    (d) => d.propertyId === propertyId && d.documentType === FILING_PROOF_DOCUMENT_TYPE,
-  );
+  return getFilingProofDocumentsFor(userId, propertyId, "notice_of_protest");
 }
 
 // One real document by id — used where a caller only has a stored
