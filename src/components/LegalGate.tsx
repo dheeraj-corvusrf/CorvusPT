@@ -7,7 +7,7 @@ import {
   termsAcceptanceNeeded,
   recordTermsAcceptance,
 } from "@/lib/legal-acceptance";
-import { SIGNUP_ACK_INTRO, SIGNUP_ACK_ITEMS, SIGNUP_ACK_CONFIRM } from "@/lib/legal";
+import { SIGNUP_ACK_INTRO, SIGNUP_ACK_ITEMS, TERMS_UPDATE_ACK_CONFIRM } from "@/lib/legal";
 import { getErrorMessage } from "@/lib/error-message";
 
 // Shown to a signed-in user whose recorded Terms/Privacy acceptance is behind
@@ -112,7 +112,7 @@ export function LegalGate() {
               onChange={(e) => setChecked(e.target.checked)}
               className="mt-0.5"
             />
-            <span>{SIGNUP_ACK_CONFIRM}</span>
+            <span>{TERMS_UPDATE_ACK_CONFIRM}</span>
           </label>
           <div className="mt-3 flex justify-end">
             <button

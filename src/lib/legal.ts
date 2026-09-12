@@ -38,6 +38,14 @@ export const SIGNUP_ACK_ITEMS: string[] = [
 export const SIGNUP_ACK_CONFIRM =
   "By checking the box and selecting “Agree & Create Account,” I confirm that I have read, understood, and agree to the Terms of Service and Privacy Policy.";
 
+// Same acknowledgement, worded for LegalGate's re-acceptance screen (an
+// already-signed-in user whose stored acceptance is behind the current
+// Terms/Privacy version) — that screen's button reads "Accept & Continue",
+// not "Agree & Create Account", so it needs its own copy rather than reusing
+// SIGNUP_ACK_CONFIRM verbatim.
+export const TERMS_UPDATE_ACK_CONFIRM =
+  "By checking the box and selecting “Accept & Continue,” I confirm that I have read, understood, and agree to the Terms of Service and Privacy Policy.";
+
 // ── Pre-submission AI acknowledgement ─────────────────────────────────────
 export const AI_ACK_CHECKBOX =
   "I have reviewed the information provided and understand that AI-generated analysis may contain errors and does not guarantee a successful protest, assessment reduction, or any particular tax savings.";
