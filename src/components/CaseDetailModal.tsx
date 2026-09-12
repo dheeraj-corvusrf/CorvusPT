@@ -138,7 +138,14 @@ import {
 } from "@/lib/protest-form-submissions";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
 import { draftProtestReason } from "@/lib/protest-reason";
-import { requiredFilingSteps, FILING_STEP_META, type FilingStepId } from "@/lib/filing-workflow";
+import {
+  requiredFilingSteps,
+  FILING_STEP_META,
+  isFilingStepDone,
+  firstIncompleteFilingStep,
+  type FilingStepId,
+  type FilingStepStatusInput,
+} from "@/lib/filing-workflow";
 import { verdictMeta } from "@/lib/documents";
 import { PdfFormEditor } from "@/components/PdfFormEditor";
 import { FilingMethodsList } from "@/components/FilingMethodsList";
@@ -1732,23 +1739,18 @@ export function DocumentsSection({
   );
   const preFilingItems = getPreFilingCheck(property, protest, evidenceDocuments.length);
   const preFilingBlocked = isPreFilingBlocked(preFilingItems);
-
-  function stepDone(id: FilingStepId): boolean {
-    switch (id) {
-      case "prefiling":
-        return !preFilingBlocked;
-      case "file":
-        return !!noticeSignedAt;
-      case "agent":
-        return !!agentFormSignedAt;
-      case "affidavit":
-        return !!evidenceDeclarationSignedAt;
-      case "evidence":
-        return !!protest.evidenceSubmittedConfirmedAt;
-    }
-  }
-
-  const firstIncomplete = filingSteps.find((s) => !stepDone(s)) ?? filingSteps[0];
+  // Shared with filing-workflow.ts so this step bar and anything else reading
+  // the same case (the AI Report page's Case Progress card) can never
+  // disagree on what "done" means for a step.
+  const filingStepStatus: FilingStepStatusInput = {
+    preFilingBlocked,
+    noticeSignedAt,
+    agentFormSignedAt,
+    evidenceDeclarationSignedAt,
+    evidenceSubmittedConfirmedAt: protest.evidenceSubmittedConfirmedAt ?? null,
+  };
+  const stepDone = (id: FilingStepId) => isFilingStepDone(id, filingStepStatus);
+  const firstIncomplete = firstIncompleteFilingStep(filingSteps, filingStepStatus);
   const [activeStep, setActiveStep] = useState<FilingStepId>(
     preFilingBlocked ? "prefiling" : firstIncomplete,
   );

@@ -76,3 +76,44 @@ export function requiredFilingSteps(input: FilingStepInput): FilingStepId[] {
   steps.push("evidence");
   return steps;
 }
+
+// The real signals a step's own completion reads from — every one a fact
+// already tracked elsewhere (a form's signed_at, the Pre-Filing Check's own
+// blocked/clear verdict, the case record's evidence-submitted timestamp),
+// never a separately-tracked "done" flag that could drift from the truth.
+// Shared by CaseDetailModal.tsx's own step bar AND anything else (e.g. the AI
+// Report page's Case Progress card) that needs to say the same "what's next"
+// without re-deriving — and needs to say it identically.
+export type FilingStepStatusInput = {
+  preFilingBlocked: boolean;
+  noticeSignedAt: string | null;
+  agentFormSignedAt: string | null;
+  evidenceDeclarationSignedAt: string | null;
+  evidenceSubmittedConfirmedAt: string | null;
+};
+
+export function isFilingStepDone(id: FilingStepId, s: FilingStepStatusInput): boolean {
+  switch (id) {
+    case "prefiling":
+      return !s.preFilingBlocked;
+    case "file":
+      return !!s.noticeSignedAt;
+    case "agent":
+      return !!s.agentFormSignedAt;
+    case "affidavit":
+      return !!s.evidenceDeclarationSignedAt;
+    case "evidence":
+      return !!s.evidenceSubmittedConfirmedAt;
+  }
+}
+
+// The first step in `steps` (in order) that isn't done yet — falls back to
+// the first step overall once everything is (nothing left to point at as
+// "next", so the caller should treat that as its own case rather than trust
+// this return value as "still incomplete").
+export function firstIncompleteFilingStep(
+  steps: FilingStepId[],
+  s: FilingStepStatusInput,
+): FilingStepId {
+  return steps.find((id) => !isFilingStepDone(id, s)) ?? steps[0];
+}
