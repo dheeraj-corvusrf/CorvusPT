@@ -160,6 +160,7 @@ import {
   EVIDENCE_STATUS_LABEL,
   type EvidenceStatusStage,
 } from "@/lib/evidence-status";
+import { selectRelevantEvidence, buildEvidencePackagePdf } from "@/lib/evidence-package";
 import { getCachedModuleResult } from "@/lib/module-results-cache";
 import type { ModuleResultMap } from "@/lib/ai-report-modules";
 import { searchPropertiesByOwner } from "@/lib/cad-owner-search";
@@ -1550,6 +1551,10 @@ function FilingSubmissionFlow({
   docLabel,
   countyInfo,
   onConfirmed,
+  // Bumped by a caller (Generate Evidence Package, once it saves a new
+  // proof document) to force this panel to re-fetch its own submission +
+  // proof list — it has no other reason to know that happened.
+  refreshToken,
 }: {
   userId: string;
   property: PropertyRecord;
@@ -1558,6 +1563,7 @@ function FilingSubmissionFlow({
   docLabel: string;
   countyInfo: CountyProtestInfo | null;
   onConfirmed: (at: string) => void;
+  refreshToken?: number;
 }) {
   const [loading, setLoading] = useState(true);
   const [submission, setSubmission] = useState<FormSubmission | null>(null);
@@ -1598,7 +1604,7 @@ function FilingSubmissionFlow({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [protest.id, formType, userId, property.id]);
+  }, [protest.id, formType, userId, property.id, refreshToken]);
 
   async function chooseMethod(method: FilingMethod) {
     setSavingField("method");
@@ -3357,6 +3363,10 @@ function FilingEvidenceStep({
   const withIssues = evidenceDocuments.filter(
     (d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid",
   );
+  // Bumped once the package builder saves a new proof document, so the
+  // FilingSubmissionFlow below (which loaded its own proof list before that
+  // existed) picks it up without a full page reload.
+  const [refreshToken, setRefreshToken] = useState(0);
   return (
     <div className="mt-3 grid gap-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3408,6 +3418,16 @@ function FilingEvidenceStep({
         </p>
       )}
 
+      {evidenceDocuments.length > 0 && (
+        <EvidencePackageBuilder
+          userId={userId}
+          property={property}
+          protest={protest}
+          evidenceDocuments={evidenceDocuments}
+          onSaved={() => setRefreshToken((t) => t + 1)}
+        />
+      )}
+
       <FilingSubmissionFlow
         userId={userId}
         property={property}
@@ -3416,7 +3436,251 @@ function FilingEvidenceStep({
         docLabel="Evidence Package"
         countyInfo={countyInfo}
         onConfirmed={onConfirmed}
+        refreshToken={refreshToken}
       />
+    </div>
+  );
+}
+
+// Generate Evidence Package — combines the real evidence documents Module 8
+// already matched to this case's checklist into one downloadable PDF, using
+// selectRelevantEvidence/buildEvidencePackagePdf (evidence-package.ts). The
+// user can add/remove/reorder before generating; saving it becomes the
+// Evidence submission's own real proof (FilingSubmissionFlow above), so
+// there's exactly one "Evidence Submitted" toggle, not a second one here.
+function EvidencePackageBuilder({
+  userId,
+  property,
+  protest,
+  evidenceDocuments,
+  onSaved,
+}: {
+  userId: string;
+  property: PropertyRecord;
+  protest: ProtestRecord;
+  evidenceDocuments: DocumentRecord[];
+  onSaved: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deadline, setDeadline] = useState<string | null>(null);
+  const [reminderFrequency, setReminderFrequencyState] = useState<ReminderFrequency>("daily");
+  const [generating, setGenerating] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBytes, setPreviewBytes] = useState<Uint8Array | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      getCachedModuleResult(property.id, "evidence"),
+      getLatestHearingNotice(protest.id),
+      getSubmission(protest.id, "evidence"),
+    ])
+      .then(([cached, notice, submission]) => {
+        if (!live) return;
+        const items = cached ? ((cached.result as ModuleResultMap["evidence"]).items ?? []) : null;
+        const preselected = selectRelevantEvidence(evidenceDocuments, items);
+        setSelectedIds((preselected.length > 0 ? preselected : evidenceDocuments).map((d) => d.id));
+        setDeadline(notice?.evidenceSubmissionDeadline ?? null);
+        setReminderFrequencyState(submission?.reminderFrequency ?? "daily");
+      })
+      .catch((err) => console.error("Could not prepare the evidence package builder:", err))
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+    // Runs once per property/case — evidenceDocuments changing (a fresh
+    // array reference on every parent render) shouldn't re-run this and
+    // silently reset an in-progress selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [property.id, protest.id]);
+
+  function toggle(id: string) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function moveUp(id: string) {
+    setSelectedIds((prev) => {
+      const i = prev.indexOf(id);
+      if (i <= 0) return prev;
+      const next = [...prev];
+      [next[i - 1], next[i]] = [next[i], next[i - 1]];
+      return next;
+    });
+  }
+  function moveDown(id: string) {
+    setSelectedIds((prev) => {
+      const i = prev.indexOf(id);
+      if (i === -1 || i >= prev.length - 1) return prev;
+      const next = [...prev];
+      [next[i + 1], next[i]] = [next[i], next[i + 1]];
+      return next;
+    });
+  }
+
+  async function handleGenerate() {
+    setGenerating(true);
+    try {
+      const selectedDocs = selectedIds
+        .map((id) => evidenceDocuments.find((d) => d.id === id))
+        .filter((d): d is DocumentRecord => !!d);
+      const files = [];
+      for (const d of selectedDocs) {
+        const url = await getDocumentUrl(d.storagePath);
+        const bytes = await fetch(url).then((r) => r.arrayBuffer());
+        files.push({ fileName: d.fileName, bytes });
+      }
+      const pdfBytes = await buildEvidencePackagePdf(files);
+      setPreviewBytes(pdfBytes);
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(new Blob([pdfBytes as BlobPart], { type: "application/pdf" }));
+      });
+      toast.success("Package generated — review it below.");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not generate the package."));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleSaveToDocuments() {
+    if (!previewBytes) return;
+    setSaving(true);
+    try {
+      const fileName = `Evidence-Package-${property.accountNumber ?? property.id}.pdf`;
+      const file = new File([previewBytes as BlobPart], fileName, { type: "application/pdf" });
+      await uploadDocument(userId, property.id, file, filingProofDocumentType("evidence"));
+      toast.success("Saved to Documents — this is now your Evidence proof.");
+      onSaved();
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleDownload() {
+    if (!previewBytes) return;
+    downloadPdf(previewBytes, `Evidence-Package-${property.accountNumber ?? property.id}.pdf`);
+  }
+
+  async function handleReminderChange(freq: ReminderFrequency) {
+    setReminderFrequencyState(freq);
+    try {
+      await saveReminderFrequency(userId, protest.id, "evidence", freq);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Could not save this."));
+    }
+  }
+
+  if (loading) {
+    return <p className="text-xs text-muted-foreground">Preparing the evidence package builder…</p>;
+  }
+
+  return (
+    <div className="rounded-md border border-border p-3 text-sm">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Generate Evidence Package
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Corvus pre-selected the documents Module 8 already matched to your case — add, remove, or
+        reorder before generating.
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {deadline
+          ? `Deadline: ${new Date(`${deadline}T00:00:00`).toLocaleDateString()}.`
+          : "Deadline not confirmed yet — check your hearing notice."}
+      </p>
+
+      <ul className="mt-2 grid gap-1">
+        {evidenceDocuments.map((d) => {
+          const idx = selectedIds.indexOf(d.id);
+          const checked = idx !== -1;
+          return (
+            <li
+              key={d.id}
+              className="flex items-center gap-2 rounded-md border border-border px-2 py-1 text-xs"
+            >
+              <input type="checkbox" checked={checked} onChange={() => toggle(d.id)} />
+              <span className="min-w-0 flex-1 truncate">{d.fileName}</span>
+              {checked && (
+                <div className="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => moveUp(d.id)}
+                    disabled={idx === 0}
+                    className="text-muted-foreground disabled:opacity-30"
+                    aria-label={`Move ${d.fileName} up`}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveDown(d.id)}
+                    disabled={idx === selectedIds.length - 1}
+                    className="text-muted-foreground disabled:opacity-30"
+                    aria-label={`Move ${d.fileName} down`}
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      <label className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        Remind me:
+        <select
+          value={reminderFrequency}
+          onChange={(e) => handleReminderChange(e.target.value as ReminderFrequency)}
+          className="rounded-md border border-input bg-background px-1.5 py-1 text-xs"
+        >
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+
+      <div>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={generating || selectedIds.length === 0}
+          className="btn-accent mt-3 text-xs py-1.5 disabled:opacity-60"
+        >
+          {generating ? "Generating…" : "Generate Package"}
+        </button>
+      </div>
+
+      {previewUrl && (
+        <div className="mt-3">
+          <iframe
+            title="Evidence package preview"
+            src={previewUrl}
+            className="h-64 w-full rounded-md border border-border"
+          />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleSaveToDocuments}
+              disabled={saving}
+              className="btn-accent text-xs py-1.5 disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save to Documents"}
+            </button>
+            <button type="button" onClick={handleDownload} className="btn-outline text-xs py-1.5">
+              Download
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
