@@ -357,6 +357,18 @@ export function currency(n?: number | null) {
   });
 }
 
+// Abbreviated form ($31K, $1.2M) for tight spaces (stat tiles, chart axes)
+// where the full currency() string would overflow or force truncation —
+// e.g. a real estimated-savings figure like $31,547 getting CSS-ellipsized
+// to "$31…" in a fixed-size dashboard tile is a genuine display bug, not
+// just a long number; this is the fix for that class of problem.
+export function compactCurrency(n?: number | null): string {
+  if (n == null) return "—";
+  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(n) >= 1_000) return `$${Math.round(n / 1000)}K`;
+  return currency(n);
+}
+
 export function displayVal(v: string | number | null | undefined): string {
   if (v === null || v === undefined || v === "") return "Data Not Found";
   return String(v);

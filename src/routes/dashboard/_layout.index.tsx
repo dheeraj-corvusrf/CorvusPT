@@ -30,7 +30,13 @@ import {
   Pie,
 } from "recharts";
 import { useAuth } from "@/lib/auth";
-import { currency, resetIntake, classifyAndStoreDocument, updateIntake } from "@/lib/intake-store";
+import {
+  currency,
+  compactCurrency,
+  resetIntake,
+  classifyAndStoreDocument,
+  updateIntake,
+} from "@/lib/intake-store";
 import { listProperties, type PropertyRecord } from "@/lib/properties";
 import { useSavingsBackfill } from "@/hooks/use-savings-backfill";
 import { useHealthScoreBackfill } from "@/hooks/use-health-score-backfill";
@@ -566,7 +572,7 @@ function Overview() {
           <StatCard
             label="Est. Savings"
             value={loaded ? estimatedSavings : null}
-            format={currency}
+            format={compactCurrency}
             delayMs={160}
             icon={TrendingDown}
             color={ICON_COLORS[5]}
