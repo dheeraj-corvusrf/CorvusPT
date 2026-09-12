@@ -21,6 +21,15 @@ export type PreFilingCheckItem = {
   status: "confirmed" | "missing" | "needs_review";
   // Set only for "needs_review" — the one-line explanation shown under the row.
   issue?: string;
+  // Which record the fix control should actually write to — defaults to
+  // "property" (every other blocking field lives only on the property row).
+  // The Tax Year row is the one exception: when the flagged problem is a
+  // real MISMATCH between the protest's own tax_year snapshot (captured
+  // once, at request time) and the property's current tax_year (e.g. a new
+  // CAD year rolled in while an older protest is still in progress),
+  // editing property.taxYear can never fix it — the property side is
+  // already correct; it's the protest's stale snapshot that needs updating.
+  resolveField?: "property" | "protest";
   // Blocking rows are this case's own real identity/deadline data — if any
   // are missing OR flagged needs_review, filing stops until they're fixed
   // (isPreFilingBlocked / PreFilingCheckSection enforce this). Non-blocking
@@ -38,11 +47,19 @@ function row(label: string, value: string | null, blocking: boolean): PreFilingC
 
 // Flip an already-built row to needs_review with an explanation. No-op if the
 // label isn't in the list (defensive — the labels are fixed above).
-function flag(items: PreFilingCheckItem[], label: string, issue: string): void {
+// resolveField overrides which record the row's fix control writes to (see
+// PreFilingCheckItem.resolveField) — omit it to keep the default "property".
+function flag(
+  items: PreFilingCheckItem[],
+  label: string,
+  issue: string,
+  resolveField?: "protest",
+): void {
   const it = items.find((i) => i.label === label);
   if (it) {
     it.status = "needs_review";
     it.issue = issue;
+    if (resolveField) it.resolveField = resolveField;
   }
 }
 
@@ -170,6 +187,7 @@ export function getPreFilingCheck(
       items,
       "Tax Year",
       `The protest is for tax year ${protest.taxYear}, but the property record shows ${property.taxYear} — confirm which year you're protesting.`,
+      "protest",
     );
   }
 

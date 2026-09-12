@@ -11,6 +11,7 @@ import {
 } from "@/lib/properties";
 import {
   acknowledgeGuidance,
+  updateProtestTaxYear,
   INFORMAL_STATUS_LABEL,
   type ProtestRecord,
   type InformalStatus,
@@ -1191,12 +1192,21 @@ function PreFilingCheckList({
   items,
   blocked,
   propertyId,
+  protestId,
+  propertyTaxYear,
   onFixed,
+  onProtestFixed,
 }: {
   items: PreFilingCheckItem[];
   blocked: boolean;
   propertyId: string;
+  protestId: string;
+  propertyTaxYear?: number | null;
   onFixed: (patch: Partial<PropertyRecord>) => void;
+  // Only ever needed for the Tax Year row's protest/property mismatch case
+  // (see resolveField in pre-filing-check.ts) — every other row fixes the
+  // property record via onFixed.
+  onProtestFixed: (patch: Partial<ProtestRecord>) => void;
 }) {
   return (
     <div>
@@ -1238,8 +1248,12 @@ function PreFilingCheckList({
                   label={item.label}
                   field={field.key}
                   inputType={field.type}
+                  resolveField={item.resolveField ?? "property"}
                   propertyId={propertyId}
+                  protestId={protestId}
+                  propertyTaxYear={propertyTaxYear}
                   onFixed={onFixed}
+                  onProtestFixed={onProtestFixed}
                 />
               )}
             </div>
@@ -1256,29 +1270,52 @@ function PreFilingCheckList({
 // could extract a real deadline from). Saves via updatePropertyIdentity and
 // bubbles the real updated field back up so PreFilingGate re-evaluates
 // immediately, same pattern as CaseProgress's forms.
+//
+// resolveField="protest" is the one exception (Tax Year's protest/property
+// mismatch — see resolveField in pre-filing-check.ts): editing the property
+// record there can never clear the flag, since the property side is already
+// correct and it's the protest's own stale tax_year snapshot that's wrong.
+// That case writes via updateProtestTaxYear instead, and is pre-filled with
+// the property's real current tax year so the user isn't left guessing what
+// to type.
 function PreFilingFixRow({
   label,
   field,
   inputType,
+  resolveField,
   propertyId,
+  protestId,
   onFixed,
+  onProtestFixed,
+  propertyTaxYear,
 }: {
   label: string;
   field: "cad" | "address" | "accountNumber" | "ownerName" | "taxYear" | "protestDeadline";
   inputType: "select" | "text" | "number" | "date";
+  resolveField: "property" | "protest";
   propertyId: string;
+  protestId: string;
   onFixed: (patch: Partial<PropertyRecord>) => void;
+  onProtestFixed: (patch: Partial<ProtestRecord>) => void;
+  propertyTaxYear?: number | null;
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(
+    resolveField === "protest" && propertyTaxYear != null ? String(propertyTaxYear) : "",
+  );
   const [saving, setSaving] = useState(false);
 
   async function handleSave() {
     if (!value.trim()) return;
     setSaving(true);
     try {
-      const patch = field === "taxYear" ? { taxYear: Number(value) } : { [field]: value };
-      const updated = await updatePropertyIdentity(propertyId, patch);
-      onFixed(updated);
+      if (resolveField === "protest") {
+        const updated = await updateProtestTaxYear(protestId, Number(value));
+        onProtestFixed(updated);
+      } else {
+        const patch = field === "taxYear" ? { taxYear: Number(value) } : { [field]: value };
+        const updated = await updatePropertyIdentity(propertyId, patch);
+        onFixed(updated);
+      }
       toast.success(`${label} saved.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `Could not save ${label}.`);
@@ -3053,7 +3090,10 @@ export function DocumentsSection({
             items={preFilingItems}
             blocked={preFilingBlocked}
             propertyId={property.id}
+            protestId={protest.id}
+            propertyTaxYear={property.taxYear}
             onFixed={onPropertyUpdate ?? (() => {})}
+            onProtestFixed={(patch) => onUpdate(patch)}
           />
           {preFilingBlocked ? (
             <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">

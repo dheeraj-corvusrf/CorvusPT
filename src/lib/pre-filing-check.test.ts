@@ -97,6 +97,19 @@ describe("getPreFilingCheck", () => {
     expect(row?.status).toBe("needs_review");
     expect(row?.issue).toContain(String(NOW_YEAR - 1));
     expect(isPreFilingBlocked(items)).toBe(true);
+    // The property's own tax year is already correct here — it's the
+    // protest's stale snapshot that needs fixing, so the row's fix control
+    // must write to the protest record, not re-edit the (already correct)
+    // property record. See updateProtestTaxYear in protests.ts.
+    expect(row?.resolveField).toBe("protest");
+  });
+
+  it("does not set resolveField when Tax Year is simply missing (not a mismatch)", () => {
+    const noTaxYear = { ...property, taxYear: null };
+    const items = getPreFilingCheck(noTaxYear, { ...protest, taxYear: null });
+    const row = items.find((i) => i.label === "Tax Year");
+    expect(row?.status).toBe("missing");
+    expect(row?.resolveField).toBeUndefined();
   });
 
   it("flags a blank CAD classification but does NOT block on it", () => {
