@@ -64,6 +64,18 @@ export const Route = createFileRoute("/dashboard/_layout/documents")({
   component: Documents,
 });
 
+// Same "N/M checked · K need a look" arithmetic PropertyDocGroup shows once
+// expanded — surfaced here too so the picker's own option text still tells
+// you which properties need attention without opening each one.
+function groupSummaryText(docs: DocumentRecord[]): string {
+  if (docs.length === 0) return "no documents";
+  const issues = docs.filter((d) => d.aiVerdict === "issues" || d.aiVerdict === "invalid").length;
+  const countLabel = `${docs.length} document${docs.length === 1 ? "" : "s"}`;
+  return issues > 0
+    ? `${countLabel} · ${issues} need${issues === 1 ? "s" : ""} a look`
+    : countLabel;
+}
+
 function Documents() {
   const { user } = useAuth();
   const [properties, setProperties] = useState<PropertyRecord[]>([]);
@@ -83,6 +95,12 @@ function Documents() {
   // persisted dup_reviewed flag) so a "Keep both" doesn't re-appear on the
   // next render before the round-trip lands.
   const [dupDismissed, setDupDismissed] = useState<Set<string>>(new Set());
+  // Which property's document group is showing below the picker — an account
+  // with many properties made a stacked card per property an unusably long
+  // page, so only the selected one's documents render at a time. Keyed by
+  // property id (or "orphaned" for documents whose property was removed),
+  // not the address, since two properties could share an address string.
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -404,20 +422,31 @@ function Documents() {
   // including properties with zero documents yet — each row carries its
   // own Upload button now, so an empty property still needs to be visible
   // to actually use it.
-  const groups: { label: string; docs: DocumentRecord[]; property: PropertyRecord | null }[] =
-    properties.map((property) => ({
-      label: property.address,
-      docs: documents.filter((d) => d.propertyId === property.id),
-      property,
-    }));
+  const groups: {
+    key: string;
+    label: string;
+    docs: DocumentRecord[];
+    property: PropertyRecord | null;
+  }[] = properties.map((property) => ({
+    key: property.id,
+    label: property.address,
+    docs: documents.filter((d) => d.propertyId === property.id),
+    property,
+  }));
   // Documents whose property was since removed still need to be reachable
   // — never silently dropped just because the grouping key no longer
   // resolves to a live property. No Upload button for this one (property
   // is null) — there's no live property left to attach a new file to.
   const orphanedDocs = documents.filter((d) => !properties.some((p) => p.id === d.propertyId));
   if (orphanedDocs.length > 0) {
-    groups.push({ label: "Property removed", docs: orphanedDocs, property: null });
+    groups.push({ key: "orphaned", label: "Property removed", docs: orphanedDocs, property: null });
   }
+  // Falls back to the first group whenever nothing is picked yet, or the
+  // previously-picked property no longer exists in `groups` (deleted, or
+  // this is the first render before properties have loaded) — never an
+  // empty picker once there's at least one group to show.
+  const activeGroup =
+    groups.find((g) => g.key === selectedGroupKey) ?? (groups.length > 0 ? groups[0] : null);
 
   return (
     <div>
@@ -524,10 +553,30 @@ function Documents() {
           </div>
         ) : groups.length > 0 ? (
           <div className="grid gap-4">
-            {groups.map((group) => (
+            <div className="card-elev p-4">
+              <label htmlFor="doc-property-picker" className="text-sm font-medium">
+                Property
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Pick a property to see its documents — {groups.length} on your account.
+              </p>
+              <select
+                id="doc-property-picker"
+                value={activeGroup?.key ?? ""}
+                onChange={(e) => setSelectedGroupKey(e.target.value)}
+                className="mt-2 w-full rounded-md border border-input bg-background px-2.5 py-2 text-sm"
+              >
+                {groups.map((group) => (
+                  <option key={group.key} value={group.key}>
+                    {group.label} — {groupSummaryText(group.docs)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {activeGroup && (
               <PropertyDocGroup
-                key={group.label}
-                group={group}
+                key={activeGroup.key}
+                group={activeGroup}
                 allDocs={documents}
                 dupDismissed={dupDismissed}
                 selectedIds={selectedIds}
@@ -544,12 +593,12 @@ function Documents() {
                 deletingId={deletingId}
                 analyzingIds={analyzingIds}
                 onUpload={(files) =>
-                  group.property && handleUploadToProperty(group.property, files)
+                  activeGroup.property && handleUploadToProperty(activeGroup.property, files)
                 }
-                uploading={uploadingPropertyId === group.property?.id}
-                defaultExpanded={groups.length === 1}
+                uploading={uploadingPropertyId === activeGroup.property?.id}
+                defaultExpanded
               />
-            ))}
+            )}
           </div>
         ) : (
           <div className="card-elev p-8 text-center">
